@@ -7,6 +7,12 @@ const PROJECT_PICKER_RENDER_LIMIT = 100;
 const CUSTOM_FIELD_KEYS_PER_PAGE = 26;
 const CUSTOM_FIELD_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
 const ACTIVITY_FEED_LIMIT = 150;
+const CONNECT_SHORTCUT = "Cmd+Option+Z";
+const INVITE_SEND_WITHOUT_NOTE_KEY = "w";
+const INVITE_ADD_NOTE_KEY = "n";
+const PROFILE_ACTION_BAND_TOP_OFFSET = 160;
+const PROFILE_ACTION_BAND_BOTTOM_OFFSET = 420;
+const PROFILE_ACTION_COLUMN_MAX_X_OFFSET = 520;
 
 function isContextInvalidatedError(message) {
   return /Extension context invalidated/i.test(String(message || ""));
@@ -1809,11 +1815,609 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
   }
 }
 
+function isConnectShortcut(event) {
+  if (!event || event.repeat) {
+    return false;
+  }
+  if (!(event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey)) {
+    return false;
+  }
+  if (String(event.code || "").toUpperCase() === "KEYZ") {
+    return true;
+  }
+  const key = String(event.key || "").trim().toLowerCase();
+  return key === "z" || key === "ω";
+}
+
+function isPlainLetterShortcut(event, letter) {
+  if (!event || event.repeat) {
+    return false;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+    return false;
+  }
+  return String(event.key || "").trim().toLowerCase() === String(letter || "").toLowerCase();
+}
+
+function isElementVisible(element) {
+  if (!element || typeof element.getBoundingClientRect !== "function") {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
+  }
+  const style = window.getComputedStyle(element);
+  if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+    return false;
+  }
+  return true;
+}
+
+function getElementLabel(element) {
+  if (!element) {
+    return "";
+  }
+  return [
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("title") || "",
+    element.innerText || "",
+    element.textContent || ""
+  ]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getVisibleInviteDecisionDialog() {
+  const candidates = Array.from(document.querySelectorAll("[role='dialog'], .artdeco-modal"));
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate)) {
+      continue;
+    }
+    const text = String(candidate.innerText || candidate.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    if (!text) {
+      continue;
+    }
+    if (text.includes("add a note to your invitation") && text.includes("send without a note")) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function findInviteDialogButton(dialog, matcher) {
+  if (!dialog || typeof matcher !== "function") {
+    return null;
+  }
+  const candidates = dialog.querySelectorAll("button, a[role='button'], [role='button']");
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
+      continue;
+    }
+    if (matcher(getElementLabel(candidate).toLowerCase())) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function handleInviteDecisionShortcut(event) {
+  const dialog = getVisibleInviteDecisionDialog();
+  if (!dialog) {
+    return false;
+  }
+
+  let targetButton = null;
+  let action = "";
+  if (isPlainLetterShortcut(event, INVITE_SEND_WITHOUT_NOTE_KEY)) {
+    targetButton = findInviteDialogButton(
+      dialog,
+      (label) =>
+        label.includes("send without a note") ||
+        (label.includes("send") && label.includes("without") && label.includes("note"))
+    );
+    action = "send-without-note";
+  } else if (isPlainLetterShortcut(event, INVITE_ADD_NOTE_KEY)) {
+    targetButton = findInviteDialogButton(
+      dialog,
+      (label) => label === "add a note" || label.includes("add a note")
+    );
+    action = "add-note";
+  } else {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (!targetButton) {
+    showToast("Could not find invite action button.", true);
+    logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "invite-shortcut.not-found",
+      runId: generateRunId(),
+      message: "Invite modal shortcut pressed, but target button was not found.",
+      link: window.location.href,
+      details: {
+        key: String(event.key || ""),
+        action
+      }
+    }).catch(() => {});
+    return true;
+  }
+
+  targetButton.click();
+  showToast(action === "add-note" ? "Add note selected." : "Send without note selected.");
+  logEvent({
+    source: "extension.content",
+    event: "invite-shortcut.triggered",
+    runId: generateRunId(),
+    message: `Triggered invite modal action: ${action}.`,
+    link: window.location.href,
+    details: {
+      key: String(event.key || ""),
+      action
+    }
+  }).catch(() => {});
+  return true;
+}
+
+function isConnectLabel(label) {
+  const normalized = String(label || "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes("connected") || normalized.includes("connection") || normalized.includes("disconnect")) {
+    return false;
+  }
+  if (normalized === "connect" || normalized.startsWith("connect ")) {
+    return true;
+  }
+  return normalized.includes("invite") && normalized.includes("connect");
+}
+
+function isMoreLabel(label) {
+  const normalized = String(label || "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized === "more" || normalized.includes("more actions");
+}
+
+function isPrimaryProfileActionLabel(label) {
+  const normalized = String(label || "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    isMoreLabel(normalized) ||
+    isConnectLabel(normalized) ||
+    normalized === "message" ||
+    normalized.startsWith("message ") ||
+    normalized === "follow" ||
+    normalized.startsWith("follow ") ||
+    normalized.includes("pending")
+  );
+}
+
+function isCandidateDisabled(candidate) {
+  if (!candidate) {
+    return true;
+  }
+  return (
+    candidate.getAttribute("disabled") !== null ||
+    candidate.getAttribute("aria-disabled") === "true" ||
+    candidate.classList.contains("artdeco-button--disabled")
+  );
+}
+
+function getProfileHeadingElement() {
+  return document.querySelector("main h1");
+}
+
+function getProfileHeadingRect(headingElement) {
+  if (!headingElement || typeof headingElement.getBoundingClientRect !== "function") {
+    return null;
+  }
+  return headingElement.getBoundingClientRect();
+}
+
+function isElementInProfileActionBand(element, headingRect) {
+  if (!headingRect) {
+    return true;
+  }
+  const rect = element.getBoundingClientRect();
+  const centerY = rect.top + rect.height / 2;
+  const minY = headingRect.top - PROFILE_ACTION_BAND_TOP_OFFSET;
+  const maxY = headingRect.bottom + PROFILE_ACTION_BAND_BOTTOM_OFFSET;
+  if (centerY < minY || centerY > maxY) {
+    return false;
+  }
+  const maxAllowedLeft = headingRect.right + PROFILE_ACTION_COLUMN_MAX_X_OFFSET;
+  if (rect.left > maxAllowedLeft) {
+    return false;
+  }
+  return true;
+}
+
+function describeElementForLog(element) {
+  if (!element || typeof element.getBoundingClientRect !== "function") {
+    return {
+      label: "",
+      tag: "",
+      className: "",
+      top: 0,
+      left: 0
+    };
+  }
+  const rect = element.getBoundingClientRect();
+  return {
+    label: getElementLabel(element).slice(0, 120),
+    tag: String(element.tagName || "").toLowerCase(),
+    className: String(element.className || "").slice(0, 180),
+    top: Math.round(rect.top),
+    left: Math.round(rect.left)
+  };
+}
+
+function isInsideRecommendationModule(element) {
+  if (!element) {
+    return false;
+  }
+  const blockedSectionTitles = [
+    "people similar",
+    "more profiles for you",
+    "people also viewed",
+    "people you may know"
+  ];
+  const blockedClassPatterns = /(right-rail|discovery|recommend|suggested|browsemap|ad-banner|ad-slot)/i;
+  const section = element.closest("section, aside, article");
+  if (section) {
+    const heading = section.querySelector("h2, h3, h4");
+    if (heading) {
+      const headingText = String(heading.textContent || "").trim().toLowerCase();
+      if (blockedSectionTitles.some((title) => headingText.includes(title))) {
+        return true;
+      }
+    }
+  }
+
+  let cursor = element;
+  while (cursor && cursor !== document.body) {
+    if (blockedClassPatterns.test(String(cursor.className || ""))) {
+      return true;
+    }
+    cursor = cursor.parentElement;
+  }
+  return false;
+}
+
+function findVisibleConnectControl(root = document, options = {}) {
+  const headingRect = options.headingRect || null;
+  const skipHeadingBand = Boolean(options.skipHeadingBand);
+  const selectors = [
+    "button",
+    "a[role='button']",
+    "[role='button']",
+    "[role='menuitem']",
+    "li[role='menuitem']",
+    ".artdeco-dropdown__item",
+    ".artdeco-dropdown__item-content"
+  ];
+  const candidates = root.querySelectorAll(selectors.join(","));
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
+      continue;
+    }
+    if (isInsideRecommendationModule(candidate)) {
+      continue;
+    }
+    if (!skipHeadingBand && !isElementInProfileActionBand(candidate, headingRect)) {
+      continue;
+    }
+    if (isConnectLabel(getElementLabel(candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function findVisibleMoreControl(root = document, options = {}) {
+  const headingRect = options.headingRect || null;
+  const selectors = [
+    "button",
+    "a[role='button']",
+    "[role='button']"
+  ];
+  const candidates = root.querySelectorAll(selectors.join(","));
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
+      continue;
+    }
+    if (isInsideRecommendationModule(candidate)) {
+      continue;
+    }
+    if (!isElementInProfileActionBand(candidate, headingRect)) {
+      continue;
+    }
+    if (isMoreLabel(getElementLabel(candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function getProfileTopCardRoot(headingElement, headingRect) {
+  if (!headingElement) {
+    return null;
+  }
+
+  const knownContainers = [
+    ".pv-top-card-v2-ctas",
+    ".pv-top-card__actions",
+    ".pvs-profile-actions",
+    ".pvs-profile-header__actions"
+  ];
+  for (const selector of knownContainers) {
+    const node = document.querySelector(`main ${selector}`);
+    if (!node) {
+      continue;
+    }
+    const rootCandidate = node.closest("section, article, div, main");
+    if (rootCandidate && rootCandidate.contains(headingElement)) {
+      return rootCandidate;
+    }
+  }
+
+  let cursor = headingElement.parentElement;
+  while (cursor && cursor.tagName !== "MAIN") {
+    const controls = cursor.querySelectorAll("button, a[role='button'], [role='button']");
+    let foundProfileAction = false;
+    for (const control of controls) {
+      if (!isElementVisible(control) || isCandidateDisabled(control)) {
+        continue;
+      }
+      if (!isElementInProfileActionBand(control, headingRect)) {
+        continue;
+      }
+      if (isPrimaryProfileActionLabel(getElementLabel(control))) {
+        foundProfileAction = true;
+        break;
+      }
+    }
+    if (foundProfileAction) {
+      return cursor;
+    }
+    cursor = cursor.parentElement;
+  }
+
+  return headingElement.closest("section") || headingElement.parentElement || null;
+}
+
+function getNodeCenter(node) {
+  const rect = node.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2
+  };
+}
+
+function getDistance(pointA, pointB) {
+  const dx = pointA.x - pointB.x;
+  const dy = pointA.y - pointB.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function getMenuScopesForMoreControl(moreControl) {
+  const scopes = [];
+  if (!moreControl) {
+    return scopes;
+  }
+
+  const controlsId = String(
+    moreControl.getAttribute("aria-controls") || moreControl.getAttribute("aria-owns") || ""
+  ).trim();
+  if (controlsId) {
+    const controlled = document.getElementById(controlsId);
+    if (controlled && isElementVisible(controlled)) {
+      scopes.push(controlled);
+    }
+  }
+
+  const localPopover = moreControl
+    .closest(".artdeco-dropdown, .artdeco-popover")
+    ?.querySelector(".artdeco-dropdown__content, .artdeco-popover__content, [role='menu']");
+  if (localPopover && isElementVisible(localPopover)) {
+    scopes.push(localPopover);
+  }
+
+  const menuSelectors = [
+    ".artdeco-dropdown__content:not([aria-hidden='true'])",
+    ".artdeco-popover__content",
+    "[role='menu']"
+  ];
+  const menuCandidates = Array.from(document.querySelectorAll(menuSelectors.join(","))).filter(isElementVisible);
+  if (menuCandidates.length > 0) {
+    const moreCenter = getNodeCenter(moreControl);
+    menuCandidates.sort((a, b) => getDistance(getNodeCenter(a), moreCenter) - getDistance(getNodeCenter(b), moreCenter));
+    scopes.push(menuCandidates[0]);
+  }
+
+  return Array.from(new Set(scopes));
+}
+
+function waitFor(milliseconds) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function waitForConnectInMenuForControl(moreControl, timeoutMs = 1600) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const menuScopes = getMenuScopesForMoreControl(moreControl);
+    for (const scope of menuScopes) {
+      const menuConnect = findVisibleConnectControl(scope, { skipHeadingBand: true });
+      if (menuConnect) {
+        return menuConnect;
+      }
+    }
+    await waitFor(50);
+  }
+  return null;
+}
+
+async function triggerConnectShortcut(runId) {
+  const headingElement = getProfileHeadingElement();
+  const headingRect = getProfileHeadingRect(headingElement);
+  if (!headingElement || !headingRect) {
+    showToast("Couldn't find profile actions for this person.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "connect-shortcut.not-found",
+      runId,
+      message: "Could not locate profile heading for current profile.",
+      link: window.location.href,
+      details: {
+        shortcut: CONNECT_SHORTCUT
+      }
+    });
+    return;
+  }
+
+  const topCardRoot = getProfileTopCardRoot(headingElement, headingRect);
+  if (!topCardRoot) {
+    showToast("Couldn't find profile actions for this person.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "connect-shortcut.not-found",
+      runId,
+      message: "Could not resolve top-card action root for current profile.",
+      link: window.location.href,
+      details: {
+        shortcut: CONNECT_SHORTCUT,
+        headingTop: Math.round(headingRect.top),
+        headingBottom: Math.round(headingRect.bottom)
+      }
+    });
+    return;
+  }
+
+  const directConnect = findVisibleConnectControl(topCardRoot, { headingRect });
+  if (directConnect) {
+    const clicked = describeElementForLog(directConnect);
+    directConnect.click();
+    showToast("Connect action triggered.");
+    await logEvent({
+      source: "extension.content",
+      event: "connect-shortcut.triggered",
+      runId,
+      message: `Triggered profile connect action via ${CONNECT_SHORTCUT}.`,
+      link: window.location.href,
+      details: {
+        shortcut: CONNECT_SHORTCUT,
+        method: "direct",
+        clicked
+      }
+    });
+    return;
+  }
+
+  const moreControl = findVisibleMoreControl(topCardRoot, { headingRect });
+  if (!moreControl) {
+    showToast("Couldn't find a Connect action on this profile.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "connect-shortcut.not-found",
+      runId,
+      message: "Could not find direct Connect button or More actions menu.",
+      link: window.location.href,
+      details: {
+        shortcut: CONNECT_SHORTCUT,
+        headingTop: Math.round(headingRect.top),
+        headingBottom: Math.round(headingRect.bottom)
+      }
+    });
+    return;
+  }
+
+  moreControl.click();
+  const menuConnect = await waitForConnectInMenuForControl(moreControl);
+  if (menuConnect) {
+    const clicked = describeElementForLog(menuConnect);
+    menuConnect.click();
+    showToast("Connect action triggered.");
+    await logEvent({
+      source: "extension.content",
+      event: "connect-shortcut.triggered",
+      runId,
+      message: `Triggered profile connect action via ${CONNECT_SHORTCUT}.`,
+      link: window.location.href,
+      details: {
+        shortcut: CONNECT_SHORTCUT,
+        method: "more-menu",
+        clicked
+      }
+    });
+    return;
+  }
+
+  showToast("Opened More menu, but couldn't find Connect.", true);
+  await logEvent({
+    source: "extension.content",
+    level: "warn",
+    event: "connect-shortcut.not-found",
+    runId,
+    message: "Opened More actions menu but did not find Connect entry.",
+    link: window.location.href,
+    details: {
+      shortcut: CONNECT_SHORTCUT
+    }
+  });
+}
+
 function onKeyDown(event) {
-  if (!cachedSettings || !isLinkedInProfilePage()) {
+  if (!isLinkedInProfilePage()) {
     return;
   }
   if (isEditableElement(event.target)) {
+    return;
+  }
+
+  if (handleInviteDecisionShortcut(event)) {
+    return;
+  }
+
+  if (isConnectShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    triggerConnectShortcut(runId).catch((error) => {
+      showToast(error.message || "Could not run Connect shortcut.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "connect-shortcut.exception",
+        runId,
+        message: error.message || "Unexpected Connect shortcut error.",
+        link: window.location.href,
+        details: {
+          shortcut: CONNECT_SHORTCUT
+        }
+      });
+    });
+    return;
+  }
+
+  if (!cachedSettings) {
     return;
   }
 
