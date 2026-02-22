@@ -55,6 +55,7 @@ const LOG_FILE = path.join(LOG_DIR, "events.jsonl");
 const LOG_MAX_BYTES = Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024);
 const PROJECTS_SCAN_MAX = Number(process.env.PROJECTS_SCAN_MAX || 20000);
 const SEQUENCES_SCAN_MAX = Number(process.env.SEQUENCES_SCAN_MAX || 20000);
+const ASHBY_JOBS_SCAN_MAX = Number(process.env.ASHBY_JOBS_SCAN_MAX || 5000);
 const ASHBY_WRITE_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.ASHBY_WRITE_ENABLED || "false").trim());
 const ASHBY_WRITE_REQUIRE_CONFIRMATION = !/^(0|false|no|off)$/i.test(
   String(process.env.ASHBY_WRITE_REQUIRE_CONFIRMATION || "true").trim()
@@ -64,7 +65,7 @@ const ASHBY_WRITE_DEFAULT_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_ASHBY";
 const ASHBY_WRITE_ALLOWED_METHODS = new Set(
   String(
     process.env.ASHBY_WRITE_ALLOWED_METHODS ||
-      "candidate.create,candidate.addProject,customField.setValue,customField.setValues,candidate.createNote"
+      "candidate.create,application.create,application.changeStage,application.changeSource"
   )
     .split(",")
     .map((value) => value.trim())
@@ -358,6 +359,17 @@ function assertSafeAshbyWrite(methodName, payload, audit = {}, options = {}) {
 
 function getAshbyAuthHeader() {
   return `Basic ${Buffer.from(`${ASHBY_API_KEY}:`).toString("base64")}`;
+}
+
+function getAshbyWriteOptions() {
+  if (ASHBY_WRITE_REQUIRE_CONFIRMATION && !ASHBY_WRITE_CONFIRMATION_TOKEN) {
+    throw new Error(
+      "Ashby writes require confirmation token. Set ASHBY_WRITE_CONFIRMATION_TOKEN in backend env."
+    );
+  }
+  return {
+    writeConfirmation: ASHBY_WRITE_CONFIRMATION_TOKEN
+  };
 }
 
 async function ashbyRequest(methodName, payload = {}, audit = {}, options = {}) {
@@ -669,26 +681,68 @@ async function addCandidateToProject(payload, audit) {
   if (!projectId || !candidateId) {
     throw new Error("projectId and candidateId are required.");
   }
-  const userId = await resolveCreatedByUserId(payload.userId, audit);
+  const userId = String(payload.userId || "").trim();
+
+  const baseBody = { candidate_ids: [candidateId] };
+
   if (!userId) {
-    throw new Error(
-      "Gem requires user_id for project attribution. Set createdByUserId in extension options or GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env."
+    await gemRequest(
+      `/v0/projects/${projectId}/candidates`,
+      {
+        method: "PUT",
+        body: baseBody
+      },
+      audit
     );
+    return { projectId, candidateId, userId: "" };
   }
 
-  await gemRequest(
-    `/v0/projects/${projectId}/candidates`,
-    {
-      method: "PUT",
-      body: omitUndefined({
-        candidate_ids: [candidateId],
-        user_id: userId
-      })
-    },
-    audit
-  );
+  try {
+    await gemRequest(
+      `/v0/projects/${projectId}/candidates`,
+      {
+        method: "PUT",
+        body: {
+          ...baseBody,
+          user_id: userId
+        }
+      },
+      audit
+    );
+    return { projectId, candidateId, userId };
+  } catch (error) {
+    const message = String(error?.data?.message || error?.message || "");
+    const lacksWriteAccess = /permission to perform the action|write access/i.test(message);
+    if (!lacksWriteAccess) {
+      throw error;
+    }
 
-  return { projectId, candidateId, userId };
+    logEvent({
+      level: "warn",
+      source: "backend",
+      event: "project.add_candidate.user_id_fallback",
+      message: "Retrying project add without user_id after permission error.",
+      requestId: audit.requestId,
+      route: audit.route,
+      runId: audit.runId,
+      actionId: audit.actionId,
+      details: {
+        projectId,
+        candidateId,
+        attemptedUserId: userId
+      }
+    });
+
+    await gemRequest(
+      `/v0/projects/${projectId}/candidates`,
+      {
+        method: "PUT",
+        body: baseBody
+      },
+      audit
+    );
+    return { projectId, candidateId, userId: "" };
+  }
 }
 
 async function listProjects(payload, audit) {
@@ -1346,11 +1400,518 @@ async function recentLogs(payload) {
   return { logs: readRecentLogs(limit) };
 }
 
+function normalizeTextToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeProfileUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "").toLowerCase();
+  } catch (_error) {
+    return raw.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+  }
+}
+
+function normalizeLinkedInUrl(value) {
+  const normalized = normalizeProfileUrl(value);
+  if (!normalized) {
+    return "";
+  }
+  return normalized
+    .replace(/^https?:\/\/(www\.)?/, "")
+    .replace(/^linkedin\.com\/in\//, "linkedin.com/in/")
+    .replace(/^linkedin\.com\/pub\//, "linkedin.com/pub/");
+}
+
+function buildLinkedInUrlFromHandle(handle) {
+  const clean = String(handle || "")
+    .trim()
+    .replace(/^@/, "");
+  if (!clean) {
+    return "";
+  }
+  return `https://www.linkedin.com/in/${encodeURIComponent(clean)}`;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function extractGemCandidateEmail(candidate) {
+  const direct = firstNonEmpty(candidate?.email, candidate?.primary_email, candidate?.email_address);
+  if (direct) {
+    return direct;
+  }
+  const emails = Array.isArray(candidate?.emails) ? candidate.emails : [];
+  for (const item of emails) {
+    if (typeof item === "string" && item.trim()) {
+      return item.trim();
+    }
+    if (item && typeof item === "object") {
+      const fromObject = firstNonEmpty(item.email, item.value, item.address);
+      if (fromObject) {
+        return fromObject;
+      }
+    }
+  }
+  return "";
+}
+
+function extractGemCandidatePhone(candidate) {
+  const direct = firstNonEmpty(candidate?.phone, candidate?.phone_number, candidate?.primary_phone);
+  if (direct) {
+    return direct;
+  }
+  const phones = Array.isArray(candidate?.phones) ? candidate.phones : [];
+  for (const item of phones) {
+    if (typeof item === "string" && item.trim()) {
+      return item.trim();
+    }
+    if (item && typeof item === "object") {
+      const fromObject = firstNonEmpty(item.number, item.value, item.phone, item.phoneNumber);
+      if (fromObject) {
+        return fromObject;
+      }
+    }
+  }
+  return "";
+}
+
+function extractGemCandidateLinkedInUrl(candidate) {
+  const profileUrls = Array.isArray(candidate?.profile_urls) ? candidate.profile_urls : [];
+  for (const url of profileUrls) {
+    const normalized = normalizeLinkedInUrl(url);
+    if (normalized.includes("linkedin.com/in/") || normalized.includes("linkedin.com/pub/")) {
+      return String(url || "").trim();
+    }
+  }
+  const handleUrl = buildLinkedInUrlFromHandle(candidate?.linked_in_handle || candidate?.linkedInHandle || "");
+  if (handleUrl) {
+    return handleUrl;
+  }
+  return "";
+}
+
+function buildAshbyProfileUrl(rawUrl, candidateId = "") {
+  const clean = String(rawUrl || "").trim();
+  if (clean.startsWith("http://") || clean.startsWith("https://")) {
+    return clean;
+  }
+  if (clean.startsWith("/")) {
+    return `https://app.ashbyhq.com${clean}`;
+  }
+  if (clean) {
+    return `https://app.ashbyhq.com/${clean}`;
+  }
+  if (candidateId) {
+    return `https://app.ashbyhq.com/candidates/${encodeURIComponent(candidateId)}`;
+  }
+  return "";
+}
+
+function summarizeGemCandidateForAshby(candidate, fallbackName = "") {
+  const name = firstNonEmpty(
+    `${String(candidate?.first_name || "").trim()} ${String(candidate?.last_name || "").trim()}`.trim(),
+    candidate?.name,
+    fallbackName
+  );
+  return {
+    gemCandidateId: String(candidate?.id || ""),
+    name,
+    email: extractGemCandidateEmail(candidate),
+    phoneNumber: extractGemCandidatePhone(candidate),
+    linkedInUrl: extractGemCandidateLinkedInUrl(candidate),
+    gemProfileUrl: firstNonEmpty(candidate?.weblink, candidate?.profile_url)
+  };
+}
+
+function getAshbyCandidateLinkedInUrl(candidate) {
+  const links = Array.isArray(candidate?.socialLinks) ? candidate.socialLinks : [];
+  for (const link of links) {
+    if (!link || typeof link !== "object") {
+      continue;
+    }
+    const type = normalizeTextToken(link.type);
+    if (type !== "linkedin") {
+      continue;
+    }
+    const url = String(link.url || "").trim();
+    if (url) {
+      return url;
+    }
+  }
+  return "";
+}
+
+function getAshbyCandidateEmails(candidate) {
+  const emails = [];
+  const primary = firstNonEmpty(candidate?.primaryEmailAddress?.value);
+  if (primary) {
+    emails.push(primary);
+  }
+  const all = Array.isArray(candidate?.emailAddresses) ? candidate.emailAddresses : [];
+  for (const item of all) {
+    const value = firstNonEmpty(item?.value);
+    if (value) {
+      emails.push(value);
+    }
+  }
+  return Array.from(new Set(emails.map((email) => email.toLowerCase())));
+}
+
+function pickBestAshbyCandidateMatch(candidates, seed) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (list.length === 0) {
+    return null;
+  }
+  const linkedInUrl = normalizeLinkedInUrl(seed?.linkedInUrl || "");
+  const email = normalizeTextToken(seed?.email || "");
+  const name = normalizeTextToken(seed?.name || "");
+
+  if (linkedInUrl) {
+    const byLinkedIn = list.find((candidate) => normalizeLinkedInUrl(getAshbyCandidateLinkedInUrl(candidate)) === linkedInUrl);
+    if (byLinkedIn) {
+      return byLinkedIn;
+    }
+  }
+
+  if (email) {
+    const byEmail = list.find((candidate) => getAshbyCandidateEmails(candidate).includes(email));
+    if (byEmail) {
+      return byEmail;
+    }
+  }
+
+  if (name) {
+    const byName = list.find((candidate) => normalizeTextToken(candidate?.name || "") === name);
+    if (byName) {
+      return byName;
+    }
+  }
+
+  return list[0];
+}
+
+function pickPreferredAshbyStage(stages) {
+  const normalizedStages = Array.isArray(stages) ? stages : [];
+  if (normalizedStages.length === 0) {
+    return { stage: null, strategy: "none" };
+  }
+
+  const byRecruitingScreen = normalizedStages.find((stage) => normalizeTextToken(stage?.title) === "recruiting screen");
+  if (byRecruitingScreen) {
+    return { stage: byRecruitingScreen, strategy: "recruiting_screen_exact" };
+  }
+
+  const byRecruitingScreenContains = normalizedStages.find((stage) =>
+    normalizeTextToken(stage?.title).includes("recruiting screen")
+  );
+  if (byRecruitingScreenContains) {
+    return { stage: byRecruitingScreenContains, strategy: "recruiting_screen_contains" };
+  }
+
+  const byLead = normalizedStages.find((stage) => normalizeTextToken(stage?.title) === "lead");
+  if (byLead) {
+    return { stage: byLead, strategy: "lead_exact" };
+  }
+
+  const byLeadContains = normalizedStages.find((stage) => normalizeTextToken(stage?.title).includes("lead"));
+  if (byLeadContains) {
+    return { stage: byLeadContains, strategy: "lead_contains" };
+  }
+
+  const earliest = normalizedStages
+    .slice()
+    .sort((a, b) => (Number(a?.orderInInterviewPlan) || 0) - (Number(b?.orderInInterviewPlan) || 0))[0];
+  return { stage: earliest || null, strategy: "earliest_by_order" };
+}
+
+async function listAshbyJobs(payload, audit) {
+  const query = String(payload?.query || "").trim().toLowerCase();
+  const requestedLimitRaw = Number(payload?.limit);
+  const requestedLimit =
+    Number.isFinite(requestedLimitRaw) && requestedLimitRaw > 0
+      ? Math.max(1, Math.min(requestedLimitRaw, ASHBY_JOBS_SCAN_MAX))
+      : 0;
+  const scanTarget = requestedLimit || ASHBY_JOBS_SCAN_MAX;
+  const pageSize = Math.min(100, scanTarget);
+
+  let cursor = "";
+  let moreData = true;
+  let iterations = 0;
+  const aggregated = [];
+
+  while (moreData && aggregated.length < scanTarget && iterations < 200) {
+    const body = {
+      limit: pageSize
+    };
+    if (cursor) {
+      body.cursor = cursor;
+    }
+    const response = await ashbyRequest("job.list", body, audit);
+    const rows = Array.isArray(response?.results) ? response.results : [];
+    aggregated.push(...rows);
+    moreData = Boolean(response?.moreDataAvailable);
+    cursor = String(response?.nextCursor || "");
+    iterations += 1;
+    if (!cursor && moreData) {
+      break;
+    }
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const raw of aggregated) {
+    const id = String(raw?.id || "").trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    const title = firstNonEmpty(raw?.title, raw?.name, id);
+    const status = firstNonEmpty(raw?.status, raw?.state, raw?.jobState, "");
+    const item = {
+      id,
+      name: title,
+      title,
+      status,
+      isArchived: Boolean(raw?.isArchived || normalizeTextToken(status) === "archived"),
+      updatedAt: firstNonEmpty(raw?.updatedAt, raw?.createdAt, "")
+    };
+    deduped.push(item);
+  }
+
+  let filtered = deduped;
+  if (query) {
+    filtered = filtered.filter((job) => normalizeTextToken(job.name).includes(query));
+  }
+
+  filtered.sort((a, b) => {
+    const aArchived = a.isArchived ? 1 : 0;
+    const bArchived = b.isArchived ? 1 : 0;
+    if (aArchived !== bArchived) {
+      return aArchived - bArchived;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  if (requestedLimit > 0) {
+    filtered = filtered.slice(0, requestedLimit);
+  }
+
+  return { jobs: filtered };
+}
+
+async function findAshbySourceIdByTitle(sourceTitle, audit) {
+  const target = normalizeTextToken(sourceTitle);
+  if (!target) {
+    return "";
+  }
+  const response = await ashbyRequest("source.list", { includeArchived: false }, audit);
+  const list = Array.isArray(response?.results) ? response.results : [];
+  const exact = list.find((source) => normalizeTextToken(source?.title) === target);
+  if (exact?.id) {
+    return String(exact.id);
+  }
+  const contains = list.find((source) => normalizeTextToken(source?.title).includes(target));
+  if (contains?.id) {
+    return String(contains.id);
+  }
+  return "";
+}
+
+async function findOrCreateAshbyCandidateFromGemCandidate(seed, sourceId, audit) {
+  const searchCandidates = [];
+  const email = String(seed?.email || "").trim();
+  const name = String(seed?.name || "").trim();
+  if (email) {
+    const byEmail = await ashbyRequest("candidate.search", { email }, audit);
+    searchCandidates.push(...(Array.isArray(byEmail?.results) ? byEmail.results : []));
+  }
+  if (name) {
+    const byName = await ashbyRequest("candidate.search", { name }, audit);
+    searchCandidates.push(...(Array.isArray(byName?.results) ? byName.results : []));
+  }
+
+  const existing = pickBestAshbyCandidateMatch(searchCandidates, seed);
+  if (existing?.id) {
+    return { candidate: existing, created: false };
+  }
+
+  const createPayload = {
+    name: name || "Unknown Candidate"
+  };
+  if (email) {
+    createPayload.email = email;
+  }
+  if (seed?.phoneNumber) {
+    createPayload.phoneNumber = String(seed.phoneNumber);
+  }
+  if (seed?.linkedInUrl) {
+    createPayload.linkedInUrl = String(seed.linkedInUrl);
+  }
+  if (sourceId) {
+    createPayload.sourceId = sourceId;
+  }
+  // We intentionally omit creditedToUserId so Ashby attributes this write to the API key caller.
+  const created = await ashbyRequest("candidate.create", createPayload, audit, getAshbyWriteOptions());
+  return { candidate: created?.results || {}, created: true };
+}
+
+async function findExistingApplicationForJob(candidateId, jobId, audit) {
+  const candidateInfo = await ashbyRequest("candidate.info", { id: candidateId }, audit);
+  const applicationIds = Array.isArray(candidateInfo?.results?.applicationIds) ? candidateInfo.results.applicationIds : [];
+  for (const idRaw of applicationIds.slice(0, 200)) {
+    const applicationId = String(idRaw || "").trim();
+    if (!applicationId) {
+      continue;
+    }
+    try {
+      const applicationInfo = await ashbyRequest("application.info", { applicationId }, audit);
+      const application = applicationInfo?.results;
+      if (String(application?.job?.id || "") === String(jobId)) {
+        return application;
+      }
+    } catch (_error) {
+      // Ignore bad application ids and continue scanning existing applications.
+    }
+  }
+  return null;
+}
+
+async function resolvePreferredStageForJob(jobId, audit) {
+  const plan = await ashbyRequest("jobInterviewPlan.info", { jobId }, audit);
+  const interviewPlanId = String(plan?.results?.interviewPlanId || "");
+  const stages = Array.isArray(plan?.results?.stages) ? plan.results.stages : [];
+  const picked = pickPreferredAshbyStage(stages);
+  return {
+    interviewPlanId,
+    stageId: String(picked?.stage?.id || ""),
+    stageTitle: String(picked?.stage?.title || ""),
+    strategy: String(picked?.strategy || "")
+  };
+}
+
+async function uploadGemCandidateToAshby(payload, audit) {
+  const gemCandidateId = String(payload?.gemCandidateId || "").trim();
+  const jobId = String(payload?.jobId || "").trim();
+  const jobName = String(payload?.jobName || "").trim();
+  if (!gemCandidateId) {
+    throw new Error("gemCandidateId is required.");
+  }
+  if (!jobId) {
+    throw new Error("jobId is required.");
+  }
+
+  const gemCandidate = await gemRequest(`/v0/candidates/${gemCandidateId}`, {}, audit);
+  if (!gemCandidate?.id) {
+    throw new Error("Could not load candidate details from Gem.");
+  }
+  const seed = summarizeGemCandidateForAshby(gemCandidate, String(payload?.profileName || ""));
+  const sourceId = await findAshbySourceIdByTitle("Sourced: Gem", audit);
+  const preferredStage = await resolvePreferredStageForJob(jobId, audit);
+  const { candidate: ashbyCandidate, created } = await findOrCreateAshbyCandidateFromGemCandidate(seed, sourceId, audit);
+  const ashbyCandidateId = String(ashbyCandidate?.id || "").trim();
+  if (!ashbyCandidateId) {
+    throw new Error("Ashby candidate resolution failed.");
+  }
+
+  let application = await findExistingApplicationForJob(ashbyCandidateId, jobId, audit);
+  let applicationCreated = false;
+
+  if (!application) {
+    const createApplicationPayload = {
+      candidateId: ashbyCandidateId,
+      jobId
+    };
+    if (sourceId) {
+      createApplicationPayload.sourceId = sourceId;
+    }
+    if (preferredStage.stageId) {
+      createApplicationPayload.interviewStageId = preferredStage.stageId;
+      if (preferredStage.interviewPlanId) {
+        createApplicationPayload.interviewPlanId = preferredStage.interviewPlanId;
+      }
+    }
+    const createdApplication = await ashbyRequest(
+      "application.create",
+      createApplicationPayload,
+      audit,
+      getAshbyWriteOptions()
+    );
+    application = createdApplication?.results || null;
+    applicationCreated = true;
+  } else {
+    const applicationId = String(application?.id || "").trim();
+    if (applicationId && sourceId && String(application?.source?.id || "") !== sourceId) {
+      await ashbyRequest(
+        "application.changeSource",
+        { applicationId, sourceId },
+        audit,
+        getAshbyWriteOptions()
+      );
+    }
+    if (applicationId && preferredStage.stageId && String(application?.currentInterviewStage?.id || "") !== preferredStage.stageId) {
+      await ashbyRequest(
+        "application.changeStage",
+        { applicationId, interviewStageId: preferredStage.stageId },
+        audit,
+        getAshbyWriteOptions()
+      );
+    }
+    if (applicationId) {
+      const refreshed = await ashbyRequest("application.info", { applicationId }, audit);
+      application = refreshed?.results || application;
+    }
+  }
+
+  let candidateProfileUrl = buildAshbyProfileUrl(ashbyCandidate?.profileUrl, ashbyCandidateId);
+  if (!candidateProfileUrl) {
+    const refreshedCandidate = await ashbyRequest("candidate.info", { id: ashbyCandidateId }, audit);
+    candidateProfileUrl = buildAshbyProfileUrl(refreshedCandidate?.results?.profileUrl, ashbyCandidateId);
+  }
+
+  const stageTitle = firstNonEmpty(application?.currentInterviewStage?.title, preferredStage.stageTitle);
+  const uploadMessage = `Uploaded candidate to Ashby${jobName ? ` (${jobName})` : ""}${
+    stageTitle ? ` in stage ${stageTitle}` : ""
+  }.`;
+
+  return {
+    message: uploadMessage,
+    link: candidateProfileUrl,
+    sourceApplied: Boolean(sourceId),
+    stageId: preferredStage.stageId,
+    stageTitle,
+    stageSelectionStrategy: preferredStage.strategy,
+    ashbyCandidateId,
+    ashbyApplicationId: String(application?.id || ""),
+    gemCandidateId: String(gemCandidate.id || gemCandidateId),
+    candidateCreatedInAshby: Boolean(created),
+    applicationCreatedInAshby: Boolean(applicationCreated)
+  };
+}
+
 const routes = {
   "/api/candidates/find-by-linkedin": (payload, audit) => findCandidateByLinkedIn(payload.linkedInHandle, audit),
   "/api/candidates/create-from-linkedin": createCandidateFromLinkedIn,
   "/api/projects/add-candidate": addCandidateToProject,
   "/api/projects/list": listProjects,
+  "/api/ashby/jobs/list": listAshbyJobs,
+  "/api/ashby/upload-candidate": uploadGemCandidateToAshby,
   "/api/custom-fields/list": listCustomFields,
   "/api/candidates/set-custom-field": setCandidateCustomField,
   "/api/candidates/set-due-date": setCandidateDueDate,

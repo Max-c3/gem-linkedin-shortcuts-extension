@@ -4,6 +4,7 @@ let cachedSettings = null;
 let toastContainer = null;
 let contextRecoveryTriggered = false;
 const PROJECT_PICKER_RENDER_LIMIT = 100;
+const ASHBY_JOB_PICKER_RENDER_LIMIT = 100;
 const CUSTOM_FIELD_KEYS_PER_PAGE = 26;
 const CUSTOM_FIELD_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
 const SEQUENCE_PICKER_KEYS_PER_PAGE = 26;
@@ -17,7 +18,9 @@ const PROFILE_ACTION_BAND_BOTTOM_OFFSET = 420;
 const PROFILE_ACTION_COLUMN_MAX_X_OFFSET = 520;
 
 function isContextInvalidatedError(message) {
-  return /Extension context invalidated/i.test(String(message || ""));
+  return /Extension context invalidated|Receiving end does not exist|The message port closed before a response was received/i.test(
+    String(message || "")
+  );
 }
 
 function triggerContextRecovery(message) {
@@ -146,6 +149,72 @@ function showToast(text, isError = false) {
   }, 2800);
 }
 
+function showAshbyUploadResultCard(url, message = "") {
+  const container = ensureToastContainer();
+  const card = document.createElement("div");
+  card.style.background = "#ffffff";
+  card.style.color = "#1f2328";
+  card.style.padding = "10px 12px";
+  card.style.borderRadius = "8px";
+  card.style.fontSize = "13px";
+  card.style.fontFamily = "-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif";
+  card.style.boxShadow = "0 6px 18px rgba(0,0,0,0.2)";
+  card.style.maxWidth = "360px";
+  card.style.border = "1px solid #d4dae3";
+
+  const title = document.createElement("div");
+  title.style.fontWeight = "600";
+  title.style.marginBottom = "6px";
+  title.textContent = message || "Candidate uploaded to Ashby.";
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noreferrer noopener";
+  link.textContent = url;
+  link.style.display = "block";
+  link.style.wordBreak = "break-all";
+  link.style.marginBottom = "8px";
+  link.style.color = "#0b57d0";
+
+  const hint = document.createElement("div");
+  hint.style.fontSize = "12px";
+  hint.style.color = "#5b6168";
+  hint.textContent = "Press O or Enter to open Ashby profile.";
+
+  card.appendChild(title);
+  card.appendChild(link);
+  card.appendChild(hint);
+  container.appendChild(card);
+
+  function openLink() {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  const onKeyDown = (event) => {
+    if (event.key === "Enter" || String(event.key || "").trim().toLowerCase() === "o") {
+      event.preventDefault();
+      openLink();
+    }
+  };
+  window.addEventListener("keydown", onKeyDown, true);
+
+  const removeCard = () => {
+    window.removeEventListener("keydown", onKeyDown, true);
+    card.remove();
+  };
+
+  card.addEventListener("click", (event) => {
+    const target = event.target;
+    if (target && target.tagName === "A") {
+      return;
+    }
+    openLink();
+  });
+
+  setTimeout(removeCard, 12000);
+}
+
 function getSettings() {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (response) => {
@@ -222,6 +291,36 @@ function listProjects(query, runId) {
           return;
         }
         resolve(Array.isArray(response.projects) ? response.projects : []);
+      }
+    );
+  });
+}
+
+function listAshbyJobs(query, runId) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "LIST_ASHBY_JOBS",
+        query: String(query || ""),
+        limit: 0,
+        runId: runId || ""
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not load Ashby jobs"));
+          return;
+        }
+        resolve(Array.isArray(response.jobs) ? response.jobs : []);
       }
     );
   });
@@ -500,6 +599,134 @@ function createProjectPickerStyles() {
       color: #5b6168;
     }
     .gem-project-picker-empty {
+      padding: 12px;
+      font-size: 13px;
+      color: #5b6168;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function createAshbyJobPickerStyles() {
+  if (document.getElementById("gem-ashby-job-picker-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gem-ashby-job-picker-style";
+  style.textContent = `
+    #gem-ashby-job-picker-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #gem-ashby-job-picker-modal {
+      width: min(680px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #1f2328;
+      position: relative;
+    }
+    #gem-ashby-job-picker-brand {
+      position: absolute;
+      top: 12px;
+      right: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #4f5358;
+      user-select: none;
+    }
+    #gem-ashby-job-picker-brand-dot {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      background: #4b3fa8;
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    #gem-ashby-job-picker-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    #gem-ashby-job-picker-subtitle {
+      font-size: 13px;
+      color: #4f5358;
+      margin-bottom: 12px;
+    }
+    #gem-ashby-job-picker-input {
+      width: 100%;
+      border: 1px solid #b6beca;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    #gem-ashby-job-picker-results {
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      max-height: 280px;
+      overflow: auto;
+      background: #fff;
+    }
+    .gem-ashby-job-picker-item {
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid #eff2f7;
+      font-size: 14px;
+      line-height: 1.3;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .gem-ashby-job-picker-item:last-child {
+      border-bottom: none;
+    }
+    .gem-ashby-job-picker-item.active {
+      background: #eaf2fe;
+    }
+    .gem-ashby-job-picker-item-status {
+      font-size: 12px;
+      color: #5b6168;
+      white-space: nowrap;
+    }
+    .gem-ashby-job-picker-hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #5b6168;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    #gem-ashby-job-picker-upload {
+      border: 1px solid #4b3fa8;
+      background: #4b3fa8;
+      color: #fff;
+      border-radius: 7px;
+      padding: 7px 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    #gem-ashby-job-picker-upload[disabled] {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    .gem-ashby-job-picker-empty {
       padding: 12px;
       font-size: 13px;
       color: #5b6168;
@@ -2482,6 +2709,301 @@ async function showProjectPicker(runId, linkedinUrl) {
   });
 }
 
+async function showAshbyJobPicker(runId, profileUrl) {
+  createAshbyJobPickerStyles();
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-ashby-job-picker-overlay";
+
+    const modal = document.createElement("div");
+    modal.id = "gem-ashby-job-picker-modal";
+
+    const brand = document.createElement("div");
+    brand.id = "gem-ashby-job-picker-brand";
+    const brandDot = document.createElement("span");
+    brandDot.id = "gem-ashby-job-picker-brand-dot";
+    brandDot.textContent = "A";
+    const brandText = document.createElement("span");
+    brandText.textContent = "Ashby";
+    brand.appendChild(brandDot);
+    brand.appendChild(brandText);
+
+    const title = document.createElement("div");
+    title.id = "gem-ashby-job-picker-title";
+    title.textContent = "Upload Candidate to Ashby";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-ashby-job-picker-subtitle";
+    subtitle.textContent = "Type job name, use arrow keys to choose, then upload candidate.";
+
+    const input = document.createElement("input");
+    input.id = "gem-ashby-job-picker-input";
+    input.type = "text";
+    input.placeholder = "Search jobs by name...";
+    input.autocomplete = "off";
+
+    const results = document.createElement("div");
+    results.id = "gem-ashby-job-picker-results";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-ashby-job-picker-hint";
+    const hintText = document.createElement("span");
+    hintText.textContent = "Esc to cancel.";
+    const uploadBtn = document.createElement("button");
+    uploadBtn.id = "gem-ashby-job-picker-upload";
+    uploadBtn.type = "button";
+    uploadBtn.textContent = "Upload candidate";
+    uploadBtn.disabled = true;
+    hint.appendChild(hintText);
+    hint.appendChild(uploadBtn);
+
+    modal.appendChild(brand);
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(input);
+    modal.appendChild(results);
+    modal.appendChild(hint);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let selectedIndex = 0;
+    let filteredJobs = [];
+    let allJobs = [];
+    let loading = true;
+    let loadError = "";
+    const startedAt = Date.now();
+
+    function cleanup() {
+      overlay.remove();
+    }
+
+    function finish(selected) {
+      cleanup();
+      resolve(selected || null);
+    }
+
+    function getSelectedJob() {
+      if (loading || filteredJobs.length === 0) {
+        return null;
+      }
+      return filteredJobs[Math.max(0, Math.min(selectedIndex, filteredJobs.length - 1))] || null;
+    }
+
+    function filterJobs(query) {
+      const normalized = String(query || "").trim().toLowerCase();
+      const base = Array.isArray(allJobs) ? allJobs : [];
+      if (!normalized) {
+        return base.slice(0, ASHBY_JOB_PICKER_RENDER_LIMIT);
+      }
+      return base
+        .filter((job) => String(job?.name || "").toLowerCase().includes(normalized))
+        .slice(0, ASHBY_JOB_PICKER_RENDER_LIMIT);
+    }
+
+    function selectJob(job) {
+      if (!job) {
+        return;
+      }
+      logEvent({
+        source: "extension.content",
+        event: "ashby_job_picker.selected",
+        actionId: ACTIONS.UPLOAD_TO_ASHBY,
+        runId,
+        message: `Selected Ashby job ${job.name || job.id}.`,
+        link: profileUrl,
+        details: {
+          jobId: job.id,
+          jobName: job.name || "",
+          jobStatus: job.status || ""
+        }
+      });
+      finish({
+        id: job.id,
+        name: job.name || ""
+      });
+    }
+
+    function renderList() {
+      filteredJobs = filterJobs(input.value || "");
+      if (selectedIndex >= filteredJobs.length) {
+        selectedIndex = Math.max(0, filteredJobs.length - 1);
+      }
+      if (selectedIndex < 0) {
+        selectedIndex = 0;
+      }
+
+      uploadBtn.disabled = !getSelectedJob();
+      results.innerHTML = "";
+      if (loading) {
+        const loadingNode = document.createElement("div");
+        loadingNode.className = "gem-ashby-job-picker-empty";
+        loadingNode.textContent = "Loading jobs...";
+        results.appendChild(loadingNode);
+        return;
+      }
+      if (loadError) {
+        const errorNode = document.createElement("div");
+        errorNode.className = "gem-ashby-job-picker-empty";
+        errorNode.textContent = `Could not load jobs: ${loadError}`;
+        results.appendChild(errorNode);
+        return;
+      }
+      if (filteredJobs.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "gem-ashby-job-picker-empty";
+        empty.textContent = "No matching jobs.";
+        results.appendChild(empty);
+        return;
+      }
+
+      filteredJobs.forEach((job, index) => {
+        const item = document.createElement("div");
+        item.className = `gem-ashby-job-picker-item${index === selectedIndex ? " active" : ""}`;
+
+        const left = document.createElement("span");
+        left.textContent = job.name || job.id;
+
+        const status = document.createElement("span");
+        status.className = "gem-ashby-job-picker-item-status";
+        status.textContent = job.status || (job.isArchived ? "Archived" : "");
+
+        item.appendChild(left);
+        item.appendChild(status);
+        item.addEventListener("mouseenter", () => {
+          selectedIndex = index;
+          renderList();
+        });
+        item.addEventListener("click", () => {
+          selectedIndex = index;
+          renderList();
+        });
+        item.addEventListener("dblclick", () => {
+          selectJob(job);
+        });
+        results.appendChild(item);
+      });
+    }
+
+    function submitSelection() {
+      const selected = getSelectedJob();
+      if (!selected) {
+        return;
+      }
+      selectJob(selected);
+    }
+
+    input.addEventListener("input", () => {
+      selectedIndex = 0;
+      renderList();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (!loading && filteredJobs.length > 0) {
+          selectedIndex = (selectedIndex + 1) % filteredJobs.length;
+          renderList();
+        }
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (!loading && filteredJobs.length > 0) {
+          selectedIndex = (selectedIndex - 1 + filteredJobs.length) % filteredJobs.length;
+          renderList();
+        }
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitSelection();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        logEvent({
+          source: "extension.content",
+          level: "warn",
+          event: "ashby_job_picker.cancelled",
+          actionId: ACTIONS.UPLOAD_TO_ASHBY,
+          runId,
+          message: "Ashby job picker cancelled.",
+          link: profileUrl
+        });
+        finish(null);
+      }
+    });
+
+    uploadBtn.addEventListener("click", () => {
+      submitSelection();
+    });
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        logEvent({
+          source: "extension.content",
+          level: "warn",
+          event: "ashby_job_picker.cancelled",
+          actionId: ACTIONS.UPLOAD_TO_ASHBY,
+          runId,
+          message: "Ashby job picker cancelled by outside click.",
+          link: profileUrl
+        });
+        finish(null);
+      }
+    });
+
+    renderList();
+    input.focus();
+
+    logEvent({
+      source: "extension.content",
+      event: "ashby_job_picker.opened",
+      actionId: ACTIONS.UPLOAD_TO_ASHBY,
+      runId,
+      message: "Ashby job picker opened.",
+      link: profileUrl
+    });
+
+    listAshbyJobs("", runId)
+      .then(async (jobs) => {
+        allJobs = jobs.filter((job) => !job.isArchived);
+        loading = false;
+        loadError = "";
+        renderList();
+        await logEvent({
+          source: "extension.content",
+          event: "ashby_job_picker.loaded",
+          actionId: ACTIONS.UPLOAD_TO_ASHBY,
+          runId,
+          message: `Ashby job picker loaded ${allJobs.length} jobs.`,
+          link: profileUrl,
+          details: {
+            durationMs: Date.now() - startedAt
+          }
+        });
+      })
+      .catch(async (error) => {
+        loading = false;
+        loadError = error.message || "Failed to load Ashby job list.";
+        renderList();
+        showToast(loadError, true);
+        await logEvent({
+          source: "extension.content",
+          level: "error",
+          event: "ashby_job_picker.load_failed",
+          actionId: ACTIONS.UPLOAD_TO_ASHBY,
+          runId,
+          message: loadError,
+          link: profileUrl,
+          details: {
+            durationMs: Date.now() - startedAt
+          }
+        });
+      });
+  });
+}
+
 async function getRuntimeContext(actionId, settings, runId) {
   const context = getProfileContext();
 
@@ -2492,6 +3014,15 @@ async function getRuntimeContext(actionId, settings, runId) {
     }
     context.projectId = String(project.id || "").trim();
     context.projectName = String(project.name || "").trim();
+  }
+
+  if (actionId === ACTIONS.UPLOAD_TO_ASHBY) {
+    const job = await showAshbyJobPicker(runId, context.linkedinUrl);
+    if (!job) {
+      return null;
+    }
+    context.ashbyJobId = String(job.id || "").trim();
+    context.ashbyJobName = String(job.name || "").trim();
   }
 
   if (actionId === ACTIONS.SET_CUSTOM_FIELD) {
@@ -2595,6 +3126,9 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
     const result = await runAction(actionId, context);
     if (result?.ok) {
       showToast(result.message || "Action completed.");
+      if (actionId === ACTIONS.UPLOAD_TO_ASHBY && result.link) {
+        showAshbyUploadResultCard(result.link, result.message || "Candidate uploaded to Ashby.");
+      }
       await logEvent({
         source: "extension.content",
         event: "action.result.success",
@@ -3262,22 +3796,6 @@ function onKeyDown(event) {
 }
 
 async function init() {
-  try {
-    await refreshSettings();
-  } catch (error) {
-    if (isContextInvalidatedError(error?.message || "")) {
-      triggerContextRecovery(error.message);
-    }
-    return;
-  }
-
-  if (cachedSettings?.enabled && isLinkedInProfilePage()) {
-    const profileContext = getProfileContext();
-    prefetchProjects(generateRunId()).catch(() => {});
-    prefetchSequences(generateRunId()).catch(() => {});
-    prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
-  }
-
   window.addEventListener("keydown", onKeyDown, true);
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === "sync" && changes.settings) {
@@ -3290,6 +3808,28 @@ async function init() {
       }
     }
   });
+
+  try {
+    await refreshSettings();
+  } catch (error) {
+    if (isContextInvalidatedError(error?.message || "")) {
+      triggerContextRecovery(error.message);
+      return;
+    }
+    // Keep handlers active after transient startup failures.
+    cachedSettings = deepMerge(DEFAULT_SETTINGS, {});
+    showToast("Could not load extension settings yet. Retrying...", true);
+    setTimeout(() => {
+      refreshSettings().catch(() => {});
+    }, 1000);
+  }
+
+  if (cachedSettings?.enabled && isLinkedInProfilePage()) {
+    const profileContext = getProfileContext();
+    prefetchProjects(generateRunId()).catch(() => {});
+    prefetchSequences(generateRunId()).catch(() => {});
+    prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
+  }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
