@@ -1251,11 +1251,65 @@ function isGemCandidateProfilePage() {
   return /^https:\/\/(www|app)\.gem\.com\/candidate\/[^/?#]+/.test(window.location.href);
 }
 
+function decodeBase64Text(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    return atob(text);
+  } catch (_error) {
+    // URL-safe base64 fallback.
+    try {
+      const normalized = text.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+      return atob(padded);
+    } catch (_nestedError) {
+      return "";
+    }
+  }
+}
+
+function encodeBase64Text(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    return btoa(text);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function normalizeGemCandidateId(rawId) {
+  const raw = String(rawId || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const decoded = decodeBase64Text(raw);
+  if (!decoded) {
+    return raw;
+  }
+  const personMatch = decoded.match(/^Person:(\d+)$/i);
+  if (personMatch) {
+    const encoded = encodeBase64Text(`candidates:${personMatch[1]}`);
+    return encoded || raw;
+  }
+  const candidateMatch = decoded.match(/^candidates:(\d+)$/i);
+  if (candidateMatch) {
+    const encoded = encodeBase64Text(`candidates:${candidateMatch[1]}`);
+    return encoded || raw;
+  }
+  return raw;
+}
+
 function getGemCandidateIdFromUrl() {
   try {
     const parsed = new URL(window.location.href);
     const match = parsed.pathname.match(/^\/candidate\/([^/?#]+)/);
-    return match ? decodeURIComponent(match[1]) : "";
+    const raw = match ? decodeURIComponent(match[1]) : "";
+    return normalizeGemCandidateId(raw);
   } catch (_error) {
     return "";
   }
