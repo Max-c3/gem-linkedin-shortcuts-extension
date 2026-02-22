@@ -16,10 +16,13 @@ let latestRenderedLogs = [];
 const SHORTCUT_LABELS = {
   addProspect: "Add Prospect",
   addToProject: "Add to Project",
+  uploadToAshby: "Upload to Ashby",
+  openAshbyProfile: "Open Profile in Ashby",
   openActivity: "Open Profile in Gem",
   setCustomField: "Set Custom Field",
   setReminder: "Set Reminder",
   sendSequence: "Open Sequence",
+  editSequence: "Edit Sequence",
   viewActivityFeed: "View Activity Feed"
 };
 
@@ -59,10 +62,13 @@ function readInputs() {
     shortcuts: {
       addProspect: getShortcutValue("addProspect"),
       addToProject: getShortcutValue("addToProject"),
+      uploadToAshby: getShortcutValue("uploadToAshby"),
+      openAshbyProfile: getShortcutValue("openAshbyProfile"),
       openActivity: getShortcutValue("openActivity"),
       setCustomField: getShortcutValue("setCustomField"),
       setReminder: getShortcutValue("setReminder"),
       sendSequence: getShortcutValue("sendSequence"),
+      editSequence: getShortcutValue("editSequence"),
       viewActivityFeed: getShortcutValue("viewActivityFeed")
     }
   };
@@ -82,10 +88,13 @@ function writeInputs(settings) {
 
   setShortcutValue("addProspect", settings.shortcuts.addProspect || "");
   setShortcutValue("addToProject", settings.shortcuts.addToProject || "");
+  setShortcutValue("uploadToAshby", settings.shortcuts.uploadToAshby || "");
+  setShortcutValue("openAshbyProfile", settings.shortcuts.openAshbyProfile || "");
   setShortcutValue("openActivity", settings.shortcuts.openActivity || "");
   setShortcutValue("setCustomField", settings.shortcuts.setCustomField || "");
   setShortcutValue("setReminder", settings.shortcuts.setReminder || "");
   setShortcutValue("sendSequence", settings.shortcuts.sendSequence || "");
+  setShortcutValue("editSequence", settings.shortcuts.editSequence || "");
   setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
 }
 

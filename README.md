@@ -12,11 +12,14 @@ Chrome extension + backend for running Gem actions from LinkedIn profile pages v
 
 1. Add candidate from LinkedIn profile
 2. Add candidate to project (opens in-page project picker with case-insensitive contains search + arrow key selection)
-3. Open profile in Gem (uses candidate `weblink` if available)
-4. Set candidate custom field (letter-select field, then number-select value)
-5. Set reminder (in-page modal with reminder text + date picker + DDMMYYYY keyboard date entry)
-6. Open sequence in Gem UI (verifies sequence exists first)
-7. View activity feed in-page (notes + candidate events + created entry)
+3. Upload candidate to Ashby for a selected job
+4. Open profile in Ashby from LinkedIn (matches by normalized LinkedIn URL via cached Ashby candidate index)
+5. Open profile in Gem (uses candidate `weblink` if available)
+6. Set candidate custom field (letter-select field, then number-select value)
+7. Set reminder (in-page modal with reminder text + date picker + DDMMYYYY keyboard date entry)
+8. Open sequence in Gem UI (verifies sequence exists first)
+9. Edit sequence in Gem UI
+10. View activity feed in-page (notes + candidate events + created entry)
 
 ## Observability and logs
 

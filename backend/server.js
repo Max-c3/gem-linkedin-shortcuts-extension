@@ -50,12 +50,18 @@ const ASHBY_API_BASE_URL = (process.env.ASHBY_API_BASE_URL || "https://api.ashby
 const BACKEND_SHARED_TOKEN = process.env.BACKEND_SHARED_TOKEN || "";
 const GEM_DEFAULT_USER_ID = process.env.GEM_DEFAULT_USER_ID || "";
 const GEM_DEFAULT_USER_EMAIL = process.env.GEM_DEFAULT_USER_EMAIL || "";
+const ASHBY_CREDITED_TO_USER_ID = String(process.env.ASHBY_CREDITED_TO_USER_ID || "").trim();
+const ASHBY_CREDITED_TO_USER_EMAIL = String(
+  process.env.ASHBY_CREDITED_TO_USER_EMAIL || GEM_DEFAULT_USER_EMAIL || ""
+).trim();
 const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, "logs");
 const LOG_FILE = path.join(LOG_DIR, "events.jsonl");
 const LOG_MAX_BYTES = Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024);
 const PROJECTS_SCAN_MAX = Number(process.env.PROJECTS_SCAN_MAX || 20000);
 const SEQUENCES_SCAN_MAX = Number(process.env.SEQUENCES_SCAN_MAX || 20000);
 const ASHBY_JOBS_SCAN_MAX = Number(process.env.ASHBY_JOBS_SCAN_MAX || 5000);
+const ASHBY_CANDIDATES_SCAN_MAX = Number(process.env.ASHBY_CANDIDATES_SCAN_MAX || 100000);
+const ASHBY_CANDIDATE_INDEX_TTL_MS = Number(process.env.ASHBY_CANDIDATE_INDEX_TTL_MS || 10 * 60 * 1000);
 const ASHBY_WRITE_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.ASHBY_WRITE_ENABLED || "false").trim());
 const ASHBY_WRITE_REQUIRE_CONFIRMATION = !/^(0|false|no|off)$/i.test(
   String(process.env.ASHBY_WRITE_REQUIRE_CONFIRMATION || "true").trim()
@@ -65,12 +71,28 @@ const ASHBY_WRITE_DEFAULT_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_ASHBY";
 const ASHBY_WRITE_ALLOWED_METHODS = new Set(
   String(
     process.env.ASHBY_WRITE_ALLOWED_METHODS ||
-      "candidate.create,application.create,application.changeStage,application.changeSource"
+      "candidate.create,application.create,application.changeStage,application.changeSource,application.update"
   )
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean)
 );
+
+let ashbyCreditedToUserCache = {
+  keyTitle: "",
+  userId: "",
+  resolvedAtMs: 0
+};
+let ashbyCandidateIndexCache = {
+  builtAtMs: 0,
+  builtAt: "",
+  scannedCount: 0,
+  isComplete: false,
+  syncToken: "",
+  candidatesById: {},
+  linkedInToCandidateIds: {}
+};
+let ashbyCandidateIndexRefreshPromise = null;
 
 function generateId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1452,6 +1474,13 @@ function firstNonEmpty(...values) {
   return "";
 }
 
+function tokenizeNameText(value) {
+  return normalizeTextToken(value)
+    .split(/[^a-z0-9]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
 function extractGemCandidateEmail(candidate) {
   const direct = firstNonEmpty(candidate?.email, candidate?.primary_email, candidate?.email_address);
   if (direct) {
@@ -1540,18 +1569,33 @@ function summarizeGemCandidateForAshby(candidate, fallbackName = "") {
   };
 }
 
-function getAshbyCandidateLinkedInUrl(candidate) {
+function getAshbyCandidateLinkedInUrls(candidate) {
+  const values = [];
+  const direct = firstNonEmpty(candidate?.linkedInUrl, candidate?.linkedinUrl);
+  if (direct) {
+    values.push(direct);
+  }
   const links = Array.isArray(candidate?.socialLinks) ? candidate.socialLinks : [];
   for (const link of links) {
     if (!link || typeof link !== "object") {
       continue;
     }
     const type = normalizeTextToken(link.type);
-    if (type !== "linkedin") {
+    const url = String(link.url || "").trim();
+    if (!url) {
       continue;
     }
-    const url = String(link.url || "").trim();
-    if (url) {
+    if (type === "linkedin" || normalizeLinkedInUrl(url).includes("linkedin.com/")) {
+      values.push(url);
+    }
+  }
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function getAshbyCandidateLinkedInUrl(candidate) {
+  const urls = getAshbyCandidateLinkedInUrls(candidate);
+  for (const url of urls) {
+    if (normalizeLinkedInUrl(url).includes("linkedin.com/")) {
       return url;
     }
   }
@@ -1572,6 +1616,364 @@ function getAshbyCandidateEmails(candidate) {
     }
   }
   return Array.from(new Set(emails.map((email) => email.toLowerCase())));
+}
+
+function parseTimestampMs(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return 0;
+  }
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) {
+    return numeric > 1e12 ? numeric : numeric * 1000;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function summarizeAshbyCandidateForIndex(candidate) {
+  const id = String(candidate?.id || "").trim();
+  if (!id) {
+    return null;
+  }
+  const profileUrl = buildAshbyProfileUrl(candidate?.profileUrl, id);
+  const linkedInUrls = getAshbyCandidateLinkedInUrls(candidate);
+  const linkedInKeys = Array.from(
+    new Set(
+      linkedInUrls
+        .map((url) => normalizeLinkedInUrl(url))
+        .filter((url) => url.includes("linkedin.com/"))
+    )
+  );
+  return {
+    id,
+    name: firstNonEmpty(candidate?.name, ""),
+    profileUrl,
+    linkedInUrls,
+    linkedInKeys,
+    updatedAt: firstNonEmpty(candidate?.updatedAt, candidate?.createdAt),
+    updatedAtMs: parseTimestampMs(firstNonEmpty(candidate?.updatedAt, candidate?.createdAt)),
+    createdAt: firstNonEmpty(candidate?.createdAt),
+    email: firstNonEmpty(candidate?.primaryEmailAddress?.value)
+  };
+}
+
+function sortCandidateIdsForLookup(candidatesById, ids) {
+  return Array.from(new Set(Array.isArray(ids) ? ids : []))
+    .map((id) => String(id || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => {
+      const left = candidatesById[a];
+      const right = candidatesById[b];
+      const leftMs = Number(left?.updatedAtMs) || 0;
+      const rightMs = Number(right?.updatedAtMs) || 0;
+      if (rightMs !== leftMs) {
+        return rightMs - leftMs;
+      }
+      const leftName = String(left?.name || "");
+      const rightName = String(right?.name || "");
+      return leftName.localeCompare(rightName);
+    });
+}
+
+function rebuildAshbyLinkedInLookup(candidatesById) {
+  const lookup = {};
+  for (const candidate of Object.values(candidatesById || {})) {
+    const id = String(candidate?.id || "").trim();
+    if (!id) {
+      continue;
+    }
+    const keys = Array.isArray(candidate?.linkedInKeys) ? candidate.linkedInKeys : [];
+    for (const key of keys) {
+      const normalized = normalizeLinkedInUrl(key);
+      if (!normalized || !normalized.includes("linkedin.com/")) {
+        continue;
+      }
+      if (!lookup[normalized]) {
+        lookup[normalized] = [];
+      }
+      lookup[normalized].push(id);
+    }
+  }
+  for (const [key, ids] of Object.entries(lookup)) {
+    lookup[key] = sortCandidateIdsForLookup(candidatesById, ids);
+  }
+  return lookup;
+}
+
+function ashbyCandidateIndexSize(cache) {
+  return Object.keys(cache?.candidatesById || {}).length;
+}
+
+function getAshbyCandidateIndexAgeMs(cache = ashbyCandidateIndexCache) {
+  if (!cache?.builtAtMs) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, Date.now() - cache.builtAtMs);
+}
+
+function isAshbyCandidateIndexFresh(cache = ashbyCandidateIndexCache) {
+  return getAshbyCandidateIndexAgeMs(cache) <= ASHBY_CANDIDATE_INDEX_TTL_MS;
+}
+
+function isLikelySyncTokenError(error) {
+  const message = String(error?.message || "");
+  const details = typeof error?.data === "string" ? error.data : JSON.stringify(error?.data || {});
+  return /sync\s*token/i.test(`${message} ${details}`);
+}
+
+function getAshbyCandidateIndexMetadata(cache = ashbyCandidateIndexCache) {
+  return {
+    builtAt: cache?.builtAt || "",
+    ageMs: Number.isFinite(getAshbyCandidateIndexAgeMs(cache))
+      ? getAshbyCandidateIndexAgeMs(cache)
+      : Number.MAX_SAFE_INTEGER,
+    fresh: isAshbyCandidateIndexFresh(cache),
+    isComplete: Boolean(cache?.isComplete),
+    scannedCount: Number(cache?.scannedCount) || 0,
+    candidateCount: ashbyCandidateIndexSize(cache),
+    refreshInFlight: Boolean(ashbyCandidateIndexRefreshPromise)
+  };
+}
+
+async function refreshAshbyCandidateIndexFromApi(audit, options = {}) {
+  const forceFull = Boolean(options.forceFull);
+  const hasExisting = ashbyCandidateIndexSize(ashbyCandidateIndexCache) > 0;
+  const canUseSyncToken = hasExisting && !forceFull && String(ashbyCandidateIndexCache.syncToken || "").trim();
+  const syncToken = canUseSyncToken ? String(ashbyCandidateIndexCache.syncToken || "").trim() : "";
+
+  const candidatesById = canUseSyncToken
+    ? { ...(ashbyCandidateIndexCache.candidatesById || {}) }
+    : {};
+
+  let cursor = "";
+  let moreData = true;
+  let iterations = 0;
+  let scannedCount = 0;
+  let newestSyncToken = syncToken;
+
+  while (moreData && scannedCount < ASHBY_CANDIDATES_SCAN_MAX && iterations < 2000) {
+    const remaining = ASHBY_CANDIDATES_SCAN_MAX - scannedCount;
+    const payload = { limit: Math.max(1, Math.min(100, remaining)) };
+    if (cursor) {
+      payload.cursor = cursor;
+    }
+    if (syncToken) {
+      payload.syncToken = syncToken;
+    }
+
+    const response = await ashbyRequest("candidate.list", payload, audit);
+    const rows = Array.isArray(response?.results) ? response.results : [];
+    for (const row of rows) {
+      const summary = summarizeAshbyCandidateForIndex(row);
+      if (!summary) {
+        continue;
+      }
+      candidatesById[summary.id] = summary;
+    }
+
+    scannedCount += rows.length;
+    moreData = Boolean(response?.moreDataAvailable);
+    cursor = String(response?.nextCursor || "");
+    if (response?.syncToken) {
+      newestSyncToken = String(response.syncToken);
+    }
+    iterations += 1;
+    if (!cursor && moreData) {
+      break;
+    }
+  }
+
+  const isComplete = !moreData && scannedCount < ASHBY_CANDIDATES_SCAN_MAX;
+  const builtAtMs = Date.now();
+  ashbyCandidateIndexCache = {
+    builtAtMs,
+    builtAt: new Date(builtAtMs).toISOString(),
+    scannedCount,
+    isComplete,
+    syncToken: newestSyncToken || "",
+    candidatesById,
+    linkedInToCandidateIds: rebuildAshbyLinkedInLookup(candidatesById)
+  };
+
+  logEvent({
+    source: "backend",
+    event: "ashby.candidate_index.refreshed",
+    message: canUseSyncToken
+      ? "Refreshed Ashby LinkedIn index incrementally."
+      : "Refreshed Ashby LinkedIn index from full scan.",
+    requestId: audit.requestId,
+    route: audit.route,
+    runId: audit.runId,
+    actionId: audit.actionId,
+    details: {
+      candidateCount: ashbyCandidateIndexSize(ashbyCandidateIndexCache),
+      scannedCount,
+      isComplete,
+      usedSyncToken: Boolean(syncToken),
+      hasSyncToken: Boolean(ashbyCandidateIndexCache.syncToken)
+    }
+  });
+
+  return ashbyCandidateIndexCache;
+}
+
+function ensureAshbyCandidateIndexRefresh(audit, options = {}) {
+  const forceFull = Boolean(options.forceFull);
+  if (!ashbyCandidateIndexRefreshPromise) {
+    ashbyCandidateIndexRefreshPromise = (async () => {
+      try {
+        try {
+          return await refreshAshbyCandidateIndexFromApi(audit, { forceFull });
+        } catch (error) {
+          if (!forceFull && isLikelySyncTokenError(error)) {
+            return await refreshAshbyCandidateIndexFromApi(audit, { forceFull: true });
+          }
+          throw error;
+        }
+      } finally {
+        ashbyCandidateIndexRefreshPromise = null;
+      }
+    })();
+  }
+  return ashbyCandidateIndexRefreshPromise;
+}
+
+function scheduleAshbyCandidateIndexRefresh(audit, options = {}) {
+  ensureAshbyCandidateIndexRefresh(audit, options).catch((error) => {
+    logEvent({
+      level: "warn",
+      source: "backend",
+      event: "ashby.candidate_index.refresh_failed",
+      message: error?.message || "Ashby candidate index refresh failed.",
+      requestId: audit.requestId,
+      route: audit.route,
+      runId: audit.runId,
+      actionId: audit.actionId
+    });
+  });
+}
+
+async function ensureAshbyCandidateIndex(audit, options = {}) {
+  const forceRefresh = Boolean(options.forceRefresh);
+  const preferStale = options.preferStale !== false;
+  const cache = ashbyCandidateIndexCache;
+  const hasData = ashbyCandidateIndexSize(cache) > 0;
+  const fresh = isAshbyCandidateIndexFresh(cache);
+
+  if (forceRefresh) {
+    return ensureAshbyCandidateIndexRefresh(audit, { forceFull: false });
+  }
+  if (fresh) {
+    return cache;
+  }
+  if (hasData && preferStale) {
+    scheduleAshbyCandidateIndexRefresh(audit, { forceFull: false });
+    return cache;
+  }
+  return ensureAshbyCandidateIndexRefresh(audit, { forceFull: false });
+}
+
+function findCandidatesByLinkedInKeys(index, linkedInKeys) {
+  const cache = index && typeof index === "object" ? index : ashbyCandidateIndexCache;
+  const keys = Array.from(new Set((Array.isArray(linkedInKeys) ? linkedInKeys : []).map((item) => normalizeLinkedInUrl(item)).filter(Boolean)));
+  if (keys.length === 0) {
+    return [];
+  }
+
+  const ids = [];
+  for (const key of keys) {
+    const rowIds = Array.isArray(cache?.linkedInToCandidateIds?.[key]) ? cache.linkedInToCandidateIds[key] : [];
+    ids.push(...rowIds);
+  }
+
+  const orderedIds = sortCandidateIdsForLookup(cache.candidatesById || {}, ids);
+  return orderedIds
+    .map((id) => cache?.candidatesById?.[id] || null)
+    .filter((candidate) => candidate && candidate.profileUrl);
+}
+
+function buildLinkedInLookupKeys(payload) {
+  const explicitUrl = firstNonEmpty(payload?.linkedInUrl, payload?.linkedinUrl, payload?.profileUrl);
+  const handle = sanitizeLinkedInHandle(payload?.linkedInHandle || payload?.linkedinHandle);
+  const keys = [];
+  const normalizedUrl = normalizeLinkedInUrl(explicitUrl);
+  if (normalizedUrl) {
+    keys.push(normalizedUrl);
+  }
+  if (handle) {
+    const fromHandle = normalizeLinkedInUrl(buildLinkedInUrlFromHandle(handle));
+    if (fromHandle) {
+      keys.push(fromHandle);
+    }
+  }
+  return {
+    handle,
+    keys: Array.from(new Set(keys))
+  };
+}
+
+async function findAshbyCandidateByLinkedIn(payload, audit) {
+  const forceRefresh = Boolean(payload?.forceRefresh);
+  const { handle, keys } = buildLinkedInLookupKeys(payload || {});
+  if (keys.length === 0) {
+    throw new Error("linkedInUrl or linkedInHandle is required.");
+  }
+
+  let index = await ensureAshbyCandidateIndex(audit, {
+    forceRefresh,
+    preferStale: true
+  });
+  let matches = findCandidatesByLinkedInKeys(index, keys);
+
+  if (
+    matches.length === 0 &&
+    (forceRefresh || !isAshbyCandidateIndexFresh(index) || !index.isComplete)
+  ) {
+    index = await ensureAshbyCandidateIndexRefresh(audit, {
+      forceFull: forceRefresh
+    });
+    matches = findCandidatesByLinkedInKeys(index, keys);
+  }
+
+  if (matches.length === 0) {
+    return {
+      found: false,
+      message: "No Ashby candidate matched this LinkedIn profile.",
+      link: "",
+      candidate: null,
+      index: getAshbyCandidateIndexMetadata(index),
+      query: {
+        linkedInHandle: handle,
+        linkedInKeys: keys
+      }
+    };
+  }
+
+  const candidate = matches[0];
+  return {
+    found: true,
+    message: `Opened Ashby profile for ${candidate.name || "candidate"}.`,
+    link: candidate.profileUrl,
+    candidate: {
+      id: candidate.id,
+      name: candidate.name,
+      profileUrl: candidate.profileUrl,
+      linkedInUrl: candidate.linkedInUrls?.[0] || "",
+      updatedAt: candidate.updatedAt
+    },
+    collisions: matches.slice(1, 10).map((row) => ({
+      id: row.id,
+      name: row.name,
+      profileUrl: row.profileUrl,
+      updatedAt: row.updatedAt
+    })),
+    index: getAshbyCandidateIndexMetadata(index),
+    query: {
+      linkedInHandle: handle,
+      linkedInKeys: keys
+    }
+  };
 }
 
 function pickBestAshbyCandidateMatch(candidates, seed) {
@@ -1613,16 +2015,34 @@ function pickPreferredAshbyStage(stages) {
     return { stage: null, strategy: "none" };
   }
 
-  const byRecruitingScreen = normalizedStages.find((stage) => normalizeTextToken(stage?.title) === "recruiting screen");
-  if (byRecruitingScreen) {
-    return { stage: byRecruitingScreen, strategy: "recruiting_screen_exact" };
+  const stageTitle = (stage) => normalizeTextToken(stage?.title);
+
+  const byRecruitingScreenExact = normalizedStages.find((stage) => stageTitle(stage) === "recruiting screen");
+  if (byRecruitingScreenExact) {
+    return { stage: byRecruitingScreenExact, strategy: "recruiting_screen_exact" };
   }
 
-  const byRecruitingScreenContains = normalizedStages.find((stage) =>
-    normalizeTextToken(stage?.title).includes("recruiting screen")
-  );
+  const byRecruiterScreenExact = normalizedStages.find((stage) => stageTitle(stage) === "recruiter screen");
+  if (byRecruiterScreenExact) {
+    return { stage: byRecruiterScreenExact, strategy: "recruiter_screen_exact" };
+  }
+
+  const byRecruitingScreenContains = normalizedStages.find((stage) => stageTitle(stage).includes("recruiting screen"));
   if (byRecruitingScreenContains) {
     return { stage: byRecruitingScreenContains, strategy: "recruiting_screen_contains" };
+  }
+
+  const byRecruiterScreenContains = normalizedStages.find((stage) => stageTitle(stage).includes("recruiter screen"));
+  if (byRecruiterScreenContains) {
+    return { stage: byRecruiterScreenContains, strategy: "recruiter_screen_contains" };
+  }
+
+  const byRecruitAndScreenTokens = normalizedStages.find((stage) => {
+    const title = stageTitle(stage);
+    return title.includes("recruit") && title.includes("screen");
+  });
+  if (byRecruitAndScreenTokens) {
+    return { stage: byRecruitAndScreenTokens, strategy: "recruit_screen_token_match" };
   }
 
   const byLead = normalizedStages.find((stage) => normalizeTextToken(stage?.title) === "lead");
@@ -1639,6 +2059,17 @@ function pickPreferredAshbyStage(stages) {
     .slice()
     .sort((a, b) => (Number(a?.orderInInterviewPlan) || 0) - (Number(b?.orderInInterviewPlan) || 0))[0];
   return { stage: earliest || null, strategy: "earliest_by_order" };
+}
+
+function normalizeAshbyJobOpenStatus(statusRaw, isArchived) {
+  const normalized = normalizeTextToken(statusRaw);
+  if (normalized.includes("open")) {
+    return true;
+  }
+  if (normalized.includes("closed") || normalized.includes("archived") || normalized.includes("draft")) {
+    return false;
+  }
+  return !Boolean(isArchived);
 }
 
 async function listAshbyJobs(payload, audit) {
@@ -1683,31 +2114,27 @@ async function listAshbyJobs(payload, audit) {
     }
     seen.add(id);
     const title = firstNonEmpty(raw?.title, raw?.name, id);
-    const status = firstNonEmpty(raw?.status, raw?.state, raw?.jobState, "");
+    const statusRaw = firstNonEmpty(raw?.status, raw?.state, raw?.jobState, "");
+    const archived = Boolean(raw?.isArchived || normalizeTextToken(statusRaw).includes("archived"));
+    const isOpen = normalizeAshbyJobOpenStatus(statusRaw, archived);
     const item = {
       id,
       name: title,
       title,
-      status,
-      isArchived: Boolean(raw?.isArchived || normalizeTextToken(status) === "archived"),
+      status: statusRaw || (isOpen ? "Open" : "Closed"),
+      isOpen,
+      isArchived: archived,
       updatedAt: firstNonEmpty(raw?.updatedAt, raw?.createdAt, "")
     };
     deduped.push(item);
   }
 
-  let filtered = deduped;
+  let filtered = deduped.filter((job) => job.isOpen && !job.isArchived);
   if (query) {
     filtered = filtered.filter((job) => normalizeTextToken(job.name).includes(query));
   }
 
-  filtered.sort((a, b) => {
-    const aArchived = a.isArchived ? 1 : 0;
-    const bArchived = b.isArchived ? 1 : 0;
-    if (aArchived !== bArchived) {
-      return aArchived - bArchived;
-    }
-    return a.name.localeCompare(b.name);
-  });
+  filtered.sort((a, b) => a.name.localeCompare(b.name));
 
   if (requestedLimit > 0) {
     filtered = filtered.slice(0, requestedLimit);
@@ -1716,25 +2143,185 @@ async function listAshbyJobs(payload, audit) {
   return { jobs: filtered };
 }
 
-async function findAshbySourceIdByTitle(sourceTitle, audit) {
-  const target = normalizeTextToken(sourceTitle);
-  if (!target) {
+function normalizeSourceTitle(title) {
+  return normalizeTextToken(title).replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function findAshbyGemSourceId(audit) {
+  const response = await ashbyRequest("source.list", { includeArchived: false }, audit);
+  const list = (Array.isArray(response?.results) ? response.results : [])
+    .map((source) => ({
+      id: String(source?.id || "").trim(),
+      title: String(source?.title || "").trim(),
+      normalizedTitle: normalizeSourceTitle(source?.title),
+      isArchived: Boolean(source?.isArchived)
+    }))
+    .filter((source) => source.id && !source.isArchived);
+
+  if (list.length === 0) {
     return "";
   }
-  const response = await ashbyRequest("source.list", { includeArchived: false }, audit);
-  const list = Array.isArray(response?.results) ? response.results : [];
-  const exact = list.find((source) => normalizeTextToken(source?.title) === target);
-  if (exact?.id) {
-    return String(exact.id);
+
+  const exactSourcedGem = list.find(
+    (source) => source.normalizedTitle === "sourced gem" || source.normalizedTitle === "sourced: gem"
+  );
+  if (exactSourcedGem) {
+    return exactSourcedGem.id;
   }
-  const contains = list.find((source) => normalizeTextToken(source?.title).includes(target));
-  if (contains?.id) {
-    return String(contains.id);
+
+  const exactGem = list.find((source) => source.normalizedTitle === "gem");
+  if (exactGem) {
+    return exactGem.id;
   }
+
+  const sourcedAndGem = list.find(
+    (source) => source.normalizedTitle.includes("sourced") && source.normalizedTitle.includes("gem")
+  );
+  if (sourcedAndGem) {
+    return sourcedAndGem.id;
+  }
+
+  const containsGem = list.find((source) => source.normalizedTitle.includes("gem"));
+  if (containsGem) {
+    return containsGem.id;
+  }
+
   return "";
 }
 
-async function findOrCreateAshbyCandidateFromGemCandidate(seed, sourceId, audit) {
+async function listAshbyUsers(audit) {
+  const users = [];
+  let cursor = "";
+  let moreData = true;
+  let iterations = 0;
+
+  while (moreData && iterations < 50) {
+    const payload = { limit: 100 };
+    if (cursor) {
+      payload.cursor = cursor;
+    }
+    const response = await ashbyRequest("user.list", payload, audit);
+    const rows = Array.isArray(response?.results) ? response.results : [];
+    users.push(...rows);
+    moreData = Boolean(response?.moreDataAvailable);
+    cursor = String(response?.nextCursor || "");
+    iterations += 1;
+    if (!cursor && moreData) {
+      break;
+    }
+  }
+
+  const deduped = new Map();
+  for (const user of users) {
+    const id = String(user?.id || "").trim();
+    if (!id || deduped.has(id)) {
+      continue;
+    }
+    deduped.set(id, user);
+  }
+  return Array.from(deduped.values());
+}
+
+function findAshbyUserByEmail(users, email) {
+  const target = normalizeTextToken(email);
+  if (!target) {
+    return null;
+  }
+  return (Array.isArray(users) ? users : []).find(
+    (user) => normalizeTextToken(user?.email) === target && user?.isEnabled !== false
+  );
+}
+
+function scoreAshbyUserByApiKeyTitle(user, apiKeyTitleTokens) {
+  if (!user || !Array.isArray(apiKeyTitleTokens) || apiKeyTitleTokens.length === 0) {
+    return 0;
+  }
+  const fullNameTokens = tokenizeNameText(`${firstNonEmpty(user?.firstName)} ${firstNonEmpty(user?.lastName)}`);
+  const emailLocalPartTokens = tokenizeNameText(String(user?.email || "").split("@")[0] || "");
+  const userTokens = new Set([...fullNameTokens, ...emailLocalPartTokens]);
+  if (userTokens.size === 0) {
+    return 0;
+  }
+  let score = 0;
+  for (const token of apiKeyTitleTokens) {
+    if (token.length < 2) {
+      continue;
+    }
+    if (userTokens.has(token)) {
+      score += token.length >= 4 ? 3 : 2;
+      continue;
+    }
+    for (const userToken of userTokens) {
+      if (userToken.startsWith(token) || token.startsWith(userToken)) {
+        score += 1;
+        break;
+      }
+    }
+  }
+  return score;
+}
+
+async function resolveAshbyCreditedToUserId(audit) {
+  if (ASHBY_CREDITED_TO_USER_ID) {
+    return ASHBY_CREDITED_TO_USER_ID;
+  }
+
+  const now = Date.now();
+  if (ashbyCreditedToUserCache.userId && now - ashbyCreditedToUserCache.resolvedAtMs < 5 * 60 * 1000) {
+    return ashbyCreditedToUserCache.userId;
+  }
+
+  const users = await listAshbyUsers(audit);
+  const activeUsers = users.filter((user) => user?.isEnabled !== false);
+  if (activeUsers.length === 0) {
+    return "";
+  }
+
+  const preferredByEmail = findAshbyUserByEmail(activeUsers, ASHBY_CREDITED_TO_USER_EMAIL);
+  if (preferredByEmail?.id) {
+    ashbyCreditedToUserCache = {
+      keyTitle: ashbyCreditedToUserCache.keyTitle || "",
+      userId: String(preferredByEmail.id),
+      resolvedAtMs: now
+    };
+    return String(preferredByEmail.id);
+  }
+
+  let apiKeyTitle = ashbyCreditedToUserCache.keyTitle || "";
+  if (!apiKeyTitle) {
+    const keyInfo = await ashbyRequest("apiKey.info", {}, audit);
+    apiKeyTitle = firstNonEmpty(keyInfo?.results?.title);
+  }
+  ashbyCreditedToUserCache.keyTitle = apiKeyTitle;
+
+  const keyTitleTokens = tokenizeNameText(apiKeyTitle);
+  let best = null;
+  let bestScore = 0;
+  let tiedBestCount = 0;
+  for (const user of activeUsers) {
+    const score = scoreAshbyUserByApiKeyTitle(user, keyTitleTokens);
+    if (score > bestScore) {
+      best = user;
+      bestScore = score;
+      tiedBestCount = 1;
+    } else if (score > 0 && score === bestScore) {
+      tiedBestCount += 1;
+    }
+  }
+
+  if (best?.id && bestScore > 0 && tiedBestCount === 1) {
+    ashbyCreditedToUserCache = {
+      keyTitle: apiKeyTitle,
+      userId: String(best.id),
+      resolvedAtMs: now
+    };
+    return String(best.id);
+  }
+
+  return "";
+}
+
+async function findOrCreateAshbyCandidateFromGemCandidate(seed, sourceId, creditedToUserId, audit) {
   const searchCandidates = [];
   const email = String(seed?.email || "").trim();
   const name = String(seed?.name || "").trim();
@@ -1767,7 +2354,9 @@ async function findOrCreateAshbyCandidateFromGemCandidate(seed, sourceId, audit)
   if (sourceId) {
     createPayload.sourceId = sourceId;
   }
-  // We intentionally omit creditedToUserId so Ashby attributes this write to the API key caller.
+  if (creditedToUserId) {
+    createPayload.creditedToUserId = creditedToUserId;
+  }
   const created = await ashbyRequest("candidate.create", createPayload, audit, getAshbyWriteOptions());
   return { candidate: created?.results || {}, created: true };
 }
@@ -1822,9 +2411,15 @@ async function uploadGemCandidateToAshby(payload, audit) {
     throw new Error("Could not load candidate details from Gem.");
   }
   const seed = summarizeGemCandidateForAshby(gemCandidate, String(payload?.profileName || ""));
-  const sourceId = await findAshbySourceIdByTitle("Sourced: Gem", audit);
+  const sourceId = await findAshbyGemSourceId(audit);
+  const creditedToUserId = await resolveAshbyCreditedToUserId(audit);
   const preferredStage = await resolvePreferredStageForJob(jobId, audit);
-  const { candidate: ashbyCandidate, created } = await findOrCreateAshbyCandidateFromGemCandidate(seed, sourceId, audit);
+  const { candidate: ashbyCandidate, created } = await findOrCreateAshbyCandidateFromGemCandidate(
+    seed,
+    sourceId,
+    creditedToUserId,
+    audit
+  );
   const ashbyCandidateId = String(ashbyCandidate?.id || "").trim();
   if (!ashbyCandidateId) {
     throw new Error("Ashby candidate resolution failed.");
@@ -1841,6 +2436,9 @@ async function uploadGemCandidateToAshby(payload, audit) {
     if (sourceId) {
       createApplicationPayload.sourceId = sourceId;
     }
+    if (creditedToUserId) {
+      createApplicationPayload.creditedToUserId = creditedToUserId;
+    }
     if (preferredStage.stageId) {
       createApplicationPayload.interviewStageId = preferredStage.stageId;
       if (preferredStage.interviewPlanId) {
@@ -1855,28 +2453,41 @@ async function uploadGemCandidateToAshby(payload, audit) {
     );
     application = createdApplication?.results || null;
     applicationCreated = true;
-  } else {
-    const applicationId = String(application?.id || "").trim();
-    if (applicationId && sourceId && String(application?.source?.id || "") !== sourceId) {
-      await ashbyRequest(
-        "application.changeSource",
-        { applicationId, sourceId },
-        audit,
-        getAshbyWriteOptions()
-      );
-    }
-    if (applicationId && preferredStage.stageId && String(application?.currentInterviewStage?.id || "") !== preferredStage.stageId) {
-      await ashbyRequest(
-        "application.changeStage",
-        { applicationId, interviewStageId: preferredStage.stageId },
-        audit,
-        getAshbyWriteOptions()
-      );
-    }
-    if (applicationId) {
-      const refreshed = await ashbyRequest("application.info", { applicationId }, audit);
-      application = refreshed?.results || application;
-    }
+  }
+
+  const applicationId = String(application?.id || "").trim();
+  if (applicationId && sourceId && String(application?.source?.id || "") !== sourceId) {
+    await ashbyRequest(
+      "application.changeSource",
+      { applicationId, sourceId },
+      audit,
+      getAshbyWriteOptions()
+    );
+  }
+  if (
+    applicationId &&
+    creditedToUserId &&
+    String(application?.creditedToUser?.id || "") !== creditedToUserId &&
+    ASHBY_WRITE_ALLOWED_METHODS.has("application.update")
+  ) {
+    await ashbyRequest(
+      "application.update",
+      { applicationId, creditedToUserId },
+      audit,
+      getAshbyWriteOptions()
+    );
+  }
+  if (applicationId && preferredStage.stageId && String(application?.currentInterviewStage?.id || "") !== preferredStage.stageId) {
+    await ashbyRequest(
+      "application.changeStage",
+      { applicationId, interviewStageId: preferredStage.stageId },
+      audit,
+      getAshbyWriteOptions()
+    );
+  }
+  if (applicationId) {
+    const refreshed = await ashbyRequest("application.info", { applicationId }, audit);
+    application = refreshed?.results || application;
   }
 
   let candidateProfileUrl = buildAshbyProfileUrl(ashbyCandidate?.profileUrl, ashbyCandidateId);
@@ -1894,6 +2505,7 @@ async function uploadGemCandidateToAshby(payload, audit) {
     message: uploadMessage,
     link: candidateProfileUrl,
     sourceApplied: Boolean(sourceId),
+    creditedToApplied: Boolean(creditedToUserId),
     stageId: preferredStage.stageId,
     stageTitle,
     stageSelectionStrategy: preferredStage.strategy,
@@ -1911,6 +2523,7 @@ const routes = {
   "/api/projects/add-candidate": addCandidateToProject,
   "/api/projects/list": listProjects,
   "/api/ashby/jobs/list": listAshbyJobs,
+  "/api/ashby/candidates/find-by-linkedin": findAshbyCandidateByLinkedIn,
   "/api/ashby/upload-candidate": uploadGemCandidateToAshby,
   "/api/custom-fields/list": listCustomFields,
   "/api/candidates/set-custom-field": setCandidateCustomField,
@@ -2061,5 +2674,14 @@ server.listen(PORT, () => {
     `Ashby write safety: enabled=${ASHBY_WRITE_ENABLED} requireConfirmation=${ASHBY_WRITE_REQUIRE_CONFIRMATION} allowlistedMethods=${Array.from(
       ASHBY_WRITE_ALLOWED_METHODS
     ).join(",")}`
+  );
+  scheduleAshbyCandidateIndexRefresh(
+    {
+      requestId: "startup",
+      route: "startup",
+      runId: "",
+      actionId: "openAshbyProfile"
+    },
+    { forceFull: false }
   );
 });

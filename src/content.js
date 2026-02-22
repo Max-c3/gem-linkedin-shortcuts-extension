@@ -23,6 +23,10 @@ function isContextInvalidatedError(message) {
   );
 }
 
+function isContextInvalidatedResponse(response) {
+  return isContextInvalidatedError(String(response?.message || ""));
+}
+
 function triggerContextRecovery(message) {
   if (contextRecoveryTriggered) {
     return;
@@ -49,7 +53,15 @@ function generateRunId() {
 }
 
 function isLinkedInProfilePage() {
-  return /^https:\/\/www\.linkedin\.com\/in\/[^/]+\/?/.test(window.location.href);
+  try {
+    const parsed = new URL(window.location.href);
+    if (parsed.hostname !== "www.linkedin.com") {
+      return false;
+    }
+    return /^\/in\/[^/]+(?:\/.*)?$/.test(parsed.pathname);
+  } catch (_error) {
+    return /^https:\/\/www\.linkedin\.com\/in\/[^/]+(?:\/.*)?$/.test(window.location.href);
+  }
 }
 
 function normalizeLinkedInUrl(url) {
@@ -287,6 +299,11 @@ function listProjects(query, runId) {
           return;
         }
         if (!response?.ok) {
+          if (isContextInvalidatedResponse(response)) {
+            triggerContextRecovery(response?.message || "Extension context invalidated.");
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
           reject(new Error(response?.message || "Could not load projects"));
           return;
         }
@@ -317,6 +334,11 @@ function listAshbyJobs(query, runId) {
           return;
         }
         if (!response?.ok) {
+          if (isContextInvalidatedResponse(response)) {
+            triggerContextRecovery(response?.message || "Extension context invalidated.");
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
           reject(new Error(response?.message || "Could not load Ashby jobs"));
           return;
         }
@@ -478,14 +500,15 @@ function prefetchCustomFields(context, runId) {
   });
 }
 
-function listSequences(query, runId) {
+function listSequences(query, runId, actionId = ACTIONS.SEND_SEQUENCE) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
       {
         type: "LIST_SEQUENCES",
         query: String(query || ""),
         limit: 0,
-        runId: runId || ""
+        runId: runId || "",
+        actionId
       },
       (response) => {
         if (chrome.runtime.lastError) {
@@ -699,6 +722,32 @@ function createAshbyJobPickerStyles() {
     .gem-ashby-job-picker-item.active {
       background: #eaf2fe;
     }
+    .gem-ashby-job-picker-item-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+    .gem-ashby-job-picker-item-key {
+      min-width: 22px;
+      height: 22px;
+      border: 1px solid #bcc6d6;
+      border-radius: 6px;
+      background: #f5f8fc;
+      color: #2f3a4b;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 20px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .gem-ashby-job-picker-item-name {
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .gem-ashby-job-picker-item-status {
       font-size: 12px;
       color: #5b6168;
@@ -709,27 +758,69 @@ function createAshbyJobPickerStyles() {
       font-size: 12px;
       color: #5b6168;
       display: flex;
-      justify-content: space-between;
       align-items: center;
       gap: 10px;
-    }
-    #gem-ashby-job-picker-upload {
-      border: 1px solid #4b3fa8;
-      background: #4b3fa8;
-      color: #fff;
-      border-radius: 7px;
-      padding: 7px 10px;
-      font-size: 13px;
-      cursor: pointer;
-    }
-    #gem-ashby-job-picker-upload[disabled] {
-      cursor: not-allowed;
-      opacity: 0.55;
     }
     .gem-ashby-job-picker-empty {
       padding: 12px;
       font-size: 13px;
       color: #5b6168;
+    }
+    #gem-ashby-job-picker-confirm-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5;
+    }
+    #gem-ashby-job-picker-confirm-mask.visible {
+      display: flex;
+    }
+    #gem-ashby-job-picker-confirm-card {
+      width: min(440px, 100%);
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+    }
+    #gem-ashby-job-picker-confirm-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+    }
+    #gem-ashby-job-picker-confirm-body {
+      font-size: 14px;
+      color: #32363c;
+      margin-bottom: 14px;
+      word-break: break-word;
+    }
+    #gem-ashby-job-picker-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-ashby-job-picker-confirm-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    #gem-ashby-job-picker-confirm-cancel {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    #gem-ashby-job-picker-confirm-ok {
+      border-color: #4b3fa8;
+      background: #4b3fa8;
+      color: #fff;
     }
   `;
   document.documentElement.appendChild(style);
@@ -1314,6 +1405,9 @@ async function showCustomFieldPicker(runId, context) {
         item.appendChild(value);
         item.appendChild(meta);
         item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
           selectedIndex = index;
           renderFields();
         });
@@ -1438,6 +1532,9 @@ async function showCustomFieldPicker(runId, context) {
         item.appendChild(hotkey);
         item.appendChild(value);
         item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
           selectedIndex = index;
           renderValues();
         });
@@ -1942,8 +2039,14 @@ async function showReminderPicker(runId, context) {
   });
 }
 
-async function showSequencePicker(runId, linkedinUrl) {
+async function showSequencePicker(runId, linkedinUrl, options = {}) {
   createSequencePickerStyles();
+  const actionId = options.actionId || ACTIONS.SEND_SEQUENCE;
+  const titleText = String(options.title || "Open Sequence");
+  const subtitleText = String(
+    options.subtitle || "Press a letter to pick a sequence. Use Enter to open it in Gem."
+  );
+  const hintText = String(options.hint || "Esc to cancel. Arrow keys + Enter also work.");
 
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
@@ -1954,11 +2057,11 @@ async function showSequencePicker(runId, linkedinUrl) {
 
     const title = document.createElement("div");
     title.id = "gem-sequence-picker-title";
-    title.textContent = "Open Sequence";
+    title.textContent = titleText;
 
     const subtitle = document.createElement("div");
     subtitle.id = "gem-sequence-picker-subtitle";
-    subtitle.textContent = "Press a letter to pick a sequence. Use Enter to open it in Gem.";
+    subtitle.textContent = subtitleText;
 
     const results = document.createElement("div");
     results.id = "gem-sequence-picker-results";
@@ -1968,7 +2071,7 @@ async function showSequencePicker(runId, linkedinUrl) {
 
     const hint = document.createElement("div");
     hint.className = "gem-sequence-picker-hint";
-    hint.textContent = "Esc to cancel. Arrow keys + Enter also work.";
+    hint.textContent = hintText;
 
     modal.appendChild(title);
     modal.appendChild(subtitle);
@@ -2013,7 +2116,7 @@ async function showSequencePicker(runId, linkedinUrl) {
       logEvent({
         source: "extension.content",
         event: "sequence_picker.selected",
-        actionId: ACTIONS.SEND_SEQUENCE,
+        actionId,
         runId,
         message: `Selected sequence ${sequence.name || sequence.id}.`,
         link: linkedinUrl,
@@ -2076,6 +2179,9 @@ async function showSequencePicker(runId, linkedinUrl) {
         item.appendChild(name);
         item.appendChild(meta);
         item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
           selectedIndex = index;
           renderSequences();
         });
@@ -2096,7 +2202,7 @@ async function showSequencePicker(runId, linkedinUrl) {
         source: "extension.content",
         level: "warn",
         event: "sequence_picker.cancelled",
-        actionId: ACTIONS.SEND_SEQUENCE,
+        actionId,
         runId,
         message: reason,
         link: linkedinUrl
@@ -2173,13 +2279,13 @@ async function showSequencePicker(runId, linkedinUrl) {
     logEvent({
       source: "extension.content",
       event: "sequence_picker.opened",
-      actionId: ACTIONS.SEND_SEQUENCE,
+      actionId,
       runId,
       message: "Sequence picker opened.",
       link: linkedinUrl
     });
 
-    listSequences("", runId)
+    listSequences("", runId, actionId)
       .then(async (sequences) => {
         allSequences = sequences;
         loading = false;
@@ -2188,7 +2294,7 @@ async function showSequencePicker(runId, linkedinUrl) {
         await logEvent({
           source: "extension.content",
           event: "sequence_picker.loaded",
-          actionId: ACTIONS.SEND_SEQUENCE,
+          actionId,
           runId,
           message: `Sequence picker loaded ${allSequences.length} sequences.`,
           link: linkedinUrl,
@@ -2206,7 +2312,7 @@ async function showSequencePicker(runId, linkedinUrl) {
           source: "extension.content",
           level: "error",
           event: "sequence_picker.load_failed",
-          actionId: ACTIONS.SEND_SEQUENCE,
+          actionId,
           runId,
           message: loadError,
           link: linkedinUrl,
@@ -2522,6 +2628,28 @@ async function showProjectPicker(runId, linkedinUrl) {
       resolve(selected || null);
     }
 
+    function selectProject(project) {
+      if (!project) {
+        return;
+      }
+      logEvent({
+        source: "extension.content",
+        event: "project_picker.selected",
+        actionId: ACTIONS.ADD_TO_PROJECT,
+        runId,
+        message: `Selected project ${project.name || project.id}.`,
+        link: linkedinUrl,
+        details: {
+          projectId: project.id,
+          projectName: project.name || ""
+        }
+      });
+      finish({
+        id: project.id,
+        name: project.name || ""
+      });
+    }
+
     function renderList() {
       filteredProjects = filterProjectsByQuery(allProjects, input.value || "");
       if (selectedIndex >= filteredProjects.length) {
@@ -2559,26 +2687,16 @@ async function showProjectPicker(runId, linkedinUrl) {
         item.className = `gem-project-picker-item${index === selectedIndex ? " active" : ""}`;
         item.textContent = project.name || project.id;
         item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
           selectedIndex = index;
           renderList();
         });
-        item.addEventListener("click", () => {
-          logEvent({
-            source: "extension.content",
-            event: "project_picker.selected",
-            actionId: ACTIONS.ADD_TO_PROJECT,
-            runId,
-            message: `Selected project ${project.name || project.id}.`,
-            link: linkedinUrl,
-            details: {
-              projectId: project.id,
-              projectName: project.name || ""
-            }
-          });
-          finish({
-            id: project.id,
-            name: project.name || ""
-          });
+        item.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          selectProject(project);
         });
         results.appendChild(item);
       });
@@ -2608,23 +2726,7 @@ async function showProjectPicker(runId, linkedinUrl) {
       if (event.key === "Enter") {
         event.preventDefault();
         if (!loading && filteredProjects.length > 0) {
-          const project = filteredProjects[selectedIndex];
-          logEvent({
-            source: "extension.content",
-            event: "project_picker.selected",
-            actionId: ACTIONS.ADD_TO_PROJECT,
-            runId,
-            message: `Selected project ${project.name || project.id}.`,
-            link: linkedinUrl,
-            details: {
-              projectId: project.id,
-              projectName: project.name || ""
-            }
-          });
-          finish({
-            id: project.id,
-            name: project.name || ""
-          });
+          selectProject(filteredProjects[selectedIndex]);
         }
         return;
       }
@@ -2749,14 +2851,36 @@ async function showAshbyJobPicker(runId, profileUrl) {
     const hint = document.createElement("div");
     hint.className = "gem-ashby-job-picker-hint";
     const hintText = document.createElement("span");
-    hintText.textContent = "Esc to cancel.";
-    const uploadBtn = document.createElement("button");
-    uploadBtn.id = "gem-ashby-job-picker-upload";
-    uploadBtn.type = "button";
-    uploadBtn.textContent = "Upload candidate";
-    uploadBtn.disabled = true;
+    hintText.textContent = "Click a job or press Enter to continue. Esc to cancel.";
     hint.appendChild(hintText);
-    hint.appendChild(uploadBtn);
+
+    const confirmMask = document.createElement("div");
+    confirmMask.id = "gem-ashby-job-picker-confirm-mask";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-ashby-job-picker-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-ashby-job-picker-confirm-title";
+    confirmTitle.textContent = "Confirm Upload";
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-ashby-job-picker-confirm-body";
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-ashby-job-picker-confirm-actions";
+    const confirmCancelBtn = document.createElement("button");
+    confirmCancelBtn.id = "gem-ashby-job-picker-confirm-cancel";
+    confirmCancelBtn.className = "gem-ashby-job-picker-confirm-btn";
+    confirmCancelBtn.type = "button";
+    confirmCancelBtn.textContent = "Cancel";
+    const confirmOkBtn = document.createElement("button");
+    confirmOkBtn.id = "gem-ashby-job-picker-confirm-ok";
+    confirmOkBtn.className = "gem-ashby-job-picker-confirm-btn";
+    confirmOkBtn.type = "button";
+    confirmOkBtn.textContent = "Confirm";
+    confirmActions.appendChild(confirmCancelBtn);
+    confirmActions.appendChild(confirmOkBtn);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    confirmMask.appendChild(confirmCard);
 
     modal.appendChild(brand);
     modal.appendChild(title);
@@ -2764,17 +2888,46 @@ async function showAshbyJobPicker(runId, profileUrl) {
     modal.appendChild(input);
     modal.appendChild(results);
     modal.appendChild(hint);
+    modal.appendChild(confirmMask);
     overlay.appendChild(modal);
     document.documentElement.appendChild(overlay);
 
     let selectedIndex = 0;
+    let selectedJobId = "";
+    let confirmationJob = null;
     let filteredJobs = [];
     let allJobs = [];
     let loading = true;
     let loadError = "";
     const startedAt = Date.now();
+    let disposed = false;
+
+    function isOpenAshbyJob(job) {
+      if (!job || typeof job !== "object") {
+        return false;
+      }
+      if (typeof job.isOpen === "boolean") {
+        return job.isOpen;
+      }
+      const status = String(job.status || "").trim().toLowerCase();
+      if (status.includes("open")) {
+        return true;
+      }
+      if (!status) {
+        return !Boolean(job.isArchived);
+      }
+      if (status.includes("closed") || status.includes("archived") || status.includes("draft")) {
+        return false;
+      }
+      return !Boolean(job.isArchived);
+    }
 
     function cleanup() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      window.removeEventListener("keydown", onWindowKeyDown, true);
       overlay.remove();
     }
 
@@ -2783,11 +2936,65 @@ async function showAshbyJobPicker(runId, profileUrl) {
       resolve(selected || null);
     }
 
+    function isConfirming() {
+      return Boolean(confirmationJob);
+    }
+
     function getSelectedJob() {
       if (loading || filteredJobs.length === 0) {
         return null;
       }
+      const byId = selectedJobId ? filteredJobs.find((job) => String(job?.id || "") === selectedJobId) : null;
+      if (byId) {
+        return byId;
+      }
       return filteredJobs[Math.max(0, Math.min(selectedIndex, filteredJobs.length - 1))] || null;
+    }
+
+    function getQuickSelectIndex(event) {
+      const code = String(event?.code || "");
+      let rawDigit = "";
+      if (/^Digit[0-9]$/.test(code)) {
+        rawDigit = code.slice(5);
+      } else if (/^Numpad[0-9]$/.test(code)) {
+        rawDigit = code.slice(6);
+      } else if (/^[0-9]$/.test(String(event?.key || "")) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        rawDigit = String(event.key);
+      } else {
+        return -1;
+      }
+      const value = rawDigit === "0" ? 10 : Number(rawDigit);
+      if (!Number.isFinite(value) || value <= 0) {
+        return -1;
+      }
+      return value - 1;
+    }
+
+    function moveSelection(delta) {
+      if (loading || filteredJobs.length === 0) {
+        return;
+      }
+      const currentById = selectedJobId ? filteredJobs.findIndex((job) => String(job?.id || "") === selectedJobId) : -1;
+      const baseIndex = currentById >= 0 ? currentById : Math.max(0, Math.min(selectedIndex, filteredJobs.length - 1));
+      const nextIndex = (baseIndex + delta + filteredJobs.length) % filteredJobs.length;
+      const nextJob = filteredJobs[nextIndex] || null;
+      selectedIndex = nextIndex;
+      selectedJobId = nextJob ? String(nextJob.id || "") : "";
+      renderList();
+    }
+
+    function selectByQuickIndex(index) {
+      if (loading || index < 0 || index >= filteredJobs.length) {
+        return null;
+      }
+      const job = filteredJobs[index] || null;
+      if (!job) {
+        return null;
+      }
+      selectedIndex = index;
+      selectedJobId = String(job.id || "");
+      renderList();
+      return job;
     }
 
     function filterJobs(query) {
@@ -2824,16 +3031,65 @@ async function showAshbyJobPicker(runId, profileUrl) {
       });
     }
 
+    function updateConfirmationMask() {
+      if (!confirmationJob) {
+        confirmMask.classList.remove("visible");
+        input.focus();
+        return;
+      }
+      const jobName = String(confirmationJob.name || confirmationJob.id || "").trim();
+      confirmBody.textContent = `Upload candidate to "${jobName}"?`;
+      confirmMask.classList.add("visible");
+      confirmOkBtn.focus();
+    }
+
+    function openConfirmation(job) {
+      if (!job) {
+        return;
+      }
+      confirmationJob = {
+        id: String(job.id || "").trim(),
+        name: String(job.name || "").trim(),
+        status: String(job.status || "").trim()
+      };
+      updateConfirmationMask();
+    }
+
+    function closeConfirmation() {
+      if (!confirmationJob) {
+        return;
+      }
+      confirmationJob = null;
+      updateConfirmationMask();
+    }
+
+    function confirmSelection() {
+      if (!confirmationJob) {
+        return;
+      }
+      const chosen = confirmationJob;
+      confirmationJob = null;
+      selectJob(chosen);
+    }
+
     function renderList() {
       filteredJobs = filterJobs(input.value || "");
-      if (selectedIndex >= filteredJobs.length) {
-        selectedIndex = Math.max(0, filteredJobs.length - 1);
-      }
-      if (selectedIndex < 0) {
+      if (filteredJobs.length === 0) {
         selectedIndex = 0;
+        selectedJobId = "";
+      } else {
+        const selectedByIdIndex = selectedJobId ? filteredJobs.findIndex((job) => String(job?.id || "") === selectedJobId) : -1;
+        if (selectedByIdIndex >= 0) {
+          selectedIndex = selectedByIdIndex;
+        } else if (selectedIndex >= filteredJobs.length) {
+          selectedIndex = Math.max(0, filteredJobs.length - 1);
+        } else if (selectedIndex < 0) {
+          selectedIndex = 0;
+        }
+        const selected = filteredJobs[selectedIndex] || null;
+        selectedJobId = selected ? String(selected.id || "") : "";
       }
 
-      uploadBtn.disabled = !getSelectedJob();
       results.innerHTML = "";
       if (loading) {
         const loadingNode = document.createElement("div");
@@ -2859,10 +3115,19 @@ async function showAshbyJobPicker(runId, profileUrl) {
 
       filteredJobs.forEach((job, index) => {
         const item = document.createElement("div");
-        item.className = `gem-ashby-job-picker-item${index === selectedIndex ? " active" : ""}`;
+        const jobId = String(job.id || "");
+        item.className = `gem-ashby-job-picker-item${jobId === selectedJobId ? " active" : ""}`;
 
         const left = document.createElement("span");
-        left.textContent = job.name || job.id;
+        left.className = "gem-ashby-job-picker-item-left";
+        const key = document.createElement("span");
+        key.className = "gem-ashby-job-picker-item-key";
+        key.textContent = String(index + 1);
+        const name = document.createElement("span");
+        name.className = "gem-ashby-job-picker-item-name";
+        name.textContent = job.name || job.id;
+        left.appendChild(key);
+        left.appendChild(name);
 
         const status = document.createElement("span");
         status.className = "gem-ashby-job-picker-item-status";
@@ -2871,84 +3136,159 @@ async function showAshbyJobPicker(runId, profileUrl) {
         item.appendChild(left);
         item.appendChild(status);
         item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index && selectedJobId === jobId) {
+            return;
+          }
           selectedIndex = index;
+          selectedJobId = jobId;
           renderList();
         });
         item.addEventListener("click", () => {
           selectedIndex = index;
+          selectedJobId = jobId;
           renderList();
+          openConfirmation(job);
         });
         item.addEventListener("dblclick", () => {
-          selectJob(job);
+          selectedIndex = index;
+          selectedJobId = jobId;
+          renderList();
+          openConfirmation(job);
         });
         results.appendChild(item);
       });
     }
 
-    function submitSelection() {
-      const selected = getSelectedJob();
-      if (!selected) {
-        return;
-      }
-      selectJob(selected);
-    }
-
     input.addEventListener("input", () => {
       selectedIndex = 0;
+      selectedJobId = "";
+      confirmationJob = null;
+      updateConfirmationMask();
       renderList();
     });
     input.addEventListener("keydown", (event) => {
+      if (isConfirming()) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          confirmSelection();
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeConfirmation();
+          return;
+        }
+      }
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        if (!loading && filteredJobs.length > 0) {
-          selectedIndex = (selectedIndex + 1) % filteredJobs.length;
-          renderList();
-        }
+        moveSelection(1);
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        if (!loading && filteredJobs.length > 0) {
-          selectedIndex = (selectedIndex - 1 + filteredJobs.length) % filteredJobs.length;
-          renderList();
+        moveSelection(-1);
+        return;
+      }
+      const quickIndex = getQuickSelectIndex(event);
+      if (quickIndex >= 0) {
+        const quickJob = selectByQuickIndex(quickIndex);
+        if (quickJob) {
+          event.preventDefault();
+          openConfirmation(quickJob);
         }
         return;
       }
       if (event.key === "Enter") {
         event.preventDefault();
-        submitSelection();
+        openConfirmation(getSelectedJob());
         return;
       }
       if (event.key === "Escape") {
         event.preventDefault();
-        logEvent({
-          source: "extension.content",
-          level: "warn",
-          event: "ashby_job_picker.cancelled",
-          actionId: ACTIONS.UPLOAD_TO_ASHBY,
-          runId,
-          message: "Ashby job picker cancelled.",
-          link: profileUrl
-        });
+        cancelPicker("Ashby job picker cancelled.");
         finish(null);
       }
     });
 
-    uploadBtn.addEventListener("click", () => {
-      submitSelection();
+    function cancelPicker(message) {
+      logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "ashby_job_picker.cancelled",
+        actionId: ACTIONS.UPLOAD_TO_ASHBY,
+        runId,
+        message,
+        link: profileUrl
+      });
+    }
+
+    function onWindowKeyDown(event) {
+      if (disposed || event.defaultPrevented) {
+        return;
+      }
+      if (event.key === "Enter") {
+        if (isConfirming()) {
+          event.preventDefault();
+          event.stopPropagation();
+          confirmSelection();
+          return;
+        }
+        if (event.target === input) {
+          return;
+        }
+        const selected = getSelectedJob();
+        if (!selected) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        openConfirmation(selected);
+        return;
+      }
+      const quickIndex = getQuickSelectIndex(event);
+      if (quickIndex >= 0) {
+        const quickJob = selectByQuickIndex(quickIndex);
+        if (!quickJob) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        openConfirmation(quickJob);
+        return;
+      }
+      if (event.key === "Escape") {
+        if (isConfirming()) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeConfirmation();
+          return;
+        }
+        if (event.target === input) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        cancelPicker("Ashby job picker cancelled.");
+        finish(null);
+      }
+    }
+    window.addEventListener("keydown", onWindowKeyDown, true);
+
+    confirmOkBtn.addEventListener("click", () => {
+      confirmSelection();
+    });
+    confirmCancelBtn.addEventListener("click", () => {
+      closeConfirmation();
+    });
+    confirmMask.addEventListener("click", (event) => {
+      if (event.target === confirmMask) {
+        closeConfirmation();
+      }
     });
 
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) {
-        logEvent({
-          source: "extension.content",
-          level: "warn",
-          event: "ashby_job_picker.cancelled",
-          actionId: ACTIONS.UPLOAD_TO_ASHBY,
-          runId,
-          message: "Ashby job picker cancelled by outside click.",
-          link: profileUrl
-        });
+        cancelPicker("Ashby job picker cancelled by outside click.");
         finish(null);
       }
     });
@@ -2967,7 +3307,7 @@ async function showAshbyJobPicker(runId, profileUrl) {
 
     listAshbyJobs("", runId)
       .then(async (jobs) => {
-        allJobs = jobs.filter((job) => !job.isArchived);
+        allJobs = jobs.filter((job) => isOpenAshbyJob(job) && !job.isArchived);
         loading = false;
         loadError = "";
         renderList();
@@ -3047,7 +3387,24 @@ async function getRuntimeContext(actionId, settings, runId) {
   }
 
   if (actionId === ACTIONS.SEND_SEQUENCE && !settings.defaultSequenceId) {
-    const sequence = await showSequencePicker(runId, context.linkedinUrl);
+    const sequence = await showSequencePicker(runId, context.linkedinUrl, {
+      actionId: ACTIONS.SEND_SEQUENCE,
+      title: "Open Sequence",
+      subtitle: "Press a letter to pick a sequence. Use Enter to open it in Gem."
+    });
+    if (!sequence) {
+      return null;
+    }
+    context.sequenceId = String(sequence.id || "").trim();
+    context.sequenceName = String(sequence.name || "").trim();
+  }
+
+  if (actionId === ACTIONS.EDIT_SEQUENCE) {
+    const sequence = await showSequencePicker(runId, context.linkedinUrl, {
+      actionId: ACTIONS.EDIT_SEQUENCE,
+      title: "Edit Sequence",
+      subtitle: "Press a letter to pick a sequence. Use Enter to open edit stages in Gem."
+    });
     if (!sequence) {
       return null;
     }
@@ -3736,7 +4093,8 @@ function onKeyDown(event) {
   if (!isLinkedInProfilePage()) {
     return;
   }
-  if (isEditableElement(event.target)) {
+  const isModifierBasedShortcut = Boolean(event.metaKey || event.ctrlKey || event.altKey);
+  if (isEditableElement(event.target) && !isModifierBasedShortcut) {
     return;
   }
 

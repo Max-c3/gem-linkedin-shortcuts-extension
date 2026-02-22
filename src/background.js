@@ -16,6 +16,9 @@ const SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000;
 const SEQUENCE_CACHE_LIMIT = 0;
 const SEQUENCE_RECENT_USAGE_LIMIT = 300;
 const SEQUENCE_QUERY_LIMIT_MAX = 20000;
+const ASHBY_JOBS_QUERY_LIMIT_MAX = 5000;
+const ASHBY_JOB_RECENT_USAGE_KEY = "ashbyJobRecentUsage";
+const ASHBY_JOB_RECENT_USAGE_LIMIT = 300;
 const CUSTOM_FIELD_CACHE_KEY = "customFieldPickerCache";
 const CUSTOM_FIELD_CACHE_TTL_MS = 10 * 60 * 1000;
 const CUSTOM_FIELD_CACHE_LIMIT = 200;
@@ -106,7 +109,7 @@ function validateShortcutMap(shortcuts) {
 
 function broadcastSettingsToLinkedInTabs(settings) {
   return new Promise((resolve) => {
-    chrome.tabs.query({ url: ["https://www.linkedin.com/*"] }, (tabs) => {
+    chrome.tabs.query({ url: ["https://www.linkedin.com/*", "https://www.gem.com/*", "https://app.gem.com/*"] }, (tabs) => {
       if (chrome.runtime.lastError || !Array.isArray(tabs) || tabs.length === 0) {
         resolve();
         return;
@@ -237,6 +240,18 @@ async function getSequenceRecentUsage() {
 
 async function setSequenceRecentUsage(usage) {
   await setInLocalStorage(SEQUENCE_RECENT_USAGE_KEY, usage);
+}
+
+async function getAshbyJobRecentUsage() {
+  const usage = await getFromLocalStorage(ASHBY_JOB_RECENT_USAGE_KEY);
+  if (!usage || typeof usage !== "object") {
+    return {};
+  }
+  return usage;
+}
+
+async function setAshbyJobRecentUsage(usage) {
+  await setInLocalStorage(ASHBY_JOB_RECENT_USAGE_KEY, usage);
 }
 
 function getCustomFieldCacheKey(context) {
@@ -493,6 +508,58 @@ function sortSequencesForPicker(sequences, usageMap, query) {
   });
 }
 
+function isOpenAshbyJob(item) {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+  if (typeof item.isOpen === "boolean") {
+    return item.isOpen;
+  }
+  const status = String(item.status || "").trim().toLowerCase();
+  if (status.includes("open")) {
+    return true;
+  }
+  if (!status) {
+    return !Boolean(item.isArchived);
+  }
+  if (status.includes("closed") || status.includes("archived") || status.includes("draft")) {
+    return false;
+  }
+  return !Boolean(item.isArchived);
+}
+
+function sortAshbyJobsForPicker(jobs, usageMap, query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const byId = new Map();
+
+  for (const item of Array.isArray(jobs) ? jobs : []) {
+    const job = normalizeAshbyJob(item);
+    if (!job || !isOpenAshbyJob(job) || job.isArchived) {
+      continue;
+    }
+    if (normalizedQuery && !job.name.toLowerCase().includes(normalizedQuery)) {
+      continue;
+    }
+    byId.set(job.id, job);
+  }
+
+  return Array.from(byId.values()).sort((a, b) => {
+    const aRecent = Number(usageMap?.[a.id]?.lastUsedAtMs) || 0;
+    const bRecent = Number(usageMap?.[b.id]?.lastUsedAtMs) || 0;
+    if (aRecent !== bRecent) {
+      return bRecent - aRecent;
+    }
+
+    const aUpdated = parseIsoDate(a.updatedAt);
+    const bUpdated = parseIsoDate(b.updatedAt);
+    if (aUpdated !== bUpdated) {
+      return bUpdated - aUpdated;
+    }
+
+    return a.name.localeCompare(b.name);
+  });
+}
+
 async function touchProjectRecentUsage(projectId, projectName = "") {
   const id = String(projectId || "").trim();
   if (!id) {
@@ -545,6 +612,33 @@ async function touchSequenceRecentUsage(sequenceId, sequenceName = "") {
     }, {});
 
   await setSequenceRecentUsage(pruned);
+}
+
+async function touchAshbyJobRecentUsage(jobId, jobName = "") {
+  const id = String(jobId || "").trim();
+  if (!id) {
+    return;
+  }
+
+  const usage = await getAshbyJobRecentUsage();
+  const now = Date.now();
+  const previous = usage[id] || {};
+  usage[id] = {
+    lastUsedAtMs: now,
+    lastUsedAt: new Date(now).toISOString(),
+    count: (Number(previous.count) || 0) + 1,
+    name: jobName || previous.name || ""
+  };
+
+  const pruned = Object.entries(usage)
+    .sort((a, b) => (Number(b[1]?.lastUsedAtMs) || 0) - (Number(a[1]?.lastUsedAtMs) || 0))
+    .slice(0, ASHBY_JOB_RECENT_USAGE_LIMIT)
+    .reduce((acc, [key, value]) => {
+      acc[key] = value;
+      return acc;
+    }, {});
+
+  await setAshbyJobRecentUsage(pruned);
 }
 
 async function refreshProjectsFromBackend(settings, runId, limit = PROJECT_CACHE_LIMIT) {
@@ -636,6 +730,47 @@ function normalizeSequenceLimit(value) {
     return 0;
   }
   return Math.max(1, Math.min(raw, SEQUENCE_QUERY_LIMIT_MAX));
+}
+
+function normalizeAshbyJobLimit(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.min(raw, ASHBY_JOBS_QUERY_LIMIT_MAX));
+}
+
+function normalizeAshbyJob(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const id = String(raw.id || "").trim();
+  if (!id) {
+    return null;
+  }
+  const status = String(raw.status || "").trim();
+  const statusLower = status.toLowerCase();
+  const isArchived = Boolean(raw.isArchived) || statusLower.includes("archived");
+  let isOpen = false;
+  if (typeof raw.isOpen === "boolean") {
+    isOpen = raw.isOpen;
+  } else if (statusLower.includes("open")) {
+    isOpen = true;
+  } else if (!statusLower) {
+    isOpen = !isArchived;
+  } else if (statusLower.includes("closed") || statusLower.includes("draft") || statusLower.includes("archived")) {
+    isOpen = false;
+  } else {
+    isOpen = !isArchived;
+  }
+  return {
+    id,
+    name: String(raw.name || raw.title || id).trim(),
+    status: status || (isOpen ? "Open" : "Closed"),
+    isOpen,
+    isArchived,
+    updatedAt: String(raw.updatedAt || raw.createdAt || "")
+  };
 }
 
 function normalizeLogEntry(event) {
@@ -758,6 +893,35 @@ function buildGemSequenceAutomationUrl(baseUrl, params) {
   url = ensureQueryParam(url, "glsSequenceId", params.sequenceId || "");
   url = ensureQueryParam(url, "glsSequenceName", params.sequenceName || "");
   return url;
+}
+
+function buildGemSequenceEditUrl(settings, sequenceId) {
+  const id = String(sequenceId || "").trim();
+  if (!id) {
+    return "";
+  }
+
+  const templateUrl = normalizeGemHost(
+    applyTemplate(settings.sequenceComposeUrlTemplate, {
+      sequenceId: id
+    })
+  );
+  if (!templateUrl) {
+    return `https://www.gem.com/sequence/${id}/edit/stages`;
+  }
+
+  try {
+    const parsed = new URL(templateUrl);
+    const listMatch = parsed.pathname.match(/^\/sequences\/([^/]+)\/?$/);
+    const singularMatch = parsed.pathname.match(/^\/sequence\/([^/]+)(?:\/.*)?$/);
+    const resolvedId = listMatch?.[1] || singularMatch?.[1] || id;
+    parsed.pathname = `/sequence/${resolvedId}/edit/stages`;
+    parsed.search = "";
+    parsed.hash = "";
+    return normalizeGemHost(parsed.toString());
+  } catch (_error) {
+    return `https://www.gem.com/sequence/${id}/edit/stages`;
+  }
 }
 
 async function callBackend(path, payload, settings, audit = {}) {
@@ -955,11 +1119,13 @@ async function runAction(actionId, context, settings, meta = {}) {
     runId,
     source: `extension.${source}`,
     message: `Action requested: ${actionId}`,
-    link: context.linkedinUrl || "",
+    link: context.linkedinUrl || context.gemProfileUrl || "",
     details: {
       source,
       linkedInHandle: context.linkedInHandle || "",
-      profileName: context.profileName || ""
+      profileName: context.profileName || "",
+      gemCandidateId: context.gemCandidateId || "",
+      ashbyJobId: context.ashbyJobId || ""
     }
   });
 
@@ -989,17 +1155,85 @@ async function runAction(actionId, context, settings, meta = {}) {
     });
     return { ok: false, message, runId };
   }
-  if (!context.linkedinUrl) {
-    const message = "No LinkedIn profile URL detected.";
+  if (!context.linkedinUrl && !context.gemCandidateId) {
+    const message = "No supported profile context detected for this action.";
     logEvent(settings, {
       level: "warn",
       event: "action.rejected",
       actionId,
       runId,
       source: `extension.${source}`,
-      message
+      message,
+      link: context.linkedinUrl || context.gemProfileUrl || ""
     });
     return { ok: false, message, runId };
+  }
+
+  if (actionId === ACTIONS.OPEN_ASHBY_PROFILE) {
+    const linkedInUrl = String(context.linkedinUrl || "").trim();
+    const linkedInHandle = String(context.linkedInHandle || "").trim();
+    if (!linkedInUrl && !linkedInHandle) {
+      const message = "Could not determine LinkedIn profile URL.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl || ""
+      });
+      return { ok: false, message, runId };
+    }
+
+    const lookup = await callBackend(
+      "/api/ashby/candidates/find-by-linkedin",
+      {
+        linkedInUrl,
+        linkedInHandle,
+        profileName: String(context.profileName || "").trim()
+      },
+      settings,
+      { ...audit, step: "findAshbyCandidateByLinkedIn" }
+    );
+
+    const url = String(lookup?.link || lookup?.candidate?.profileUrl || "").trim();
+    if (!lookup?.found || !url) {
+      const message = lookup?.message || "No Ashby candidate matched this LinkedIn profile.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl || "",
+        details: {
+          linkedInHandle,
+          linkedInUrl
+        }
+      });
+      return { ok: false, message, runId };
+    }
+
+    await chrome.tabs.create({ url });
+    const message = lookup?.message || "Opened profile in Ashby.";
+    logEvent(settings, {
+      event: "action.succeeded",
+      actionId,
+      runId,
+      source: `extension.${source}`,
+      message,
+      link: url,
+      details: {
+        linkedInHandle,
+        linkedInUrl,
+        ashbyCandidateId: String(lookup?.candidate?.id || ""),
+        indexAgeMs: Number(lookup?.index?.ageMs) || 0,
+        indexFresh: Boolean(lookup?.index?.fresh)
+      }
+    });
+    return { ok: true, message, runId, link: url, details: lookup };
   }
 
   if (actionId === ACTIONS.ADD_PROSPECT) {
@@ -1015,6 +1249,117 @@ async function runAction(actionId, context, settings, meta = {}) {
       details: { candidateId: candidate.id }
     });
     return { ok: true, message, runId, link: candidate.weblink || "" };
+  }
+
+  if (actionId === ACTIONS.UPLOAD_TO_ASHBY) {
+    const jobId = String(context.ashbyJobId || "").trim();
+    if (!jobId) {
+      const message = "Missing Ashby job selection.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl || context.gemProfileUrl || ""
+      });
+      return { ok: false, message, runId };
+    }
+
+    let gemCandidateId = String(context.gemCandidateId || "").trim();
+    if (!gemCandidateId) {
+      const candidate = await ensureCandidate(settings, context, audit);
+      gemCandidateId = String(candidate.id || "").trim();
+    }
+    if (!gemCandidateId) {
+      throw new Error("Could not resolve candidate id for Ashby upload.");
+    }
+
+    const data = await callBackend(
+      "/api/ashby/upload-candidate",
+      {
+        gemCandidateId,
+        jobId,
+        jobName: String(context.ashbyJobName || "").trim(),
+        profileName: String(context.profileName || "").trim()
+      },
+      settings,
+      { ...audit, step: "uploadToAshby" }
+    );
+
+    const message = data?.message || "Uploaded candidate to Ashby.";
+    const link = String(data?.link || "").trim();
+    await touchAshbyJobRecentUsage(jobId, String(context.ashbyJobName || "").trim());
+    logEvent(settings, {
+      event: "action.succeeded",
+      actionId,
+      runId,
+      source: `extension.${source}`,
+      message,
+      link: link || context.linkedinUrl || context.gemProfileUrl || "",
+      details: {
+        gemCandidateId,
+        ashbyJobId: jobId,
+        ashbyJobName: String(context.ashbyJobName || "").trim(),
+        ashbyApplicationId: String(data?.ashbyApplicationId || ""),
+        ashbyCandidateId: String(data?.ashbyCandidateId || ""),
+        stageTitle: String(data?.stageTitle || "")
+      }
+    });
+    return { ok: true, message, runId, link, details: data || {} };
+  }
+
+  if (actionId === ACTIONS.EDIT_SEQUENCE) {
+    const sequenceId = String(context.sequenceId || "").trim();
+    if (!sequenceId) {
+      const message = "Pick a sequence to edit.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl || context.gemProfileUrl || ""
+      });
+      return { ok: false, message, runId };
+    }
+
+    await touchSequenceRecentUsage(sequenceId, context.sequenceName || "");
+    const openUrl = buildGemSequenceEditUrl(settings, sequenceId);
+    if (!openUrl) {
+      const message = "Could not build a Gem URL for sequence edit.";
+      logEvent(settings, {
+        level: "error",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        details: {
+          sequenceId,
+          sequenceName: context.sequenceName || ""
+        }
+      });
+      return { ok: false, message, runId };
+    }
+
+    await chrome.tabs.create({ url: openUrl });
+    const message = "Opened sequence edit view in Gem.";
+    logEvent(settings, {
+      event: "action.succeeded",
+      actionId,
+      runId,
+      source: `extension.${source}`,
+      message,
+      link: openUrl,
+      details: {
+        sequenceId,
+        sequenceName: context.sequenceName || ""
+      }
+    });
+    return { ok: true, message, runId, link: openUrl };
   }
 
   const candidate = await ensureCandidate(settings, context, audit);
@@ -1637,7 +1982,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     getSettings()
       .then(async (settings) => {
         const runId = message.runId || generateId();
-        const actionId = ACTIONS.SEND_SEQUENCE;
+        const requestedActionId = String(message.actionId || "").trim();
+        const validActionIds = Object.values(ACTIONS);
+        const actionId = validActionIds.includes(requestedActionId) ? requestedActionId : ACTIONS.SEND_SEQUENCE;
         const query = String(message.query || "").trim();
         const limit = normalizeSequenceLimit(message.limit);
         const cache = await getSequenceCache();
@@ -1675,6 +2022,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
         });
         sendResponse({ ok: true, sequences: trimmed, runId });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "LIST_ASHBY_JOBS") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const actionId = ACTIONS.UPLOAD_TO_ASHBY;
+        const query = String(message.query || "").trim();
+        const limit = normalizeAshbyJobLimit(message.limit);
+        const data = await callBackend(
+          "/api/ashby/jobs/list",
+          {
+            query,
+            limit
+          },
+          settings,
+          { actionId, runId, step: "listAshbyJobs" }
+        );
+        const jobs = Array.isArray(data?.jobs) ? data.jobs.map(normalizeAshbyJob).filter(Boolean) : [];
+        const usageMap = await getAshbyJobRecentUsage();
+        const sorted = sortAshbyJobsForPicker(jobs, usageMap, query);
+        const trimmed = limit > 0 ? sorted.slice(0, limit) : sorted;
+        logEvent(settings, {
+          event: "ashby.jobs.list.loaded",
+          actionId,
+          runId,
+          message: `Loaded ${trimmed.length} Ashby jobs for picker.`,
+          details: {
+            query,
+            limit
+          }
+        });
+        sendResponse({ ok: true, jobs: trimmed, runId });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));
     return true;

@@ -3,10 +3,13 @@
 const ACTIONS = {
   ADD_PROSPECT: "addProspect",
   ADD_TO_PROJECT: "addToProject",
+  UPLOAD_TO_ASHBY: "uploadToAshby",
+  OPEN_ASHBY_PROFILE: "openAshbyProfile",
   OPEN_ACTIVITY: "openActivity",
   SET_CUSTOM_FIELD: "setCustomField",
   SET_REMINDER: "setReminder",
   SEND_SEQUENCE: "sendSequence",
+  EDIT_SEQUENCE: "editSequence",
   VIEW_ACTIVITY_FEED: "viewActivityFeed"
 };
 
@@ -28,7 +31,10 @@ const DEFAULT_SETTINGS = {
     setCustomField: "Cmd+Option+4",
     sendSequence: "Cmd+Option+5",
     viewActivityFeed: "Cmd+Option+6",
-    setReminder: "Cmd+Option+7"
+    setReminder: "Cmd+Option+7",
+    uploadToAshby: "Cmd+Option+8",
+    editSequence: "Cmd+Option+9",
+    openAshbyProfile: "Cmd+Option+0"
   }
 };
 
