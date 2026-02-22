@@ -1945,27 +1945,99 @@ function buildLinkedInLookupKeys(payload) {
   };
 }
 
+function findCandidateRowsByLinkedInKeys(candidates, linkedInKeys) {
+  const keys = Array.from(new Set((Array.isArray(linkedInKeys) ? linkedInKeys : []).map((item) => normalizeLinkedInUrl(item)).filter(Boolean)));
+  if (keys.length === 0) {
+    return [];
+  }
+
+  const keySet = new Set(keys);
+  const rows = [];
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const row = summarizeAshbyCandidateForIndex(candidate);
+    if (!row?.profileUrl) {
+      continue;
+    }
+    if (Array.isArray(row.linkedInKeys) && row.linkedInKeys.some((key) => keySet.has(key))) {
+      rows.push(row);
+    }
+  }
+
+  return rows.sort((left, right) => {
+    const leftMs = Number(left?.updatedAtMs) || 0;
+    const rightMs = Number(right?.updatedAtMs) || 0;
+    if (rightMs !== leftMs) {
+      return rightMs - leftMs;
+    }
+    return String(left?.name || "").localeCompare(String(right?.name || ""));
+  });
+}
+
+async function findAshbyCandidatesByNameAndLinkedIn(profileName, linkedInKeys, audit) {
+  const name = String(profileName || "").trim();
+  if (!name) {
+    return [];
+  }
+  const response = await ashbyRequest("candidate.search", { name }, audit);
+  return findCandidateRowsByLinkedInKeys(response?.results, linkedInKeys);
+}
+
 async function findAshbyCandidateByLinkedIn(payload, audit) {
   const forceRefresh = Boolean(payload?.forceRefresh);
   const { handle, keys } = buildLinkedInLookupKeys(payload || {});
+  const profileName = firstNonEmpty(payload?.profileName, payload?.name, payload?.fullName);
+  const canUseNameFallback = Boolean(profileName);
   if (keys.length === 0) {
     throw new Error("linkedInUrl or linkedInHandle is required.");
   }
 
-  let index = await ensureAshbyCandidateIndex(audit, {
-    forceRefresh,
-    preferStale: true
-  });
-  let matches = findCandidatesByLinkedInKeys(index, keys);
-
-  if (
-    matches.length === 0 &&
-    (forceRefresh || !isAshbyCandidateIndexFresh(index) || !index.isComplete)
-  ) {
-    index = await ensureAshbyCandidateIndexRefresh(audit, {
-      forceFull: forceRefresh
+  let index = ashbyCandidateIndexCache;
+  const hasCachedIndex = ashbyCandidateIndexSize(index) > 0;
+  if (forceRefresh || hasCachedIndex || !canUseNameFallback) {
+    index = await ensureAshbyCandidateIndex(audit, {
+      forceRefresh,
+      preferStale: true
     });
+  } else {
+    scheduleAshbyCandidateIndexRefresh(audit, { forceFull: false });
+  }
+
+  let matches = findCandidatesByLinkedInKeys(index, keys);
+  let lookupStrategy = "index";
+
+  if (matches.length === 0 && canUseNameFallback) {
+    try {
+      const byNameMatches = await findAshbyCandidatesByNameAndLinkedIn(profileName, keys, audit);
+      if (byNameMatches.length > 0) {
+        matches = byNameMatches;
+        lookupStrategy = "name_search";
+      }
+    } catch (error) {
+      logEvent({
+        level: "warn",
+        source: "backend",
+        event: "ashby.candidate_lookup.name_fallback_failed",
+        message: error?.message || "Ashby name fallback lookup failed.",
+        requestId: audit.requestId,
+        route: audit.route,
+        runId: audit.runId,
+        actionId: audit.actionId,
+        details: {
+          profileName: String(profileName || "")
+        }
+      });
+    }
+  }
+
+  const shouldRefreshIndex =
+    matches.length === 0 &&
+    (forceRefresh || (ashbyCandidateIndexSize(index) > 0 && (!isAshbyCandidateIndexFresh(index) || !index.isComplete)));
+  if (shouldRefreshIndex) {
+    index = await ensureAshbyCandidateIndexRefresh(audit, { forceFull: forceRefresh });
     matches = findCandidatesByLinkedInKeys(index, keys);
+    if (matches.length > 0) {
+      lookupStrategy = "index_refresh";
+    }
   }
 
   if (matches.length === 0) {
@@ -1977,7 +2049,9 @@ async function findAshbyCandidateByLinkedIn(payload, audit) {
       index: getAshbyCandidateIndexMetadata(index),
       query: {
         linkedInHandle: handle,
-        linkedInKeys: keys
+        linkedInKeys: keys,
+        profileName: String(profileName || ""),
+        strategy: lookupStrategy
       }
     };
   }
@@ -2003,7 +2077,9 @@ async function findAshbyCandidateByLinkedIn(payload, audit) {
     index: getAshbyCandidateIndexMetadata(index),
     query: {
       linkedInHandle: handle,
-      linkedInKeys: keys
+      linkedInKeys: keys,
+      profileName: String(profileName || ""),
+      strategy: lookupStrategy
     }
   };
 }
