@@ -1487,17 +1487,49 @@ function extractGemCandidateEmail(candidate) {
     return direct;
   }
   const emails = Array.isArray(candidate?.emails) ? candidate.emails : [];
-  for (const item of emails) {
-    if (typeof item === "string" && item.trim()) {
+  const readEmail = (item) => {
+    if (!item) {
+      return "";
+    }
+    if (typeof item === "string") {
       return item.trim();
     }
-    if (item && typeof item === "object") {
-      const fromObject = firstNonEmpty(item.email, item.value, item.address);
-      if (fromObject) {
-        return fromObject;
-      }
+    if (typeof item !== "object") {
+      return "";
+    }
+    return firstNonEmpty(
+      item.email_address,
+      item.emailAddress,
+      item.email,
+      item.value,
+      item.address,
+      item?.email?.address,
+      item?.contact?.email_address,
+      item?.contact?.email
+    );
+  };
+
+  const primary = emails.find((item) => item && typeof item === "object" && item.is_primary === true);
+  const primaryValue = readEmail(primary);
+  if (primaryValue) {
+    return primaryValue;
+  }
+
+  for (const item of emails) {
+    const value = readEmail(item);
+    if (value) {
+      return value;
     }
   }
+
+  const emailAddresses = Array.isArray(candidate?.email_addresses) ? candidate.email_addresses : [];
+  for (const item of emailAddresses) {
+    const value = readEmail(item);
+    if (value) {
+      return value;
+    }
+  }
+
   return "";
 }
 
