@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gem LinkedIn Shortcuts</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="popup">
+    <h1>Gem LinkedIn Shortcuts</h1>
+    <label class="row checkbox">
+      <input id="enabled" type="checkbox" />
+      <span>Enable extension</span>
+    </label>
+    <div class="buttons">
+      <button data-action="addProspect">Add Prospect</button>
+      <button data-action="addToProject">Add to Project</button>
+      <button data-action="openActivity">Open Profile in Gem</button>
+      <button data-action="setCustomField">Set Custom Field</button>
+      <button data-action="sendSequence">Open Sequence</button>
+      <button data-action="viewActivityFeed">View Activity Feed</button>
+      <button id="open-options" class="secondary">Open Options</button>
+    </div>
+    <div id="status" class="status"></div>
+
+    <script src="./shared.js"></script>
+    <script src="./popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,4248 @@
+{
+  "info": {
+    "description": "\n\n# Introduction\n\nGem API is a [RESTful](https://en.wikipedia.org/wiki/Representational_state_transfer) API that\nprovides programmatic methods to access and modify data on the Gem platform. The API is hosted at\n`https://api.gem.com` and follows standard REST practices.\n\nRequests are made with standard HTTP methods (`GET`, `POST`, `PUT`, `DELETE`) to documented URI\nendpoints with `application/json` content type.\n\nResponses include standard HTTP response codes (`200`, `201`, `204`, `400`, `404`, etc) and JSON\nencoded body, where applicable. Errors are also represented with a JSON object in the response body.\n\n> **NOTE**: The Gem API is still in development mode. While stability and compatibility will be\n> carefully maintained as much as possible, changes will likely be introduced without notice.\n> However, breaking changes will always be introduced with a version change and/or prior\n> communication from the support team. Please reach out to your point of contact at Gem to provide\n> feedback.\n\n\n# Authentication\n\nAll requests to Gem API is authenticated with your team's API key. Team admins can provision API\nkeys on your team's [admin dashboard (\"Team Settings\")](https://www.gem.com/admin). The API key will\nbe a 40-character alphanumeric string and should be passed under the header `X-API-Key`. As an\nexample:\n\n    curl -X GET \\\n        -H \"X-API-Key: <YOUR_API_KEY>\" \\\n        -H \"Content-Type: application/json\" \\\n        https://api.gem.com/v0/users\n\nNote: If you are using an integration partner, you will also need to pass the `X-Application-Secret`\nheader.\n\n# Rate Limits\n\nBy default, each API key is subject to a rate limit of 20 requests per second, with a burst\ncapacity of 500 requests. If you exceed either of these limits, you will receive a `429 Too Many\nRequests` or `Limit Exceeded` error code.\n\n\n# Pagination\n\nPagination is supported on `GET` requests to collection resources by using `page` and `page_size`\nquery parameters.\n\n`page` is 1-indexed. `page_size` defaults to 20 if a value isn't provided and the maximum allowed\nvalue is 100. As an example:\n\n    curl -i -X GET \\\n        -H \"X-API-Key: <YOUR_API_KEY>\" \\\n        -H \"Content-Type: application/json\" \\\n        https://api.gem.com/v0/users?page=2&page_size=10\n\nResponses from paginated collection resources, even if pagination parameters were not explicitly\ndefined, will include a `X-Pagination` response header with a JSON object in this shape:\n\n    {\n        \"total\": 176,\n        \"total_pages\": 18,\n        \"first_page\": 1,\n        \"last_page\": 18,\n        \"page\": 2,\n        \"previous_page\": 1,\n        \"next_page\": 3\n    }\n",
+    "x-logo": {
+      "url": "https://www.gem.com/img/gem-text.svg",
+      "backgroundColor": "#FFFFFF",
+      "altText": "Gem logo",
+      "href": "https://www.gem.com"
+    },
+    "title": "Gem API",
+    "version": "v0"
+  },
+  "components": {
+    "securitySchemes": {
+      "API Key": {
+        "type": "apiKey",
+        "name": "X-API-Key",
+        "in": "header"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "description": "Error code"
+          },
+          "status": {
+            "type": "string",
+            "description": "Error name"
+          },
+          "message": {
+            "type": "string",
+            "description": "Error message"
+          },
+          "errors": {
+            "type": "object",
+            "description": "Errors"
+          }
+        }
+      },
+      "PaginationMetadata": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer"
+          },
+          "total_pages": {
+            "type": "integer"
+          },
+          "first_page": {
+            "type": "integer"
+          },
+          "last_page": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "previous_page": {
+            "type": "integer"
+          },
+          "next_page": {
+            "type": "integer"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          }
+        }
+      },
+      "Email": {
+        "type": "object",
+        "properties": {
+          "email_address": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 255
+          },
+          "is_primary": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "Profile": {
+        "type": "object",
+        "properties": {
+          "network": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "url": {
+            "type": "string",
+            "format": "url"
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 255
+          }
+        }
+      },
+      "EducationInfo": {
+        "type": "object",
+        "properties": {
+          "school": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "parsed_university": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "parsed_school": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "start_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true
+          },
+          "end_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true
+          },
+          "field_of_study": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "parsed_major_1": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "parsed_major_2": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "degree": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          }
+        }
+      },
+      "WorkInfo": {
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "work_start_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true
+          },
+          "work_end_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true
+          },
+          "is_current": {
+            "type": "boolean",
+            "nullable": true
+          }
+        }
+      },
+      "CustomFieldCandidateMembership": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the custom field is unique in its scope. Any leading and trailing spaces of the name string will be removed."
+          },
+          "scope": {
+            "enum": [
+              "team",
+              "project"
+            ],
+            "description": "Custom fields under `team` scope apply to all candidates. Custom fields under `project` scope apply to candidates in a specific project."
+          },
+          "project_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "Applicable and required when `scope` is `project`. If the custom field has `project` scope, this is the project ID that its associated with."
+          },
+          "value": {
+            "type": "any",
+            "format": "Custom Field Value"
+          },
+          "value_type": {
+            "enum": [
+              "date",
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "When `value_type` is `text`, `value` is a string. When `value_type` is `date`, `value` is a string of format `yyyy-mm-dd`. When `value_type` is `single_select`, `value` is a string of an option value. When `value_type` is `multi_select`, `value` is an array of strings of option values. "
+          },
+          "value_option_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "ObjectID",
+              "description": "Only applicable when `value_type` is one of (`single_select`, `multi_select`). The option ids of the value. "
+            }
+          },
+          "custom_field_category": {
+            "type": "string",
+            "description": "Deprecated: same as `name`. Will be dropped in future versions."
+          },
+          "custom_field_value": {
+            "type": "any",
+            "format": "Custom Field Value",
+            "description": "Deprecated: same as `value`. Will be dropped in future versions."
+          }
+        }
+      },
+      "DueDate": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          }
+        }
+      },
+      "Candidate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_by": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "last_updated_at": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 1
+          },
+          "candidate_greenhouse_id": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "first_name": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "last_name": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "nickname": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "weblink": {
+            "minLength": 1
+          },
+          "emails": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/Email"
+            }
+          },
+          "phone_number": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "location": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "linked_in_handle": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Profile"
+            }
+          },
+          "company": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "school": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "education_info": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EducationInfo"
+            }
+          },
+          "work_info": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkInfo"
+            }
+          },
+          "custom_fields": {
+            "type": "array",
+            "description": "Custom fields containing the associated values for the candidate.",
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldCandidateMembership"
+            }
+          },
+          "due_date": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DueDate"
+              }
+            ]
+          },
+          "project_ids": {
+            "type": "array",
+            "nullable": true,
+            "maxItems": 20,
+            "description": "Containing the ids of the projects the candidate is in.",
+            "items": {
+              "type": "string",
+              "format": "ObjectID"
+            }
+          },
+          "sourced_from": {
+            "enum": [
+              "SeekOut",
+              "hireEZ",
+              "Starcircle",
+              "Censia",
+              "Consider"
+            ],
+            "nullable": true
+          },
+          "gem_source": {
+            "enum": [
+              "SeekOut",
+              "hireEZ",
+              "Starcircle",
+              "Censia",
+              "Consider"
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "created_by"
+        ]
+      },
+      "CustomFieldCandidateMembershipUpdate": {
+        "type": "object",
+        "properties": {
+          "custom_field_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "value": {
+            "type": "any",
+            "format": "Custom Field Value",
+            "nullable": true,
+            "description": "Contains the new value of the custom field. When `value_type` is `text`, `value` is a string. When `value_type` is `date`, `value` is a string of format `yyyy-mm-dd`. When `value_type` is `single_select`, `value` is a string of the selected option id. When `value_type` is `multi_select`, `value` is an array of strings of selected option ids. Set `value` to `null` to clear `text`, `date`, `single_select` custom fields. Set `value` to an empty array to clear `multi_select` custom fields. "
+          }
+        },
+        "required": [
+          "custom_field_id",
+          "value"
+        ]
+      },
+      "CandidateCreation": {
+        "type": "object",
+        "properties": {
+          "created_by": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "first_name": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "last_name": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "nickname": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "emails": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/Email"
+            }
+          },
+          "linked_in_handle": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255,
+            "description": "If `linked_in_handle` is provided, candidate creation will be de-duplicated. If a candidate with the provided `linked_in_handle` already exists, a 400 error will be returned with `errors` containing information on the existing candidate in this shape: `{\"errors\": { \"duplicate_candidate\": { \"id\": \"string\", \"linked_in_handle\": \"string\" }}}`. "
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "company": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "location": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "school": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "education_info": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/EducationInfo"
+            }
+          },
+          "work_info": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/WorkInfo"
+            }
+          },
+          "profile_urls": {
+            "type": "array",
+            "nullable": true,
+            "description": "If `profile_urls` is provided with an array of urls, social `profiles` will be generated based on the provided urls and attached to the candidate.",
+            "items": {
+              "type": "string",
+              "format": "url"
+            }
+          },
+          "phone_number": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "project_ids": {
+            "type": "array",
+            "nullable": true,
+            "maxItems": 20,
+            "description": "If `project_ids` is provided with an array of project ids, the candidate will be added into the projects once they are created.",
+            "items": {
+              "type": "string",
+              "format": "ObjectID"
+            }
+          },
+          "custom_fields": {
+            "type": "array",
+            "description": "Array of objects containing new custom field values. Only custom fields specified in the array are updated. Click the arrow on the left to find more info about the object.",
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldCandidateMembershipUpdate"
+            }
+          },
+          "sourced_from": {
+            "enum": [
+              "SeekOut",
+              "hireEZ",
+              "Starcircle",
+              "Censia",
+              "Consider"
+            ],
+            "nullable": true
+          },
+          "autofill": {
+            "type": "boolean",
+            "default": false,
+            "description": "Requires `linked_in_handle` to be non-null. Attempts to fill in any missing fields."
+          }
+        },
+        "required": [
+          "created_by"
+        ]
+      },
+      "CandidateUpdate": {
+        "type": "object",
+        "properties": {
+          "first_name": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "last_name": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "nickname": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "emails": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/Email"
+            }
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "company": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "location": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "school": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "profile_urls": {
+            "type": "array",
+            "description": "If `profile_urls` is provided with an array of urls, social `profiles` will be replaced with new profiles based on the provided urls.",
+            "items": {
+              "type": "string",
+              "format": "url"
+            }
+          },
+          "phone_number": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 255
+          },
+          "due_date": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DueDate"
+              }
+            ]
+          },
+          "custom_fields": {
+            "type": "array",
+            "description": "Array of objects containing custom field values to be updated for the candidate. Only custom fields specified in the array are updated. Click the arrow on the left to find more info about the object.",
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldCandidateMembershipUpdate"
+            }
+          }
+        }
+      },
+      "CandidateDelete": {
+        "type": "object",
+        "properties": {
+          "permanently_remove_contact_info": {
+            "type": "boolean",
+            "default": false,
+            "description": "Prevent the deleted candidate's contact info from being added back to Gem"
+          },
+          "on_behalf_of_user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          }
+        },
+        "required": [
+          "on_behalf_of_user_id"
+        ]
+      },
+      "CandidateEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "timestamp": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "on_behalf_of_user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "project_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "sequence_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "type": {
+            "enum": [
+              "sequences",
+              "sequence_replies",
+              "manual_touchpoints"
+            ]
+          },
+          "subtype": {
+            "enum": [
+              "first_outreach",
+              "follow_up",
+              "reply"
+            ]
+          },
+          "contact_medium": {
+            "enum": [
+              "inmail",
+              "phone_call",
+              "text_message",
+              "email",
+              "meeting",
+              "li_connect_request"
+            ]
+          },
+          "reply_status": {
+            "enum": [
+              "interested",
+              "not_interested",
+              "later"
+            ]
+          }
+        },
+        "required": [
+          "contact_medium",
+          "project_id",
+          "sequence_id",
+          "subtype",
+          "timestamp",
+          "type",
+          "user_id"
+        ]
+      },
+      "CandidateEvent1": {
+        "type": "object",
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "timestamp": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "on_behalf_of_user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "project_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "sequence_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "type": {
+            "enum": [
+              "sequences",
+              "sequence_replies",
+              "manual_touchpoints"
+            ]
+          },
+          "subtype": {
+            "enum": [
+              "first_outreach",
+              "follow_up",
+              "reply"
+            ]
+          },
+          "contact_medium": {
+            "enum": [
+              "inmail",
+              "phone_call",
+              "text_message",
+              "email",
+              "meeting",
+              "li_connect_request"
+            ]
+          },
+          "reply_status": {
+            "enum": [
+              "interested",
+              "not_interested",
+              "later"
+            ]
+          }
+        },
+        "required": [
+          "contact_medium",
+          "project_id",
+          "sequence_id",
+          "subtype",
+          "timestamp",
+          "type",
+          "user_id"
+        ]
+      },
+      "Note": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "timestamp": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "is_private": {
+            "type": "boolean",
+            "default": false
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 10000
+          }
+        },
+        "required": [
+          "candidate_id",
+          "content",
+          "user_id"
+        ]
+      },
+      "UploadedResume": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "filename": {
+            "type": "string",
+            "readOnly": true
+          },
+          "download_url": {
+            "minLength": 1
+          }
+        }
+      },
+      "UploadedResumeCreation": {
+        "type": "object",
+        "properties": {
+          "resume_file": {
+            "description": "Allowed formats are: .pdf, .doc, .docx. File size cannot exceed 10MB.",
+            "type": "string",
+            "format": "binary"
+          }
+        },
+        "required": [
+          "resume_file"
+        ]
+      },
+      "CustomFieldOption": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "value": {
+            "type": "string"
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "`hidden` options are not selectable in the Gem product. Candidate custom field values with `hidden` options are not returned when making a query to the Candidates endpoint."
+          }
+        }
+      },
+      "CustomField": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "value_type": {
+            "enum": [
+              "date",
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "When `value_type` is `text`, `value` is a string. When `value_type` is `date`, `value` is a string of format `yyyy-mm-dd`. When `value_type` is `single_select`, `value` is a string of an option value. When `value_type` is `multi_select`, `value` is an array of strings of option values. "
+          },
+          "scope": {
+            "enum": [
+              "team",
+              "project"
+            ],
+            "description": "Custom fields under `team` scope apply to all candidates. Custom fields under `project` scope apply to candidates in a specific project."
+          },
+          "project_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "If the custom field has `project` scope, this is the project ID that its associated with."
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "`hidden` custom fields in the candidate info are not displayed in the Gem product or not returned when making a query on the Candidates endpoint."
+          },
+          "options": {
+            "type": "array",
+            "description": "Applicable when `value_type` is one of (`single_select`, `multi_select`). ",
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldOption"
+            }
+          }
+        }
+      },
+      "CustomFieldCreation": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50,
+            "description": "The name of the custom field is unique in its scope. Any leading and trailing spaces of the name string will be removed."
+          },
+          "value_type": {
+            "enum": [
+              "date",
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "When `value_type` is `text`, `value` is a string. When `value_type` is `date`, `value` is a string of format `yyyy-mm-dd`. When `value_type` is `single_select`, `value` is a string of an option value. When `value_type` is `multi_select`, `value` is an array of strings of option values. "
+          },
+          "scope": {
+            "enum": [
+              "team",
+              "project"
+            ],
+            "description": "Custom fields under `team` scope apply to all candidates. Custom fields under `project` scope apply to candidates in a specific project."
+          },
+          "project_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "Applicable and required when `scope` is `project`. If the custom field has `project` scope, this is the project ID that its associated with."
+          },
+          "option_values": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Applicable and required when `value_type` is one of (`single_select`, `multi_select`). ",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 50
+            }
+          }
+        },
+        "required": [
+          "name",
+          "scope",
+          "value_type"
+        ]
+      },
+      "CustomFieldUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50,
+            "description": "The name of the custom field is unique in its scope. Any leading and trailing spaces of the name string will be removed."
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "`hidden` custom fields in the candidate info are not displayed in the Gem product or not returned when making a query on the Candidates endpoint."
+          }
+        }
+      },
+      "CustomFieldOptionCreation": {
+        "type": "object",
+        "properties": {
+          "option_values": {
+            "type": "array",
+            "minItems": 1,
+            "description": "An array of new option values to be created. Any leading and trailing spaces of the new option values will be removed.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 50
+            }
+          }
+        },
+        "required": [
+          "option_values"
+        ]
+      },
+      "CustomFieldOptionUpdate": {
+        "type": "object",
+        "properties": {
+          "is_hidden": {
+            "type": "boolean",
+            "description": "`hidden` options are not selectable in the Gem product. Candidate custom field values with `hidden` options are not returned when making a query to the Candidates endpoint."
+          }
+        }
+      },
+      "DataExportFileMetaData": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": [
+              "event_log",
+              "projects",
+              "project_fields",
+              "custom_project_fields",
+              "candidate_custom_field_data",
+              "notes",
+              "candidate_info",
+              "candidate_predicted_demographic_info",
+              "user_info",
+              "custom_field_metadata",
+              "job_openings",
+              "jobs",
+              "offers",
+              "applications",
+              "application_custom_fields",
+              "application_question_answers",
+              "application_stages",
+              "applications_jobs",
+              "approvals",
+              "candidate_custom_fields",
+              "candidate_email_addresses",
+              "candidate_phone_numbers",
+              "candidates",
+              "departments",
+              "educations",
+              "eeoc_responses",
+              "employments",
+              "hiring_team",
+              "interviewers",
+              "interviews",
+              "job_custom_fields",
+              "job_post_locations",
+              "job_post_questions",
+              "job_posts",
+              "jobs_departments",
+              "jobs_offices",
+              "jobs_interviews",
+              "jobs_stages",
+              "job_snapshots",
+              "offer_custom_fields",
+              "offices",
+              "opening_custom_fields",
+              "openings",
+              "referrers",
+              "rejection_reasons",
+              "scheduled_interviews",
+              "scorecard_question_answers",
+              "scorecard_questions",
+              "scorecards",
+              "sources",
+              "user_candidate_links",
+              "users",
+              "stages",
+              "stage_snapshots"
+            ]
+          },
+          "download_url": {
+            "minLength": 1
+          }
+        }
+      },
+      "DataExport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "files": {
+            "type": "array",
+            "readOnly": true,
+            "nullable": true,
+            "description": "File information associated with the export.",
+            "items": {
+              "$ref": "#/components/schemas/DataExportFileMetaData"
+            }
+          }
+        }
+      },
+      "Note1": {
+        "type": "object",
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "is_private": {
+            "type": "boolean",
+            "default": false
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 10000
+          }
+        },
+        "required": [
+          "candidate_id",
+          "content",
+          "user_id"
+        ]
+      },
+      "ProjectFieldProjectMembership": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the project field is unique in its scope."
+          },
+          "value": {},
+          "value_type": {
+            "enum": [
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "When `value_type` is `text`, `value` is a string. When `value_type` is `single_select`, `value` is a string of an option value. When `value_type` is `multi_select`, `value` is an array of strings of option values."
+          },
+          "value_option_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "ObjectID",
+              "description": "Only applicable when `value_type` is one of (`single_select`, `multi_select`). The option ids of the value."
+            }
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "created_at": {
+            "type": "integer",
+            "readOnly": true,
+            "minimum": 1
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "The user id of the project owner."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "privacy_type": {
+            "default": "personal",
+            "enum": [
+              "confidential",
+              "personal",
+              "shared"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "is_archived": {
+            "type": "boolean"
+          },
+          "project_fields": {
+            "type": "array",
+            "readOnly": true,
+            "nullable": true,
+            "description": "Project fields containing the associated values for the project.",
+            "items": {
+              "$ref": "#/components/schemas/ProjectFieldProjectMembership"
+            }
+          },
+          "context": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Summary of top project fields for a project"
+          }
+        },
+        "required": [
+          "name",
+          "user_id"
+        ]
+      },
+      "Project1": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "The user id of the project owner."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "privacy_type": {
+            "default": "personal",
+            "enum": [
+              "confidential",
+              "personal",
+              "shared"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "project_fields": {
+            "type": "array",
+            "readOnly": true,
+            "nullable": true,
+            "description": "Project fields containing the associated values for the project.",
+            "items": {
+              "$ref": "#/components/schemas/ProjectFieldProjectMembership"
+            }
+          },
+          "context": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Summary of top project fields for a project"
+          }
+        },
+        "required": [
+          "name",
+          "user_id"
+        ]
+      },
+      "ProjectUpdate": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "The user id of the project owner."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "privacy_type": {
+            "enum": [
+              "confidential",
+              "personal",
+              "shared"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "is_archived": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProjectCandidateMembership": {
+        "type": "object",
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "added_at": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "ProjectCandidateMembershipUpdate": {
+        "type": "object",
+        "properties": {
+          "candidate_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "string",
+              "format": "ObjectID"
+            }
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "User performing the update. If included, the user must have write access to the project."
+          }
+        },
+        "required": [
+          "candidate_ids"
+        ]
+      },
+      "ProjectCandidateLogResponse": {
+        "type": "object",
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "project_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "action": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "ProjectFieldOptionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "value": {
+            "type": "string"
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "When `is_hidden` is `true`, field options are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint."
+          }
+        }
+      },
+      "ProjectFieldResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "The name of the project field."
+          },
+          "field_type": {
+            "enum": [
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "The type of the project field. Options are `text`, `single_select`, or `multi_select`."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "The user id of the admin creating the project field."
+          },
+          "options": {
+            "type": "array",
+            "description": "The options of the project field. Only applicable when `value_type` is one of (`single_select`, `multi_select`).",
+            "items": {
+              "$ref": "#/components/schemas/ProjectFieldOptionResponse"
+            }
+          },
+          "is_required": {
+            "type": "boolean"
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "When `is_hidden` is `true`, project fields are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint."
+          }
+        },
+        "required": [
+          "field_type",
+          "name",
+          "user_id"
+        ]
+      },
+      "ProjectFieldCreation": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "The name of the project field to create. Must differ from existing project field names."
+          },
+          "field_type": {
+            "enum": [
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "The type of the project field. Options are `text`, `single_select`, or `multi_select`."
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "description": "The options of the project field.Only applicable when `value_type` is one of (`single_select`, `multi_select`).",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          "is_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field_type",
+          "name"
+        ]
+      },
+      "ProjectFieldUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "The name of the project field. Must be unique across entire team."
+          },
+          "is_required": {
+            "type": "boolean"
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "When `is_hidden` is `true`, field options are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint."
+          }
+        }
+      },
+      "ProjectFieldOptionAssoc": {
+        "type": "object",
+        "properties": {
+          "project_field_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "option_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "The id of the project field option. Only applicable when `value_type` is one of (`single_select`, `multi_select`)."
+          },
+          "text": {
+            "type": "string",
+            "description": "The text of the project field. Only applicable when `value_type` is `text`. "
+          },
+          "field_type": {
+            "enum": [
+              "text",
+              "single_select",
+              "multi_select"
+            ],
+            "description": "The type of the project field. Options are `text`, `single_select`, or `multi_select`."
+          },
+          "is_hidden": {
+            "type": "boolean",
+            "description": "When `is_hidden` is `true`, field options are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint."
+          },
+          "is_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProjectFieldOptionManagement": {
+        "type": "object",
+        "properties": {
+          "project_field_id": {
+            "type": "string",
+            "format": "ObjectID"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "add",
+              "remove"
+            ],
+            "description": "Specifies the operation on project field options: `add` or `remove`. For `remove` operations on `single_select` or `text` fields, `options` is not required. For `multi_select`, specify option values to remove."
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "description": "List of option id values. Required for `add` operations on `single_select` and `multi_select` fields. For `remove` on `multi_select`, include values to be removed.",
+            "items": {
+              "type": "string",
+              "format": "ObjectID"
+            }
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The text of the project field. Required for `add` operations on `text` fields. "
+          }
+        },
+        "required": [
+          "operation",
+          "project_field_id"
+        ]
+      },
+      "ProjectFieldOptionCreation": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Only applicable when `value_type` is one of (`single_select`, `multi_select`). An array of new option values to be created.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        },
+        "required": [
+          "options"
+        ]
+      },
+      "ProjectFieldOptionUpdate": {
+        "type": "object",
+        "properties": {
+          "is_hidden": {
+            "type": "boolean",
+            "description": "When `is_hidden` is `true`, field options are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint."
+          }
+        }
+      },
+      "SequenceResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "ObjectID",
+            "readOnly": true
+          },
+          "created_at": {
+            "type": "integer",
+            "readOnly": true,
+            "minimum": 1
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "user_id": {
+            "type": "string",
+            "format": "ObjectID",
+            "description": "The user id of the sequence owner."
+          }
+        },
+        "required": [
+          "name",
+          "user_id"
+        ]
+      }
+    },
+    "responses": {
+      "UNPROCESSABLE_CONTENT": {
+        "description": "Unprocessable Content",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "DEFAULT_ERROR": {
+        "description": "Default error response",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "headers": {
+      "PAGINATION": {
+        "description": "Pagination metadata",
+        "schema": {
+          "$ref": "#/components/schemas/PaginationMetadata"
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v0/users": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "email",
+            "schema": {
+              "type": "string",
+              "format": "email"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/User"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List users",
+        "description": "Returns a list of all users on the team and supports pagination.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/v0/candidates": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_by",
+            "description": "the id of the user who adds the candidate into Gem",
+            "schema": {
+              "type": "string",
+              "format": "ObjectID"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "email",
+            "description": "If `email` is provided, the candidates whose email addresses contain `email` will be returned.",
+            "schema": {
+              "type": "string",
+              "format": "email",
+              "maxLength": 255
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "linked_in_handle",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "updated_after",
+            "description": "If `updated_after` is provided, only the candidates updated after the\n            provided timestamp will be returned. Please provide a Unix timestamp in seconds.\n        ",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "updated_before",
+            "description": "If `updated_before` is provided, only the candidates updated before the\n            provided timestamp will be returned. Please provide a Unix timestamp in seconds.\n        ",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "candidate_ids",
+            "description": "If `candidate_ids` is provided, only the candidates with a provided ID\n        will be returned. Please provide a comma-separated string. e.g.: candidate_ids=123,456,789.\n        A maximum of 20 candidate_ids can be provided.\n        ",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "ObjectID"
+              }
+            },
+            "required": false,
+            "explode": true,
+            "style": "form"
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Candidate"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List candidates",
+        "description": "Returns a list of all candidates on the team and supports pagination and search parameters\n`created_after`, `created_before`.",
+        "tags": [
+          "Candidates"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Candidate"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateCreation"
+              }
+            }
+          }
+        },
+        "summary": "Create a new candidate",
+        "description": "Returns the newly created candidate object.",
+        "tags": [
+          "Candidates"
+        ]
+      }
+    },
+    "/v0/candidates/{candidate_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Candidate"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get candidate by ID",
+        "description": "Returns the candidate object with the corresponding ID.",
+        "tags": [
+          "Candidates"
+        ]
+      },
+      "put": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Candidate"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Modify a candidate",
+        "description": "Modifies a candidate based on ID. Only the fields included in the request argument will be\nmodified.",
+        "tags": [
+          "Candidates"
+        ]
+      },
+      "delete": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateDelete"
+              }
+            }
+          }
+        },
+        "summary": "Delete a candidate",
+        "description": "Deletes a candidate based on ID.",
+        "tags": [
+          "Candidates"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "candidate_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/candidates/{candidate_id}/events": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CandidateEvent"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List candidate events (DEPRECATED).\nThis API is deprecated.",
+        "description": "Returns a list of all events for the given candidate and supports pagination and search\nparameters `created_after`, `created_before`.",
+        "tags": [
+          "Candidate Events"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateEvent"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidateEvent1"
+              }
+            }
+          }
+        },
+        "summary": "Create a new candidate event",
+        "description": "Returns the newly created event object.\n**NOTE**: only `manual_touchpoints` type event can be created currently.",
+        "tags": [
+          "Candidate Events"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "candidate_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/candidates/{candidate_id}/events/{event_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateEvent"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get event by event ID",
+        "description": "Returns the event object with the corresponding candidate ID and event ID.",
+        "tags": [
+          "Candidate Events"
+        ]
+      },
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Delete an event by ID",
+        "description": "Deletes an event by its ID.\n**NOTE**: only `manual_touchpoints` events can be deleted currently.",
+        "tags": [
+          "Candidate Events"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "candidate_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "in": "path",
+          "name": "event_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/candidates/events": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CandidateEvent"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List candidate events (DEPRECATED).\nThis API is deprecated.",
+        "description": "Returns a list of all events for all candidates and supports pagination and search\nparameters `created_after`, `created_before`.",
+        "tags": [
+          "Candidate Events"
+        ]
+      }
+    },
+    "/v0/candidates/{candidate_id}/notes": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Note"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List notes that belong to a candidate",
+        "description": "Returns a list of note objects on the given candidate and supports pagination and search\nparameters `created_after`, `created_before`.",
+        "tags": [
+          "Candidate Notes"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "candidate_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/candidates/{candidate_id}/uploaded_resumes": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UploadedResume"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List uploaded resumes for a candidate",
+        "description": "Returns a list of all resumes uploaded for the candidate\ngiven the candidate ID. Resumes can be downloaded through the `download_url`.\nNot all resumes have `filename` stored.",
+        "tags": [
+          "Candidate Uploaded Resumes"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "candidate_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/candidates/{candidate_id}/uploaded_resumes/{user_id}": {
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadedResume"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadedResumeCreation"
+              }
+            }
+          }
+        },
+        "summary": "Upload resume for a candidate.",
+        "description": "NOTE: Besides `candidate_id`, you also need to specify `user_id` in the path to indicate which user\nis uploading the resume.",
+        "tags": [
+          "Candidate Uploaded Resumes"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "candidate_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "in": "path",
+          "name": "user_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/custom_fields": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "project_id",
+            "description": "Only applicable when `scope` is `project`.",
+            "schema": {
+              "type": "string",
+              "format": "ObjectID",
+              "nullable": true
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "description": "Custom fields under `team` scope apply to all candidates. Custom fields under `project` scope apply to candidates in a specific project.",
+            "schema": {
+              "enum": [
+                "team",
+                "project"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "is_hidden",
+            "description": "`hidden` custom fields in the candidate info are not displayed in the Gem product or not returned when making a query on the Candidates endpoint.",
+            "schema": {
+              "type": "boolean"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "description": "Any leading and trailing spaces of the name string will be removed.",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CustomField"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List custom fields",
+        "description": "Returns a list of all custom fields. Supports pagination\nand search parameters `created_after`, `created_before`.",
+        "tags": [
+          "Custom Fields"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomField"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldCreation"
+              }
+            }
+          }
+        },
+        "summary": "Create a new custom field",
+        "description": "Returns the newly created custom field object.\n\nDe-duplication: If a custom field with the provided name already exists,\nan error would be returned in the format of:\n```\n{\n    \"code\": 400,\n    \"errors\": {\n        \"json\": {\n            \"custom_field\": {\n                \"id\": \"example_custom_field_id\",\n                \"is_hidden\": false,\n                \"name\": \"multi_select\",\n                \"options\": [\n                    {\n                        \"id\": \"example_option_id\",\n                        \"is_hidden\": false,\n                        \"value\": \"example_value\"\n                    },\n                ],\n                \"project_id\": \"UHJvamVjdDox\",\n                \"scope\": \"project\",\n                \"value_type\": \"multi_select\"\n            }\n        }\n    },\n    \"message\": \"A custom field with the name already existed\",\n    \"status\": \"Bad Request\"\n}\n```",
+        "tags": [
+          "Custom Fields"
+        ]
+      }
+    },
+    "/v0/custom_fields/{custom_field_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomField"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get custom field by ID",
+        "description": "Returns the custom field object with the corresponding ID.",
+        "tags": [
+          "Custom Fields"
+        ]
+      },
+      "patch": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomField"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Modify a custom field",
+        "description": "Modifies a custom field based on ID. Only the fields included in the request\nargument will be modified.\n\nDe-duplication: If a custom field with the provided name already exists,\nan error would be returned in the format of:\n```\n{\n    \"code\": 400,\n    \"errors\": {\n        \"json\": {\n            \"custom_field\": {\n                \"id\": \"example_custom_field_id\",\n                \"is_hidden\": false,\n                \"name\": \"multi_select\",\n                \"options\": [\n                    {\n                        \"id\": \"example_option_id\",\n                        \"is_hidden\": false,\n                        \"value\": \"example_value\"\n                    },\n                ],\n                \"project_id\": \"UHJvamVjdDox\",\n                \"scope\": \"project\",\n                \"value_type\": \"multi_select\"\n            }\n        }\n    },\n    \"message\": \"A custom field with the name already existed\",\n    \"status\": \"Bad Request\"\n}\n```",
+        "tags": [
+          "Custom Fields"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "custom_field_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/custom_fields/{custom_field_id}/options": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "value",
+            "description": "Value of an option in the custom field. Any leading and trailing spaces of the option value will be removed.",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "is_hidden",
+            "description": "`hidden` options are not selectable in the Gem product. Candidate custom field values with `hidden` options are not returned when making a query to the Candidates endpoint.",
+            "schema": {
+              "type": "boolean"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CustomFieldOption"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List options in a custom field",
+        "description": "Returns a list of all custom fields options in a `single_select` or `multi_select`\ncustom field.",
+        "tags": [
+          "Custom Field Options"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CustomFieldOption"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldOptionCreation"
+              }
+            }
+          }
+        },
+        "summary": "Add options to a custom field",
+        "description": "Returns the newly created options in a `single_select` or `multi_select`\ncustom field.\n\nDe-duplication: If options with the values already existed,\na 400 error will be returned in the following format.\n```\n{\n    \"code\": 400,\n    \"errors\": {\n        \"json\": {\n            \"options\": [\n                {\n                    \"id\": \"example_option_id\",\n                    \"is_hidden\": false,\n                    \"value\": \"example_value\"\n                }\n            ]\n        }\n    },\n    \"message\": \"Custom field options with the values already existed.\",\n    \"status\": \"Bad Request\"\n}\n```",
+        "tags": [
+          "Custom Field Options"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "custom_field_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/custom_fields/{custom_field_id}/options/{option_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomFieldOption"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get an option in a custom field",
+        "description": "Returns an option in a `single_select` or `multi_select`\ncustom field.",
+        "tags": [
+          "Custom Field Options"
+        ]
+      },
+      "patch": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomFieldOption"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldOptionUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Modify an option in a custom field",
+        "description": "Returns an option in a `single_select` or `multi_select`\ncustom field.\n\nCustom Field Option cannot be deleted and can only be hidden.",
+        "tags": [
+          "Custom Field Options"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "custom_field_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "in": "path",
+          "name": "option_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/data_export": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataExport"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get the most recent data export.",
+        "description": "Returns the data export information for the most recent export.",
+        "tags": [
+          "Data Export"
+        ]
+      }
+    },
+    "/v0/notes": {
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Note1"
+              }
+            }
+          }
+        },
+        "summary": "Create a new note",
+        "description": "Returns the newly created note object.",
+        "tags": [
+          "Notes"
+        ]
+      }
+    },
+    "/v0/notes/{note_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get note by note ID",
+        "description": "Returns the note object with the note ID.",
+        "tags": [
+          "Notes"
+        ]
+      },
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Delete a note by ID",
+        "description": "Deletes a note by its ID.",
+        "tags": [
+          "Notes"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "note_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/projects": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "description": "List all projects owned by this user.",
+            "schema": {
+              "type": "string",
+              "format": "ObjectID"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "readable_by",
+            "description": "List all projects that this user has read access to.",
+            "schema": {
+              "type": "string",
+              "format": "ObjectID"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "writable_by",
+            "description": "List all projects that this user has write access to, that is,                    all the projects that this user can add/remove candidates",
+            "schema": {
+              "type": "string",
+              "format": "ObjectID"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "is_archived",
+            "schema": {
+              "type": "boolean"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Project"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List projects",
+        "description": "Returns a list of all projects on the team and supports pagination\nand search parameters `created_after`, `created_before`.",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Project1"
+              }
+            }
+          }
+        },
+        "summary": "Create a new project",
+        "description": "Returns the newly created project object.",
+        "tags": [
+          "Projects"
+        ]
+      }
+    },
+    "/v0/projects/{project_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get project by ID",
+        "description": "Returns the project object with the corresponding ID",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "patch": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Modify a project",
+        "description": "Modifies a project based on ID. Only the fields included in the request\nargument will be modified.",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/projects/{project_id}/candidates": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "added_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "added_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectCandidateMembership"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List candidates in a project",
+        "description": "Returns a list of all candidates in the project given the project_id. Supports\nsearch parameters `added_after`, `added_before`.",
+        "tags": [
+          "Project and Candidates Membership"
+        ]
+      },
+      "put": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCandidateMembershipUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Add candidates to a project",
+        "description": "Add candidates into a project.\n\nReturns 204 no content if candidates are successfully added to\nthe project.\n\nIf candidates are already in the project, a 400 error will be returned\nwith `errors` containing information on the candidates already in the\nproject in this shape:\n```\n{\n    \"code\": 400,\n    \"errors\": {\n        \"json\": {\n            \"candidate_ids\": [\n                \"string\"\n            ]\n        }\n    },\n    \"message\": \"Candidates with the ids are already in the project\",\n    \"status\": \"Bad Request\"\n}\n```",
+        "tags": [
+          "Project and Candidates Membership"
+        ]
+      },
+      "delete": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCandidateMembershipUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Remove candidates from a project",
+        "description": "Remove candidates from a project.\n\nReturns 204 no content if candidates are\nsuccessfully removed from the project.\n\nIf candidates are not in the project, a 400 error will be returned\nwith `errors` containing information on the candidates not in the\nproject in this shape:\n```\n{\n    \"code\": 400,\n    \"errors\": {\n        \"json\": {\n            \"candidate_ids\": [\n                \"string\"\n            ]\n        }\n    },\n    \"message\": \"Candidates with the ids are not in the project\",\n    \"status\": \"Bad Request\"\n}\n```",
+        "tags": [
+          "Project and Candidates Membership"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/project_candidate_membership_log": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "changed_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "changed_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "candidate_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectCandidateLogResponse"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Fetch membership log with filters",
+        "description": "This endpoint allows fetching the membership log for a project or candidate.\nAt least one filter (`project_id` or `candidate_id`) must be specified.",
+        "tags": [
+          "Project and Candidates Membership"
+        ]
+      }
+    },
+    "/v0/project_fields": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "is_hidden",
+            "description": "Hidden project fields in projects are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint.",
+            "schema": {
+              "type": "boolean"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "is_required",
+            "schema": {
+              "type": "boolean"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "description": "The name of the project field.",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "field_type",
+            "description": "Specifies the project field type. For `text`, the value is a string. For `single_select`, the value is a string representing a selected option. For `multi_select`, the value is an array of strings, each representing a selected option.",
+            "schema": {
+              "enum": [
+                "text",
+                "single_select",
+                "multi_select"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectFieldResponse"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List project fields",
+        "description": "Returns a list of all project fields.\nSupports pagination and search parameters `created_after`, `created_before`.",
+        "tags": [
+          "Project Fields"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFieldResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectFieldCreation"
+              }
+            }
+          }
+        },
+        "summary": "Create project field",
+        "description": "Create a new project field.",
+        "tags": [
+          "Project Fields"
+        ]
+      }
+    },
+    "/v0/project_fields/{project_field_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFieldResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get project field by id",
+        "description": "Returns a project field with the coresponding id.",
+        "tags": [
+          "Project Fields"
+        ]
+      },
+      "patch": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFieldResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectFieldUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Update project field",
+        "description": "Update a project field with the corresponding id.",
+        "tags": [
+          "Project Fields"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_field_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/projects/{project_id}/project_field_options": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectFieldOptionAssoc"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List project field options",
+        "description": "Returns a list of all options of a project field.",
+        "tags": [
+          "Project Field Options Associations"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectFieldOptionManagement"
+              }
+            }
+          }
+        },
+        "summary": "Add project field option",
+        "description": "Add a project field option to a project field.",
+        "tags": [
+          "Project Field Options Associations"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/project_fields/{project_field_id}/options": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "value",
+            "description": "The value of the project field option.",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "is_hidden",
+            "description": "When `is_hidden` is `true`, field options are not displayed in the Gem product, nor are they returned when making a query on the Projects endpoint.",
+            "schema": {
+              "type": "boolean"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectFieldOptionResponse"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List options in a project field",
+        "description": "Returns a list of all project fields options in a `single_select` or `multi_select`\nproject field.",
+        "tags": [
+          "Project Field Options"
+        ]
+      },
+      "post": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectFieldOptionResponse"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectFieldOptionCreation"
+              }
+            }
+          }
+        },
+        "summary": "Create a project field option",
+        "description": "Creates a new project field option.",
+        "tags": [
+          "Project Field Options"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_field_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/project_fields/{project_field_id}/options/{project_field_option_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFieldOptionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get a project field option",
+        "description": "Returns a project field option by ID.",
+        "tags": [
+          "Project Field Options"
+        ]
+      },
+      "patch": {
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFieldOptionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectFieldOptionUpdate"
+              }
+            }
+          }
+        },
+        "summary": "Update a project field option",
+        "description": "Updates a project field option's visibility by ID.",
+        "tags": [
+          "Project Field Options"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_field_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_field_option_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "/v0/sequences": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "created_after",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "schema": {
+              "type": "string",
+              "format": "ObjectID"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "422": {
+            "$ref": "#/components/responses/UNPROCESSABLE_CONTENT"
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SequenceResponse"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "X-Pagination": {
+                "$ref": "#/components/headers/PAGINATION"
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "List sequences",
+        "description": "Returns a list of sequences that match all of the provided search criteria.",
+        "tags": [
+          "Sequences"
+        ]
+      }
+    },
+    "/v0/sequences/{sequence_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SequenceResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/DEFAULT_ERROR"
+          }
+        },
+        "summary": "Get sequence by ID",
+        "description": "Returns the sequence object with the corresponding ID.",
+        "tags": [
+          "Sequences"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "sequence_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    }
+  },
+  "tags": [
+    {
+      "name": "Users",
+      "description": "Operations on user objects"
+    },
+    {
+      "name": "Candidates",
+      "description": "Operations on candidate objects"
+    },
+    {
+      "name": "Candidate Events",
+      "description": "Operations on candidate events"
+    },
+    {
+      "name": "Candidate Notes",
+      "description": "Operations on candidate notes"
+    },
+    {
+      "name": "Candidate Uploaded Resumes",
+      "description": "Operations on resumes uploaded for candidates"
+    },
+    {
+      "name": "Custom Fields",
+      "description": "Operations on custom fields. Custom fields cannot be removed and only can be hidden. Mutations on the custom field values associated with candidates are performed on the Candidates endpoint. "
+    },
+    {
+      "name": "Custom Field Options",
+      "description": "Operations on options in `single_select` and `multiple_select` custom fields. Options cannot be deleted and only can be hidden."
+    },
+    {
+      "name": "Data Export",
+      "description": "Operations related to data exports"
+    },
+    {
+      "name": "Notes",
+      "description": "Operations on note objects"
+    },
+    {
+      "name": "Projects",
+      "description": "Operations on project objects"
+    },
+    {
+      "name": "Project and Candidates Membership",
+      "description": "Operations on managing candidates in a project"
+    },
+    {
+      "name": "Project Fields",
+      "description": "Operations on project fields. Project fields cannot be removed and can only be hidden. Mutations on the field values associated with projects are performed on the Projects endpoint."
+    },
+    {
+      "name": "Project Field Options Associations",
+      "description": "Manage project field options across all types, including `single_select`, `multiple_select`, and `text`. Supports adding or removing option values to/from project fields, facilitating dynamic updates to project configurations."
+    },
+    {
+      "name": "Project Field Options",
+      "description": "Operations on options in `single_select` and `multiple_select` project fields. Options cannot be deleted and only can be hidden."
+    },
+    {
+      "name": "Sequences",
+      "description": "Operations on sequence objects"
+    }
+  ],
+  "openapi": "3.0.2"
+}

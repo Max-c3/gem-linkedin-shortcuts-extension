@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gem LinkedIn Shortcuts - Options</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="options-page">
+    <main>
+      <h1>Gem LinkedIn Shortcuts</h1>
+      <p class="hint">
+        Configure backend connection, default Gem values, and keyboard shortcuts.
+      </p>
+
+      <form id="settings-form">
+        <section>
+          <h2>Core</h2>
+          <label class="row checkbox">
+            <input id="enabled" type="checkbox" />
+            <span>Enable extension</span>
+          </label>
+          <label class="row">
+            <span>Backend Base URL</span>
+            <input id="backendBaseUrl" type="text" />
+          </label>
+          <label class="row">
+            <span>Backend Shared Token (optional)</span>
+            <input id="backendSharedToken" type="password" autocomplete="off" />
+          </label>
+        </section>
+
+        <section>
+          <h2>Defaults</h2>
+          <p class="hint">
+            `Created By User ID` is used for Gem candidate creation and project attribution unless backend env provides a default.
+          </p>
+          <label class="row">
+            <span>Created By User ID</span>
+            <input id="createdByUserId" type="text" />
+          </label>
+          <label class="row">
+            <span>Project ID</span>
+            <input id="defaultProjectId" type="text" />
+          </label>
+          <label class="row">
+            <span>Sequence ID</span>
+            <input id="defaultSequenceId" type="text" />
+          </label>
+          <label class="row">
+            <span>Custom Field ID</span>
+            <input id="customFieldId" type="text" />
+          </label>
+          <label class="row">
+            <span>Custom Field Value</span>
+            <input id="customFieldValue" type="text" />
+          </label>
+          <label class="row">
+            <span>Activity URL Template (optional fallback)</span>
+            <input id="activityUrlTemplate" type="text" />
+          </label>
+          <label class="row">
+            <span>Sequence URL Template</span>
+            <input id="sequenceComposeUrlTemplate" type="text" />
+          </label>
+        </section>
+
+        <section>
+          <h2>Shortcuts</h2>
+          <p class="hint">Click Edit, then press your real Mac shortcut. Changes save immediately. Press Escape to cancel recording.</p>
+          <div class="row">
+            <span>Add Prospect</span>
+            <div class="shortcut-control">
+              <input id="shortcut-addProspect" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="addProspect">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>Add to Project</span>
+            <div class="shortcut-control">
+              <input id="shortcut-addToProject" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="addToProject">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>Open Profile in Gem</span>
+            <div class="shortcut-control">
+              <input id="shortcut-openActivity" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="openActivity">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>Set Custom Field</span>
+            <div class="shortcut-control">
+              <input id="shortcut-setCustomField" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="setCustomField">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>Open Sequence</span>
+            <div class="shortcut-control">
+              <input id="shortcut-sendSequence" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="sendSequence">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>View Activity Feed</span>
+            <div class="shortcut-control">
+              <input id="shortcut-viewActivityFeed" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="viewActivityFeed">Edit</button>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Activity Log</h2>
+          <p class="hint">
+            Shows extension-side and backend-side events with timestamps, outcomes, and links when available.
+          </p>
+          <div class="logs-controls">
+            <button id="refresh-logs" type="button">Refresh Logs</button>
+            <button id="export-logs" type="button" class="secondary">Export JSON</button>
+            <button id="clear-local-logs" type="button" class="secondary">Clear Local Logs</button>
+          </div>
+          <div id="logs-meta" class="hint"></div>
+          <div id="logs-list" class="logs-list"></div>
+        </section>
+
+        <footer>
+          <button type="submit">Save</button>
+          <button id="reset-btn" type="button" class="secondary">Reset to defaults</button>
+          <span id="status"></span>
+        </footer>
+      </form>
+    </main>
+
+    <script src="./shared.js"></script>
+    <script src="./options.js"></script>
+  </body>
+</html>

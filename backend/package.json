@@ -1,0 +1,9 @@
+{
+  "name": "gem-linkedin-shortcuts-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend proxy for Gem LinkedIn Shortcuts extension",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
