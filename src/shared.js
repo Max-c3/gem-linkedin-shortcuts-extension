@@ -5,6 +5,7 @@ const ACTIONS = {
   ADD_TO_PROJECT: "addToProject",
   OPEN_ACTIVITY: "openActivity",
   SET_CUSTOM_FIELD: "setCustomField",
+  SET_REMINDER: "setReminder",
   SEND_SEQUENCE: "sendSequence",
   VIEW_ACTIVITY_FEED: "viewActivityFeed"
 };
@@ -19,14 +20,15 @@ const DEFAULT_SETTINGS = {
   customFieldId: "",
   customFieldValue: "",
   activityUrlTemplate: "",
-  sequenceComposeUrlTemplate: "https://app.gem.com/sequences/{{sequenceId}}",
+  sequenceComposeUrlTemplate: "https://www.gem.com/sequence/{{sequenceId}}/edit/stages",
   shortcuts: {
     addProspect: "Cmd+Option+1",
     addToProject: "Cmd+Option+2",
     openActivity: "Cmd+Option+3",
     setCustomField: "Cmd+Option+4",
     sendSequence: "Cmd+Option+5",
-    viewActivityFeed: "Cmd+Option+6"
+    viewActivityFeed: "Cmd+Option+6",
+    setReminder: "Cmd+Option+7"
   }
 };
 

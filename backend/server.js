@@ -45,6 +45,8 @@ loadEnvFile(path.join(__dirname, ".env.local"));
 const PORT = Number(process.env.PORT || 8787);
 const GEM_API_KEY = process.env.GEM_API_KEY || "";
 const GEM_API_BASE_URL = (process.env.GEM_API_BASE_URL || "https://api.gem.com").replace(/\/$/, "");
+const ASHBY_API_KEY = process.env.ASHBY_API_KEY || "";
+const ASHBY_API_BASE_URL = (process.env.ASHBY_API_BASE_URL || "https://api.ashbyhq.com").replace(/\/$/, "");
 const BACKEND_SHARED_TOKEN = process.env.BACKEND_SHARED_TOKEN || "";
 const GEM_DEFAULT_USER_ID = process.env.GEM_DEFAULT_USER_ID || "";
 const GEM_DEFAULT_USER_EMAIL = process.env.GEM_DEFAULT_USER_EMAIL || "";
@@ -52,6 +54,22 @@ const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, "logs");
 const LOG_FILE = path.join(LOG_DIR, "events.jsonl");
 const LOG_MAX_BYTES = Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024);
 const PROJECTS_SCAN_MAX = Number(process.env.PROJECTS_SCAN_MAX || 20000);
+const SEQUENCES_SCAN_MAX = Number(process.env.SEQUENCES_SCAN_MAX || 20000);
+const ASHBY_WRITE_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.ASHBY_WRITE_ENABLED || "false").trim());
+const ASHBY_WRITE_REQUIRE_CONFIRMATION = !/^(0|false|no|off)$/i.test(
+  String(process.env.ASHBY_WRITE_REQUIRE_CONFIRMATION || "true").trim()
+);
+const ASHBY_WRITE_CONFIRMATION_TOKEN = String(process.env.ASHBY_WRITE_CONFIRMATION_TOKEN || "").trim();
+const ASHBY_WRITE_DEFAULT_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_TO_ASHBY";
+const ASHBY_WRITE_ALLOWED_METHODS = new Set(
+  String(
+    process.env.ASHBY_WRITE_ALLOWED_METHODS ||
+      "candidate.create,candidate.addProject,customField.setValue,customField.setValues,candidate.createNote"
+  )
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
 
 function generateId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -207,6 +225,14 @@ function buildGemUrl(pathname) {
   return `${GEM_API_BASE_URL}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
 }
 
+function buildAshbyUrl(methodName) {
+  const normalized = String(methodName || "").trim().replace(/^\/+/, "");
+  if (!normalized) {
+    throw new Error("Ashby method name is required.");
+  }
+  return `${ASHBY_API_BASE_URL}/${normalized}`;
+}
+
 function omitUndefined(value) {
   const out = {};
   for (const [k, v] of Object.entries(value || {})) {
@@ -215,6 +241,221 @@ function omitUndefined(value) {
     }
   }
   return out;
+}
+
+function isLikelyAshbyWriteMethod(methodName) {
+  const normalized = String(methodName || "").trim().replace(/^\/+/, "");
+  if (!normalized) {
+    return false;
+  }
+  const operation = normalized.includes(".") ? normalized.split(".").slice(1).join(".") : normalized;
+  return /(add|anonymize|archive|cancel|change|create|delete|remove|restore|set|submit|transfer|update|upload)/i.test(
+    operation
+  );
+}
+
+function resolveAshbyWriteConfirmation(options = {}) {
+  if (!options || typeof options !== "object") {
+    return "";
+  }
+  return String(options.writeConfirmation || options.confirmation || "").trim();
+}
+
+function assertSafeAshbyWrite(methodName, payload, audit = {}, options = {}) {
+  const normalized = String(methodName || "").trim().replace(/^\/+/, "");
+  if (!isLikelyAshbyWriteMethod(normalized)) {
+    return;
+  }
+
+  if (!ASHBY_WRITE_ENABLED) {
+    const message =
+      "Ashby write blocked. Set ASHBY_WRITE_ENABLED=true only after explicit approval and safety checks.";
+    logEvent({
+      level: "warn",
+      source: "backend",
+      event: "ashby.write.blocked",
+      message,
+      requestId: audit.requestId,
+      route: audit.route,
+      runId: audit.runId,
+      actionId: audit.actionId,
+      details: {
+        method: normalized,
+        reason: "write_disabled"
+      }
+    });
+    throw new Error(message);
+  }
+
+  if (!ASHBY_WRITE_ALLOWED_METHODS.has(normalized)) {
+    const message = `Ashby write blocked for non-allowlisted method: ${normalized}`;
+    logEvent({
+      level: "warn",
+      source: "backend",
+      event: "ashby.write.blocked",
+      message,
+      requestId: audit.requestId,
+      route: audit.route,
+      runId: audit.runId,
+      actionId: audit.actionId,
+      details: {
+        method: normalized,
+        reason: "method_not_allowlisted"
+      }
+    });
+    throw new Error(message);
+  }
+
+  if (ASHBY_WRITE_REQUIRE_CONFIRMATION) {
+    const confirmation = resolveAshbyWriteConfirmation(options);
+    if (!confirmation) {
+      const message = "Ashby write blocked. Missing write confirmation token.";
+      logEvent({
+        level: "warn",
+        source: "backend",
+        event: "ashby.write.blocked",
+        message,
+        requestId: audit.requestId,
+        route: audit.route,
+        runId: audit.runId,
+        actionId: audit.actionId,
+        details: {
+          method: normalized,
+          reason: "missing_confirmation"
+        }
+      });
+      throw new Error(message);
+    }
+
+    const expected = ASHBY_WRITE_CONFIRMATION_TOKEN || ASHBY_WRITE_DEFAULT_CONFIRMATION;
+    if (confirmation !== expected) {
+      const message = "Ashby write blocked. Invalid write confirmation token.";
+      logEvent({
+        level: "warn",
+        source: "backend",
+        event: "ashby.write.blocked",
+        message,
+        requestId: audit.requestId,
+        route: audit.route,
+        runId: audit.runId,
+        actionId: audit.actionId,
+        details: {
+          method: normalized,
+          reason: "invalid_confirmation"
+        }
+      });
+      throw new Error(message);
+    }
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Ashby write blocked. Invalid write payload.");
+  }
+  if (Object.keys(payload).length === 0) {
+    throw new Error("Ashby write blocked. Empty write payload.");
+  }
+}
+
+function getAshbyAuthHeader() {
+  return `Basic ${Buffer.from(`${ASHBY_API_KEY}:`).toString("base64")}`;
+}
+
+async function ashbyRequest(methodName, payload = {}, audit = {}, options = {}) {
+  if (!ASHBY_API_KEY) {
+    throw new Error("Server is missing ASHBY_API_KEY.");
+  }
+
+  const normalizedMethod = String(methodName || "").trim().replace(/^\/+/, "");
+  if (!normalizedMethod) {
+    throw new Error("Ashby method name is required.");
+  }
+
+  assertSafeAshbyWrite(normalizedMethod, payload, audit, options);
+  const url = buildAshbyUrl(normalizedMethod);
+  const body = omitUndefined(payload);
+
+  logEvent({
+    source: "backend",
+    event: "ashby.request.start",
+    message: `POST ${normalizedMethod}`,
+    link: url,
+    requestId: audit.requestId,
+    route: audit.route,
+    runId: audit.runId,
+    actionId: audit.actionId,
+    details: {
+      payload: body
+    }
+  });
+
+  const start = Date.now();
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: getAshbyAuthHeader()
+    },
+    body: JSON.stringify(body)
+  });
+
+  const text = await response.text();
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch (_error) {
+    parsed = text;
+  }
+
+  const durationMs = Date.now() - start;
+  const success = Boolean(response.ok && parsed && typeof parsed === "object" && parsed.success === true);
+  if (!success) {
+    const message =
+      parsed?.errorInfo?.message ||
+      (Array.isArray(parsed?.errors) ? parsed.errors.join(", ") : "") ||
+      parsed?.message ||
+      text ||
+      `Ashby API request failed with ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status || 400;
+    error.data = parsed;
+
+    logEvent({
+      level: "error",
+      source: "backend",
+      event: "ashby.request.error",
+      message,
+      link: url,
+      requestId: audit.requestId,
+      route: audit.route,
+      runId: audit.runId,
+      actionId: audit.actionId,
+      durationMs,
+      details: {
+        status: response.status,
+        response: parsed
+      }
+    });
+    throw error;
+  }
+
+  logEvent({
+    source: "backend",
+    event: "ashby.request.success",
+    message: `POST ${normalizedMethod}`,
+    link: url,
+    requestId: audit.requestId,
+    route: audit.route,
+    runId: audit.runId,
+    actionId: audit.actionId,
+    durationMs,
+    details: {
+      status: response.status,
+      summary: summarizeForLog(parsed?.results)
+    }
+  });
+
+  return parsed;
 }
 
 async function gemRequest(pathname, { method = "GET", query = {}, body } = {}, audit = {}) {
@@ -352,6 +593,29 @@ async function resolveCreatedByUserId(explicitUserId, audit) {
   );
   const user = Array.isArray(users) ? users[0] : null;
   return user?.id || "";
+}
+
+function normalizeIsoDate(raw) {
+  const value = String(raw || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return "";
+  }
+  const [yearRaw, monthRaw, dayRaw] = value.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return "";
+  }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() + 1 !== month ||
+    date.getUTCDate() !== day
+  ) {
+    return "";
+  }
+  return value;
 }
 
 async function createCandidateFromLinkedIn(payload, audit) {
@@ -604,6 +868,42 @@ async function setCandidateCustomField(payload, audit) {
   return { candidate };
 }
 
+async function setCandidateDueDate(payload, audit) {
+  const candidateId = String(payload.candidateId || "").trim();
+  if (!candidateId) {
+    throw new Error("candidateId is required.");
+  }
+
+  const dueDate = normalizeIsoDate(payload.date || payload.dueDate);
+  if (!dueDate) {
+    throw new Error("date is required in YYYY-MM-DD format.");
+  }
+
+  const userId = await resolveCreatedByUserId(payload.userId, audit);
+  if (!userId) {
+    throw new Error(
+      "Gem requires due_date.user_id. Set createdByUserId in extension options or GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env."
+    );
+  }
+
+  const rawNote = payload.note === undefined || payload.note === null ? "" : String(payload.note);
+  const note = rawNote.trim();
+  if (note.length > 2000) {
+    throw new Error("Reminder note must be 2000 characters or less.");
+  }
+
+  const body = {
+    due_date: {
+      date: dueDate,
+      user_id: userId,
+      note: note || null
+    }
+  };
+
+  const candidate = await gemRequest(`/v0/candidates/${candidateId}`, { method: "PUT", body }, audit);
+  return { candidate, dueDate, userId };
+}
+
 async function getCandidate(payload, audit) {
   const candidateId = String(payload.candidateId || "").trim();
   if (!candidateId) {
@@ -620,6 +920,66 @@ async function getSequence(payload, audit) {
   }
   const sequence = await gemRequest(`/v0/sequences/${sequenceId}`, {}, audit);
   return { sequence };
+}
+
+async function listSequences(payload, audit) {
+  const requestedLimitRaw = Number(payload.limit);
+  const requestedLimit =
+    Number.isFinite(requestedLimitRaw) && requestedLimitRaw > 0
+      ? Math.max(1, Math.min(requestedLimitRaw, SEQUENCES_SCAN_MAX))
+      : 0;
+  const scanTarget = requestedLimit || SEQUENCES_SCAN_MAX;
+  const query = String(payload.query || "").trim();
+  const sequenceOwnerUserId = await resolveCreatedByUserId(payload.userId, audit);
+  const pageSize = 100;
+  const maxPages = Math.max(1, Math.ceil(scanTarget / pageSize));
+  let aggregated = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const pageData = await gemRequest(
+      "/v0/sequences",
+      {
+        query: {
+          page_size: pageSize,
+          page,
+          user_id: sequenceOwnerUserId || undefined
+        }
+      },
+      audit
+    );
+    const sequences = Array.isArray(pageData) ? pageData : [];
+    aggregated = aggregated.concat(sequences);
+    if (sequences.length < pageSize || aggregated.length >= scanTarget) {
+      break;
+    }
+  }
+
+  const seen = new Set();
+  let normalized = aggregated
+    .map((sequence) => ({
+      id: String(sequence.id || ""),
+      name: String(sequence.name || ""),
+      userId: String(sequence.user_id || sequence.userId || ""),
+      createdAt: String(sequence.created_at || sequence.createdAt || sequence.created || "")
+    }))
+    .filter((sequence) => {
+      if (!sequence.id || seen.has(sequence.id)) {
+        return false;
+      }
+      seen.add(sequence.id);
+      return true;
+    });
+
+  if (query) {
+    const lower = query.toLowerCase();
+    normalized = normalized.filter((sequence) => sequence.name.toLowerCase().includes(lower));
+  }
+
+  if (requestedLimit > 0) {
+    normalized = normalized.slice(0, requestedLimit);
+  }
+
+  return { sequences: normalized };
 }
 
 async function listUsers(payload, audit) {
@@ -993,7 +1353,9 @@ const routes = {
   "/api/projects/list": listProjects,
   "/api/custom-fields/list": listCustomFields,
   "/api/candidates/set-custom-field": setCandidateCustomField,
+  "/api/candidates/set-due-date": setCandidateDueDate,
   "/api/candidates/get": getCandidate,
+  "/api/sequences/list": listSequences,
   "/api/candidates/activity-feed": listCandidateActivityFeed,
   "/api/sequences/get": getSequence,
   "/api/users/list": listUsers,
@@ -1134,4 +1496,9 @@ const server = http.createServer(async (req, res) => {
 ensureLogFile();
 server.listen(PORT, () => {
   console.log(`Gem backend listening on http://localhost:${PORT}`);
+  console.log(
+    `Ashby write safety: enabled=${ASHBY_WRITE_ENABLED} requireConfirmation=${ASHBY_WRITE_REQUIRE_CONFIRMATION} allowlistedMethods=${Array.from(
+      ASHBY_WRITE_ALLOWED_METHODS
+    ).join(",")}`
+  );
 });

@@ -14,8 +14,9 @@ Chrome extension + backend for running Gem actions from LinkedIn profile pages v
 2. Add candidate to project (opens in-page project picker with case-insensitive contains search + arrow key selection)
 3. Open profile in Gem (uses candidate `weblink` if available)
 4. Set candidate custom field (letter-select field, then number-select value)
-5. Open sequence in Gem UI (verifies sequence exists first)
-6. View activity feed in-page (notes + candidate events + created entry)
+5. Set reminder (in-page modal with reminder text + date picker + DDMMYYYY keyboard date entry)
+6. Open sequence in Gem UI (verifies sequence exists first)
+7. View activity feed in-page (notes + candidate events + created entry)
 
 ## Observability and logs
 
@@ -37,7 +38,12 @@ cp .env.example .env
 Set required env vars in `.env`:
 
 - `GEM_API_KEY` (required)
-- `GEM_DEFAULT_USER_ID` or `GEM_DEFAULT_USER_EMAIL` (recommended, used for candidate creation and project attribution)
+- `GEM_DEFAULT_USER_ID` or `GEM_DEFAULT_USER_EMAIL` (recommended, used for candidate creation, project attribution, and reminder assignee defaults)
+- `ASHBY_API_KEY` (required for Ashby API calls)
+- `ASHBY_WRITE_ENABLED` (must remain `false` unless you explicitly approve live Ashby writes)
+- `ASHBY_WRITE_REQUIRE_CONFIRMATION` (recommended `true`, requires per-request confirmation token)
+- `ASHBY_WRITE_CONFIRMATION_TOKEN` (recommended, extra guard before any Ashby write is allowed)
+- `ASHBY_WRITE_ALLOWED_METHODS` (allowlist of Ashby mutating RPC methods)
 - `BACKEND_SHARED_TOKEN` (optional but recommended)
 - `LOG_DIR` (optional, default `./logs`)
 - `LOG_MAX_BYTES` (optional, default `5242880`)

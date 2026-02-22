@@ -10,10 +10,17 @@ const PROJECT_CACHE_TTL_MS = 5 * 60 * 1000;
 const PROJECT_CACHE_LIMIT = 0;
 const PROJECT_RECENT_USAGE_LIMIT = 300;
 const PROJECT_QUERY_LIMIT_MAX = 20000;
+const SEQUENCE_CACHE_KEY = "sequencePickerCache";
+const SEQUENCE_RECENT_USAGE_KEY = "sequenceRecentUsage";
+const SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const SEQUENCE_CACHE_LIMIT = 0;
+const SEQUENCE_RECENT_USAGE_LIMIT = 300;
+const SEQUENCE_QUERY_LIMIT_MAX = 20000;
 const CUSTOM_FIELD_CACHE_KEY = "customFieldPickerCache";
 const CUSTOM_FIELD_CACHE_TTL_MS = 10 * 60 * 1000;
 const CUSTOM_FIELD_CACHE_LIMIT = 200;
 let projectRefreshPromise = null;
+let sequenceRefreshPromise = null;
 const customFieldRefreshPromises = new Map();
 
 function generateId() {
@@ -193,6 +200,45 @@ async function setProjectRecentUsage(usage) {
   await setInLocalStorage(PROJECT_RECENT_USAGE_KEY, usage);
 }
 
+async function getSequenceCache() {
+  const cached = await getFromLocalStorage(SEQUENCE_CACHE_KEY);
+  if (!cached || typeof cached !== "object") {
+    return { fetchedAt: 0, sequences: [], isComplete: false };
+  }
+  return {
+    fetchedAt: Number(cached.fetchedAt) || 0,
+    sequences: Array.isArray(cached.sequences) ? cached.sequences : [],
+    isComplete: Boolean(cached.isComplete)
+  };
+}
+
+async function setSequenceCache(sequences, options = {}) {
+  await setInLocalStorage(SEQUENCE_CACHE_KEY, {
+    fetchedAt: Date.now(),
+    sequences,
+    isComplete: Boolean(options.isComplete)
+  });
+}
+
+function isSequenceCacheFresh(cache) {
+  if (!cache || !cache.fetchedAt) {
+    return false;
+  }
+  return Date.now() - cache.fetchedAt <= SEQUENCE_CACHE_TTL_MS;
+}
+
+async function getSequenceRecentUsage() {
+  const usage = await getFromLocalStorage(SEQUENCE_RECENT_USAGE_KEY);
+  if (!usage || typeof usage !== "object") {
+    return {};
+  }
+  return usage;
+}
+
+async function setSequenceRecentUsage(usage) {
+  await setInLocalStorage(SEQUENCE_RECENT_USAGE_KEY, usage);
+}
+
 function getCustomFieldCacheKey(context) {
   const handle = String(context?.linkedInHandle || "").trim().toLowerCase();
   if (handle) {
@@ -296,6 +342,78 @@ function normalizeProject(item) {
   };
 }
 
+function normalizeSequence(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const id = String(item.id || "").trim();
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    name: String(item.name || "").trim(),
+    userId: String(item.userId || item.user_id || "").trim(),
+    createdAt: String(item.createdAt || "").trim()
+  };
+}
+
+function stripLikelySequenceVariantSuffix(name) {
+  const raw = String(name || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const stripped = raw.replace(
+    /\s+\d{1,2}:\d{2}\s*(?:am|pm)\s+[A-Za-z]{3},\s+[A-Za-z]{3}\s+\d{1,2}(?:,\s*\d{4})?$/i,
+    ""
+  );
+  return stripped.trim();
+}
+
+function choosePreferredSequenceRepresentative(group) {
+  if (!Array.isArray(group) || group.length === 0) {
+    return null;
+  }
+  const sortedNewestFirst = group
+    .slice()
+    .sort((a, b) => parseIsoDate(b.createdAt) - parseIsoDate(a.createdAt));
+  const canonical = sortedNewestFirst.find((item) => {
+    const base = stripLikelySequenceVariantSuffix(item.name);
+    return base && base.toLowerCase() === String(item.name || "").trim().toLowerCase();
+  });
+  return canonical || sortedNewestFirst[0];
+}
+
+function collapseLikelySequenceVariants(sequences) {
+  const normalized = (Array.isArray(sequences) ? sequences : []).map(normalizeSequence).filter(Boolean);
+  const grouped = new Map();
+  for (const sequence of normalized) {
+    const base = stripLikelySequenceVariantSuffix(sequence.name) || sequence.name;
+    const key = base.toLowerCase();
+    if (!grouped.has(key)) {
+      grouped.set(key, { items: [] });
+    }
+    grouped.get(key).items.push(sequence);
+  }
+
+  const out = [];
+  for (const { items } of grouped.values()) {
+    const hasVariant = items.some((item) => {
+      const base = stripLikelySequenceVariantSuffix(item.name);
+      return base && base.toLowerCase() !== String(item.name || "").trim().toLowerCase();
+    });
+    if (!hasVariant) {
+      out.push(...items);
+      continue;
+    }
+    const representative = choosePreferredSequenceRepresentative(items);
+    if (representative) {
+      out.push(representative);
+    }
+  }
+  return out;
+}
+
 function parseIsoDate(value) {
   if (!value) {
     return 0;
@@ -343,6 +461,38 @@ function sortProjectsForPicker(projects, usageMap, query) {
   });
 }
 
+function sortSequencesForPicker(sequences, usageMap, query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const byId = new Map();
+
+  for (const item of Array.isArray(sequences) ? sequences : []) {
+    const sequence = normalizeSequence(item);
+    if (!sequence) {
+      continue;
+    }
+    if (normalizedQuery && !sequence.name.toLowerCase().includes(normalizedQuery)) {
+      continue;
+    }
+    byId.set(sequence.id, sequence);
+  }
+
+  return Array.from(byId.values()).sort((a, b) => {
+    const aRecent = Number(usageMap?.[a.id]?.lastUsedAtMs) || 0;
+    const bRecent = Number(usageMap?.[b.id]?.lastUsedAtMs) || 0;
+    if (aRecent !== bRecent) {
+      return bRecent - aRecent;
+    }
+
+    const aCreatedAt = parseIsoDate(a.createdAt);
+    const bCreatedAt = parseIsoDate(b.createdAt);
+    if (aCreatedAt !== bCreatedAt) {
+      return bCreatedAt - aCreatedAt;
+    }
+
+    return a.name.localeCompare(b.name);
+  });
+}
+
 async function touchProjectRecentUsage(projectId, projectName = "") {
   const id = String(projectId || "").trim();
   if (!id) {
@@ -368,6 +518,33 @@ async function touchProjectRecentUsage(projectId, projectName = "") {
     }, {});
 
   await setProjectRecentUsage(pruned);
+}
+
+async function touchSequenceRecentUsage(sequenceId, sequenceName = "") {
+  const id = String(sequenceId || "").trim();
+  if (!id) {
+    return;
+  }
+
+  const usage = await getSequenceRecentUsage();
+  const now = Date.now();
+  const previous = usage[id] || {};
+  usage[id] = {
+    lastUsedAtMs: now,
+    lastUsedAt: new Date(now).toISOString(),
+    count: (Number(previous.count) || 0) + 1,
+    name: sequenceName || previous.name || ""
+  };
+
+  const pruned = Object.entries(usage)
+    .sort((a, b) => (Number(b[1]?.lastUsedAtMs) || 0) - (Number(a[1]?.lastUsedAtMs) || 0))
+    .slice(0, SEQUENCE_RECENT_USAGE_LIMIT)
+    .reduce((acc, [key, value]) => {
+      acc[key] = value;
+      return acc;
+    }, {});
+
+  await setSequenceRecentUsage(pruned);
 }
 
 async function refreshProjectsFromBackend(settings, runId, limit = PROJECT_CACHE_LIMIT) {
@@ -405,12 +582,60 @@ function ensureProjectRefresh(settings, runId, limit = PROJECT_CACHE_LIMIT) {
   return projectRefreshPromise;
 }
 
+async function refreshSequencesFromBackend(settings, runId, limit = SEQUENCE_CACHE_LIMIT, actionId = ACTIONS.SEND_SEQUENCE) {
+  const normalizedLimit = normalizeSequenceLimit(limit);
+  const userId = String(settings.createdByUserId || "").trim();
+  const data = await callBackend(
+    "/api/sequences/list",
+    {
+      query: "",
+      limit: normalizedLimit,
+      userId
+    },
+    settings,
+    { actionId, runId, step: "listSequences" }
+  );
+  const rawSequences = Array.isArray(data?.sequences) ? data.sequences.map(normalizeSequence).filter(Boolean) : [];
+  const sequences = collapseLikelySequenceVariants(rawSequences);
+  await setSequenceCache(sequences, { isComplete: normalizedLimit === 0 });
+  logEvent(settings, {
+    event: "sequences.cache.refreshed",
+    actionId,
+    runId,
+    message: `Refreshed sequence cache with ${sequences.length} sequences.`,
+    details: {
+      limit: normalizedLimit,
+      userId,
+      rawCount: rawSequences.length,
+      dedupedCount: sequences.length
+    }
+  });
+  return sequences;
+}
+
+function ensureSequenceRefresh(settings, runId, limit = SEQUENCE_CACHE_LIMIT, actionId = ACTIONS.SEND_SEQUENCE) {
+  if (!sequenceRefreshPromise) {
+    sequenceRefreshPromise = refreshSequencesFromBackend(settings, runId, limit, actionId).finally(() => {
+      sequenceRefreshPromise = null;
+    });
+  }
+  return sequenceRefreshPromise;
+}
+
 function normalizeProjectLimit(value) {
   const raw = Number(value);
   if (!Number.isFinite(raw) || raw <= 0) {
     return 0;
   }
   return Math.max(1, Math.min(raw, PROJECT_QUERY_LIMIT_MAX));
+}
+
+function normalizeSequenceLimit(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.min(raw, SEQUENCE_QUERY_LIMIT_MAX));
 }
 
 function normalizeLogEntry(event) {
@@ -495,6 +720,44 @@ function applyTemplate(template, vars) {
     }
     return String(value);
   });
+}
+
+function ensureQueryParam(url, key, value) {
+  if (!url || !key || value === undefined || value === null || value === "") {
+    return url;
+  }
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set(key, String(value));
+    return parsed.toString();
+  } catch (_error) {
+    return url;
+  }
+}
+
+function normalizeGemHost(url) {
+  if (!url) {
+    return "";
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "app.gem.com") {
+      parsed.hostname = "www.gem.com";
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return url;
+  }
+}
+
+function buildGemSequenceAutomationUrl(baseUrl, params) {
+  let url = normalizeGemHost(baseUrl);
+  url = ensureQueryParam(url, "glsAction", "openSequenceForCandidate");
+  url = ensureQueryParam(url, "glsRunId", params.runId || "");
+  url = ensureQueryParam(url, "glsCandidateId", params.candidateId || "");
+  url = ensureQueryParam(url, "glsSequenceId", params.sequenceId || "");
+  url = ensureQueryParam(url, "glsSequenceName", params.sequenceName || "");
+  return url;
 }
 
 async function callBackend(path, payload, settings, audit = {}) {
@@ -605,6 +868,22 @@ function splitProfileName(fullName) {
     firstName: parts[0],
     lastName: parts.slice(1).join(" ")
   };
+}
+
+function formatDateForHumans(rawDate) {
+  const value = String(rawDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
+  });
 }
 
 async function ensureCandidate(settings, context, audit) {
@@ -876,6 +1155,69 @@ async function runAction(actionId, context, settings, meta = {}) {
     return { ok: true, message, runId, link: candidate.weblink || "" };
   }
 
+  if (actionId === ACTIONS.SET_REMINDER) {
+    const reminderDueDate = String(context.reminderDueDate || "").trim();
+    const reminderNote = String(context.reminderNote || "").trim();
+    const userId = context.createdByUserId || settings.createdByUserId || "";
+
+    if (!reminderDueDate) {
+      const message = "Missing reminder due date.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl
+      });
+      return { ok: false, message, runId };
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reminderDueDate)) {
+      const message = "Reminder due date must use YYYY-MM-DD.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl,
+        details: { reminderDueDate }
+      });
+      return { ok: false, message, runId };
+    }
+
+    await callBackend(
+      "/api/candidates/set-due-date",
+      {
+        candidateId: candidate.id,
+        date: reminderDueDate,
+        note: reminderNote,
+        userId
+      },
+      settings,
+      { ...audit, step: "setReminder" }
+    );
+
+    const message = `Reminder set for ${formatDateForHumans(reminderDueDate)}.`;
+    logEvent(settings, {
+      event: "action.succeeded",
+      actionId,
+      runId,
+      source: `extension.${source}`,
+      message,
+      link: candidate.weblink || context.linkedinUrl,
+      details: {
+        candidateId: candidate.id,
+        dueDate: reminderDueDate,
+        userId,
+        hasNote: Boolean(reminderNote)
+      }
+    });
+    return { ok: true, message, runId, link: candidate.weblink || "" };
+  }
+
   if (actionId === ACTIONS.SEND_SEQUENCE) {
     const sequenceId = context.sequenceId || settings.defaultSequenceId;
     if (!sequenceId) {
@@ -892,33 +1234,76 @@ async function runAction(actionId, context, settings, meta = {}) {
       return { ok: false, message, runId };
     }
 
-    await callBackend("/api/sequences/get", { sequenceId }, settings, { ...audit, step: "getSequence" });
+    await touchSequenceRecentUsage(sequenceId, context.sequenceName || "");
 
-    const composeUrl = applyTemplate(settings.sequenceComposeUrlTemplate, {
-      sequenceId,
-      candidateId: candidate.id
-    });
-    if (composeUrl) {
-      await chrome.tabs.create({ url: composeUrl });
+    let candidateProfileUrl = normalizeGemHost(String(candidate.weblink || ""));
+    if (!candidateProfileUrl) {
+      const candidateData = await callBackend(
+        "/api/candidates/get",
+        { candidateId: candidate.id },
+        settings,
+        { ...audit, step: "getCandidateForSequence" }
+      );
+      candidateProfileUrl = normalizeGemHost(String(candidateData?.candidate?.weblink || ""));
     }
-    const message = "Opened sequence in Gem. Complete send + activate in Gem UI.";
+
+    let openUrl = "";
+    if (candidateProfileUrl) {
+      openUrl = buildGemSequenceAutomationUrl(candidateProfileUrl, {
+        runId,
+        candidateId: candidate.id,
+        sequenceId,
+        sequenceName: context.sequenceName || ""
+      });
+    } else {
+      openUrl = normalizeGemHost(
+        applyTemplate(settings.sequenceComposeUrlTemplate, {
+          sequenceId,
+          candidateId: candidate.id
+        })
+      );
+    }
+
+    if (!openUrl) {
+      const message = "Could not build a Gem URL for sequence flow.";
+      logEvent(settings, {
+        level: "error",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        details: {
+          candidateId: candidate.id,
+          sequenceId
+        }
+      });
+      return { ok: false, message, runId };
+    }
+
+    await chrome.tabs.create({ url: openUrl });
+    const message = candidateProfileUrl
+      ? "Opened candidate-specific sequence flow in Gem."
+      : "Opened sequence in Gem. Complete send + activate in Gem UI.";
     logEvent(settings, {
       event: "action.succeeded",
       actionId,
       runId,
       source: `extension.${source}`,
       message,
-      link: composeUrl || "",
+      link: openUrl || "",
       details: {
         candidateId: candidate.id,
-        sequenceId
+        sequenceId,
+        sequenceName: context.sequenceName || "",
+        candidateProfileUrl: candidateProfileUrl || ""
       }
     });
     return {
       ok: true,
       message,
       runId,
-      link: composeUrl || ""
+      link: openUrl || ""
     };
   }
 
@@ -1248,6 +1633,53 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LIST_SEQUENCES") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const actionId = ACTIONS.SEND_SEQUENCE;
+        const query = String(message.query || "").trim();
+        const limit = normalizeSequenceLimit(message.limit);
+        const cache = await getSequenceCache();
+        let sequences = Array.isArray(cache.sequences) ? cache.sequences : [];
+        const hadCache = sequences.length > 0;
+        const cacheComplete = Boolean(cache.isComplete);
+        const cacheFresh = isSequenceCacheFresh(cache);
+
+        if (sequences.length === 0) {
+          sequences = await ensureSequenceRefresh(settings, runId, limit, actionId);
+        } else if (!cacheFresh || !cacheComplete) {
+          ensureSequenceRefresh(settings, runId, limit, actionId).catch(() => {});
+        }
+
+        const usageMap = await getSequenceRecentUsage();
+        let sorted = sortSequencesForPicker(sequences, usageMap, query);
+
+        if (query && (sorted.length === 0 || !cacheComplete)) {
+          const refreshed = await ensureSequenceRefresh(settings, runId, limit, actionId);
+          sorted = sortSequencesForPicker(refreshed, usageMap, query);
+        }
+        const trimmed = limit > 0 ? sorted.slice(0, limit) : sorted;
+        logEvent(settings, {
+          event: "sequences.list.loaded",
+          actionId,
+          runId,
+          message: `Loaded ${trimmed.length} sequences for picker.`,
+          details: {
+            query,
+            limit,
+            cacheCount: sequences.length,
+            fromCache: hadCache,
+            cacheFresh,
+            cacheComplete
+          }
+        });
+        sendResponse({ ok: true, sequences: trimmed, runId });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
   if (message.type === "LIST_CUSTOM_FIELDS_FOR_CONTEXT") {
     getSettings()
       .then(async (settings) => {
@@ -1322,6 +1754,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
         await ensureProjectRefresh(settings, runId, limit);
+        sendResponse({ ok: true, skipped: false });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "PREFETCH_SEQUENCES") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const limit = normalizeSequenceLimit(message.limit);
+        const cache = await getSequenceCache();
+        if (cache.sequences.length > 0 && isSequenceCacheFresh(cache) && cache.isComplete) {
+          sendResponse({ ok: true, skipped: true, reason: "cache_fresh" });
+          return;
+        }
+        await ensureSequenceRefresh(settings, runId, limit, ACTIONS.SEND_SEQUENCE);
         sendResponse({ ok: true, skipped: false });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));

@@ -33,7 +33,7 @@
         <section>
           <h2>Defaults</h2>
           <p class="hint">
-            `Created By User ID` is used for Gem candidate creation and project attribution unless backend env provides a default.
+            `Created By User ID` is used for Gem candidate creation, project attribution, and reminder assignee defaults unless backend env provides a default.
           </p>
           <label class="row">
             <span>Created By User ID</span>
@@ -60,7 +60,7 @@
             <input id="activityUrlTemplate" type="text" />
           </label>
           <label class="row">
-            <span>Sequence URL Template</span>
+            <span>Sequence URL Template (optional fallback)</span>
             <input id="sequenceComposeUrlTemplate" type="text" />
           </label>
         </section>
@@ -94,6 +94,13 @@
             <div class="shortcut-control">
               <input id="shortcut-setCustomField" type="text" readonly />
               <button type="button" class="secondary shortcut-edit" data-shortcut-id="setCustomField">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>Set Reminder</span>
+            <div class="shortcut-control">
+              <input id="shortcut-setReminder" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="setReminder">Edit</button>
             </div>
           </div>
           <div class="row">

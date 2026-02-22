@@ -9,6 +9,8 @@
   ],
   "host_permissions": [
     "https://www.linkedin.com/*",
+    "https://www.gem.com/*",
+    "https://app.gem.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://localhost/*",
@@ -30,6 +32,17 @@
       "js": [
         "src/shared.js",
         "src/content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.gem.com/*",
+        "https://app.gem.com/*"
+      ],
+      "js": [
+        "src/shared.js",
+        "src/gem_content.js"
       ],
       "run_at": "document_idle"
     }

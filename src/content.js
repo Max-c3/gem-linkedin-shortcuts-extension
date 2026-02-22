@@ -6,6 +6,8 @@ let contextRecoveryTriggered = false;
 const PROJECT_PICKER_RENDER_LIMIT = 100;
 const CUSTOM_FIELD_KEYS_PER_PAGE = 26;
 const CUSTOM_FIELD_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
+const SEQUENCE_PICKER_KEYS_PER_PAGE = 26;
+const SEQUENCE_PICKER_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
 const ACTIVITY_FEED_LIMIT = 150;
 const CONNECT_SHORTCUT = "Cmd+Option+Z";
 const INVITE_SEND_WITHOUT_NOTE_KEY = "w";
@@ -80,6 +82,30 @@ function getProfileContext() {
     linkedInHandle: getLinkedInHandle(linkedinUrl),
     profileName: getProfileName()
   };
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function getTodayIsoDate() {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+function formatIsoDateForDisplay(dateValue) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateValue || ""))) {
+    return "Pick date";
+  }
+  const parsed = new Date(`${dateValue}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return "Pick date";
+  }
+  return parsed.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
 }
 
 function ensureToastContainer() {
@@ -353,6 +379,57 @@ function prefetchCustomFields(context, runId) {
   });
 }
 
+function listSequences(query, runId) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "LIST_SEQUENCES",
+        query: String(query || ""),
+        limit: 0,
+        runId: runId || ""
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not load sequences"));
+          return;
+        }
+        resolve(Array.isArray(response.sequences) ? response.sequences : []);
+      }
+    );
+  });
+}
+
+function prefetchSequences(runId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "PREFETCH_SEQUENCES",
+        runId: runId || "",
+        limit: 0
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+          }
+        }
+        resolve();
+      }
+    );
+  });
+}
+
 function createProjectPickerStyles() {
   if (document.getElementById("gem-project-picker-style")) {
     return;
@@ -425,6 +502,112 @@ function createProjectPickerStyles() {
     .gem-project-picker-empty {
       padding: 12px;
       font-size: 13px;
+      color: #5b6168;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function createSequencePickerStyles() {
+  if (document.getElementById("gem-sequence-picker-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gem-sequence-picker-style";
+  style.textContent = `
+    #gem-sequence-picker-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #gem-sequence-picker-modal {
+      width: min(760px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #1f2328;
+    }
+    #gem-sequence-picker-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    #gem-sequence-picker-subtitle {
+      font-size: 13px;
+      color: #4f5358;
+      margin-bottom: 12px;
+    }
+    #gem-sequence-picker-results {
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      max-height: 340px;
+      overflow: auto;
+      background: #fff;
+    }
+    .gem-sequence-picker-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid #eff2f7;
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    .gem-sequence-picker-item:last-child {
+      border-bottom: none;
+    }
+    .gem-sequence-picker-item.active {
+      background: #eaf2fe;
+    }
+    .gem-sequence-picker-hotkey {
+      min-width: 28px;
+      height: 24px;
+      border: 1px solid #b9c3d3;
+      border-radius: 6px;
+      text-align: center;
+      line-height: 22px;
+      font-weight: 600;
+      color: #2f3a4b;
+      background: #f5f8fc;
+      font-size: 12px;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .gem-sequence-picker-name {
+      color: #1f2328;
+      font-weight: 500;
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gem-sequence-picker-meta {
+      font-size: 12px;
+      color: #5b6168;
+      flex-shrink: 0;
+    }
+    .gem-sequence-picker-hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #5b6168;
+    }
+    .gem-sequence-picker-empty {
+      padding: 12px;
+      font-size: 13px;
+      color: #5b6168;
+    }
+    #gem-sequence-picker-page {
+      margin-top: 8px;
+      font-size: 12px;
       color: #5b6168;
     }
   `;
@@ -529,6 +712,112 @@ function createCustomFieldPickerStyles() {
       margin-top: 8px;
       font-size: 12px;
       color: #5b6168;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function createReminderPickerStyles() {
+  if (document.getElementById("gem-reminder-picker-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gem-reminder-picker-style";
+  style.textContent = `
+    #gem-reminder-picker-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #gem-reminder-picker-modal {
+      width: min(720px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+      padding: 18px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #1f2328;
+    }
+    #gem-reminder-picker-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    #gem-reminder-picker-subtitle {
+      font-size: 13px;
+      color: #4f5358;
+      margin-bottom: 14px;
+    }
+    .gem-reminder-picker-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      margin: 0 0 8px;
+      color: #2a3442;
+    }
+    #gem-reminder-picker-note {
+      width: 100%;
+      min-height: 116px;
+      max-height: 220px;
+      border: 1px solid #b6beca;
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 16px;
+      color: #1f2328;
+      resize: vertical;
+      margin-bottom: 14px;
+      font-family: inherit;
+    }
+    .gem-reminder-picker-date-row {
+      display: block;
+      margin-bottom: 8px;
+    }
+    #gem-reminder-picker-date-input {
+      width: 100%;
+      border: 1px solid #ced6e2;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 16px;
+      color: #1f2328;
+      background: #fff;
+    }
+    #gem-reminder-picker-error {
+      min-height: 18px;
+      font-size: 12px;
+      color: #a61d24;
+      margin-bottom: 8px;
+    }
+    .gem-reminder-picker-hint {
+      margin-top: 2px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: #5b6168;
+    }
+    .gem-reminder-picker-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    .gem-reminder-picker-actions button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #gem-reminder-picker-cancel {
+      background: #eff2f7;
+      color: #1f2328;
+    }
+    #gem-reminder-picker-save {
+      background: #1e69d2;
+      color: #fff;
     }
   `;
   document.documentElement.appendChild(style);
@@ -657,6 +946,17 @@ function createActivityFeedStyles() {
     }
   `;
   document.documentElement.appendChild(style);
+}
+
+function formatSequenceDate(value) {
+  if (!value) {
+    return "";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+  return parsed.toLocaleDateString();
 }
 
 async function showCustomFieldPicker(runId, context) {
@@ -1187,6 +1487,510 @@ async function showCustomFieldPicker(runId, context) {
   });
 }
 
+async function showReminderPicker(runId, context) {
+  createReminderPickerStyles();
+  const linkedinUrl = context.linkedinUrl || window.location.href;
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-reminder-picker-overlay";
+
+    const modal = document.createElement("form");
+    modal.id = "gem-reminder-picker-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-reminder-picker-title";
+    title.textContent = "Set Reminder";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-reminder-picker-subtitle";
+    subtitle.textContent = "What do you want to be reminded about?";
+
+    const noteLabel = document.createElement("label");
+    noteLabel.className = "gem-reminder-picker-label";
+    noteLabel.setAttribute("for", "gem-reminder-picker-note");
+    noteLabel.textContent = "Reminder";
+
+    const noteInput = document.createElement("textarea");
+    noteInput.id = "gem-reminder-picker-note";
+    noteInput.placeholder = "e.g. set up a coffee chat";
+    noteInput.maxLength = 2000;
+
+    const dateLabel = document.createElement("label");
+    dateLabel.className = "gem-reminder-picker-label";
+    dateLabel.setAttribute("for", "gem-reminder-picker-date-input");
+    dateLabel.textContent = "Due date";
+
+    const dateRow = document.createElement("div");
+    dateRow.className = "gem-reminder-picker-date-row";
+
+    const dateInput = document.createElement("input");
+    dateInput.id = "gem-reminder-picker-date-input";
+    dateInput.type = "date";
+    dateRow.appendChild(dateInput);
+
+    const errorEl = document.createElement("div");
+    errorEl.id = "gem-reminder-picker-error";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-reminder-picker-hint";
+    hint.textContent = "Esc to cancel. Press Tab from note to jump to date, then Enter to save.";
+
+    const actions = document.createElement("div");
+    actions.className = "gem-reminder-picker-actions";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.id = "gem-reminder-picker-cancel";
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "Cancel";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.id = "gem-reminder-picker-save";
+    saveBtn.type = "submit";
+    saveBtn.textContent = "Save";
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(noteLabel);
+    modal.appendChild(noteInput);
+    modal.appendChild(dateLabel);
+    modal.appendChild(dateRow);
+    modal.appendChild(errorEl);
+    modal.appendChild(hint);
+    modal.appendChild(actions);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let selectedDate = getTodayIsoDate();
+    const startedAt = Date.now();
+
+    function setError(message) {
+      errorEl.textContent = message || "";
+    }
+
+    function setSelectedDate(dateValue) {
+      selectedDate = dateValue;
+      dateInput.value = dateValue;
+    }
+
+    function cleanup() {
+      overlay.remove();
+    }
+
+    function finish(selection) {
+      cleanup();
+      resolve(selection || null);
+    }
+
+    function cancelPicker(reason) {
+      logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "reminder_picker.cancelled",
+        actionId: ACTIONS.SET_REMINDER,
+        runId,
+        message: reason || "Reminder picker cancelled.",
+        link: linkedinUrl
+      });
+      finish(null);
+    }
+
+    function submitReminder() {
+      if (typeof modal.requestSubmit === "function") {
+        modal.requestSubmit();
+        return;
+      }
+      saveBtn.click();
+    }
+
+    setSelectedDate(selectedDate);
+
+    dateInput.addEventListener("change", () => {
+      const value = String(dateInput.value || "").trim();
+      if (value) {
+        setSelectedDate(value);
+        setError("");
+      }
+    });
+
+    noteInput.addEventListener("keydown", (event) => {
+      if (event.key === "Tab" && !event.shiftKey) {
+        event.preventDefault();
+        dateInput.focus();
+      }
+    });
+
+    dateInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        // Let the native date input commit its current segment before submitting.
+        setTimeout(() => {
+          const value = String(dateInput.value || "").trim();
+          if (value) {
+            setSelectedDate(value);
+            setError("");
+          }
+          submitReminder();
+        }, 0);
+      }
+    });
+
+    cancelBtn.addEventListener("click", () => {
+      cancelPicker("Reminder picker cancelled.");
+    });
+
+    modal.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const note = noteInput.value.trim();
+      const dateFromInput = String(dateInput.value || "").trim();
+      if (dateFromInput) {
+        setSelectedDate(dateFromInput);
+      }
+      if (!note) {
+        setError("Reminder text is required.");
+        noteInput.focus();
+        return;
+      }
+      if (!selectedDate) {
+        setError("Please choose a due date.");
+        dateInput.focus();
+        return;
+      }
+      setError("");
+      await logEvent({
+        source: "extension.content",
+        event: "reminder_picker.submitted",
+        actionId: ACTIONS.SET_REMINDER,
+        runId,
+        message: `Reminder selected for ${formatIsoDateForDisplay(selectedDate)}.`,
+        link: linkedinUrl,
+        details: {
+          dueDate: selectedDate,
+          noteLength: note.length,
+          durationMs: Date.now() - startedAt
+        }
+      });
+      finish({
+        reminderNote: note,
+        reminderDueDate: selectedDate
+      });
+    });
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancelPicker("Reminder picker cancelled.");
+          return;
+        }
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          event.preventDefault();
+          submitReminder();
+        }
+      },
+      true
+    );
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        cancelPicker("Reminder picker cancelled by outside click.");
+      }
+    });
+
+    modal.tabIndex = -1;
+    modal.focus();
+    noteInput.focus();
+
+    logEvent({
+      source: "extension.content",
+      event: "reminder_picker.opened",
+      actionId: ACTIONS.SET_REMINDER,
+      runId,
+      message: "Reminder picker opened.",
+      link: linkedinUrl
+    });
+  });
+}
+
+async function showSequencePicker(runId, linkedinUrl) {
+  createSequencePickerStyles();
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-sequence-picker-overlay";
+
+    const modal = document.createElement("div");
+    modal.id = "gem-sequence-picker-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-sequence-picker-title";
+    title.textContent = "Open Sequence";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-sequence-picker-subtitle";
+    subtitle.textContent = "Press a letter to pick a sequence. Use Enter to open it in Gem.";
+
+    const results = document.createElement("div");
+    results.id = "gem-sequence-picker-results";
+
+    const pageInfo = document.createElement("div");
+    pageInfo.id = "gem-sequence-picker-page";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-sequence-picker-hint";
+    hint.textContent = "Esc to cancel. Arrow keys + Enter also work.";
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(results);
+    modal.appendChild(pageInfo);
+    modal.appendChild(hint);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let loading = true;
+    let loadError = "";
+    let allSequences = [];
+    let pageSequences = [];
+    let selectedIndex = 0;
+    let currentPage = 0;
+    const startedAt = Date.now();
+
+    function cleanup() {
+      overlay.remove();
+    }
+
+    function finish(selection) {
+      cleanup();
+      resolve(selection || null);
+    }
+
+    function updatePageSequences() {
+      const start = currentPage * SEQUENCE_PICKER_KEYS_PER_PAGE;
+      pageSequences = allSequences.slice(start, start + SEQUENCE_PICKER_KEYS_PER_PAGE);
+      if (selectedIndex >= pageSequences.length) {
+        selectedIndex = Math.max(0, pageSequences.length - 1);
+      }
+      if (selectedIndex < 0) {
+        selectedIndex = 0;
+      }
+    }
+
+    function selectSequence(sequence) {
+      if (!sequence) {
+        return;
+      }
+      logEvent({
+        source: "extension.content",
+        event: "sequence_picker.selected",
+        actionId: ACTIONS.SEND_SEQUENCE,
+        runId,
+        message: `Selected sequence ${sequence.name || sequence.id}.`,
+        link: linkedinUrl,
+        details: {
+          sequenceId: sequence.id || "",
+          sequenceName: sequence.name || ""
+        }
+      });
+      finish({
+        id: sequence.id || "",
+        name: sequence.name || ""
+      });
+    }
+
+    function renderSequences() {
+      updatePageSequences();
+      results.innerHTML = "";
+      if (loading) {
+        const loadingNode = document.createElement("div");
+        loadingNode.className = "gem-sequence-picker-empty";
+        loadingNode.textContent = "Loading sequences...";
+        results.appendChild(loadingNode);
+        pageInfo.textContent = "";
+        return;
+      }
+      if (loadError) {
+        const errorNode = document.createElement("div");
+        errorNode.className = "gem-sequence-picker-empty";
+        errorNode.textContent = `Could not load sequences: ${loadError}`;
+        results.appendChild(errorNode);
+        pageInfo.textContent = "";
+        return;
+      }
+      if (allSequences.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "gem-sequence-picker-empty";
+        empty.textContent = "No sequences found.";
+        results.appendChild(empty);
+        pageInfo.textContent = "";
+        return;
+      }
+
+      pageSequences.forEach((sequence, index) => {
+        const item = document.createElement("div");
+        item.className = `gem-sequence-picker-item${index === selectedIndex ? " active" : ""}`;
+
+        const hotkey = document.createElement("div");
+        hotkey.className = "gem-sequence-picker-hotkey";
+        hotkey.textContent = SEQUENCE_PICKER_SHORTCUT_KEYS[index] || "";
+
+        const name = document.createElement("div");
+        name.className = "gem-sequence-picker-name";
+        name.textContent = sequence.name || sequence.id || "";
+
+        const meta = document.createElement("div");
+        meta.className = "gem-sequence-picker-meta";
+        meta.textContent = formatSequenceDate(sequence.createdAt);
+
+        item.appendChild(hotkey);
+        item.appendChild(name);
+        item.appendChild(meta);
+        item.addEventListener("mouseenter", () => {
+          selectedIndex = index;
+          renderSequences();
+        });
+        item.addEventListener("click", () => selectSequence(sequence));
+        results.appendChild(item);
+      });
+
+      const totalPages = Math.max(1, Math.ceil(allSequences.length / SEQUENCE_PICKER_KEYS_PER_PAGE));
+      if (totalPages > 1) {
+        pageInfo.textContent = `Page ${currentPage + 1}/${totalPages}. Press [ / ] to change page.`;
+      } else {
+        pageInfo.textContent = "";
+      }
+    }
+
+    function cancel(reason) {
+      logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "sequence_picker.cancelled",
+        actionId: ACTIONS.SEND_SEQUENCE,
+        runId,
+        message: reason,
+        link: linkedinUrl
+      });
+      finish(null);
+    }
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        cancel("Sequence picker cancelled by outside click.");
+      }
+    });
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancel("Sequence picker cancelled.");
+          return;
+        }
+        if (loading || loadError || pageSequences.length === 0) {
+          return;
+        }
+
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          selectedIndex = (selectedIndex + 1) % pageSequences.length;
+          renderSequences();
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          selectedIndex = (selectedIndex - 1 + pageSequences.length) % pageSequences.length;
+          renderSequences();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          selectSequence(pageSequences[selectedIndex]);
+          return;
+        }
+        const totalPages = Math.max(1, Math.ceil(allSequences.length / SEQUENCE_PICKER_KEYS_PER_PAGE));
+        if (event.key === "]" && totalPages > 1) {
+          event.preventDefault();
+          currentPage = (currentPage + 1) % totalPages;
+          selectedIndex = 0;
+          renderSequences();
+          return;
+        }
+        if (event.key === "[" && totalPages > 1) {
+          event.preventDefault();
+          currentPage = (currentPage - 1 + totalPages) % totalPages;
+          selectedIndex = 0;
+          renderSequences();
+          return;
+        }
+
+        if (event.key.length === 1) {
+          const exactIndex = SEQUENCE_PICKER_SHORTCUT_KEYS.indexOf(event.key.toLowerCase());
+          if (Number.isFinite(exactIndex) && exactIndex >= 0 && exactIndex < pageSequences.length) {
+            event.preventDefault();
+            selectSequence(pageSequences[exactIndex]);
+          }
+        }
+      },
+      true
+    );
+
+    modal.tabIndex = -1;
+    modal.focus();
+    renderSequences();
+
+    logEvent({
+      source: "extension.content",
+      event: "sequence_picker.opened",
+      actionId: ACTIONS.SEND_SEQUENCE,
+      runId,
+      message: "Sequence picker opened.",
+      link: linkedinUrl
+    });
+
+    listSequences("", runId)
+      .then(async (sequences) => {
+        allSequences = sequences;
+        loading = false;
+        loadError = "";
+        renderSequences();
+        await logEvent({
+          source: "extension.content",
+          event: "sequence_picker.loaded",
+          actionId: ACTIONS.SEND_SEQUENCE,
+          runId,
+          message: `Sequence picker loaded ${allSequences.length} sequences.`,
+          link: linkedinUrl,
+          details: {
+            durationMs: Date.now() - startedAt
+          }
+        });
+      })
+      .catch(async (error) => {
+        loading = false;
+        loadError = error.message || "Failed to load sequence list.";
+        renderSequences();
+        showToast(loadError, true);
+        await logEvent({
+          source: "extension.content",
+          level: "error",
+          event: "sequence_picker.load_failed",
+          actionId: ACTIONS.SEND_SEQUENCE,
+          runId,
+          message: loadError,
+          link: linkedinUrl,
+          details: {
+            durationMs: Date.now() - startedAt
+          }
+        });
+      });
+  });
+}
+
 function formatActivityTimestamp(value) {
   if (!value) {
     return "";
@@ -1702,12 +2506,22 @@ async function getRuntimeContext(actionId, settings, runId) {
     context.customFieldName = selection.customFieldName || "";
   }
 
-  if (actionId === ACTIONS.SEND_SEQUENCE && !settings.defaultSequenceId) {
-    const sequenceId = window.prompt("Gem sequence ID:");
-    if (!sequenceId) {
+  if (actionId === ACTIONS.SET_REMINDER) {
+    const selection = await showReminderPicker(runId, context);
+    if (!selection) {
       return null;
     }
-    context.sequenceId = sequenceId.trim();
+    context.reminderNote = selection.reminderNote || "";
+    context.reminderDueDate = selection.reminderDueDate || "";
+  }
+
+  if (actionId === ACTIONS.SEND_SEQUENCE && !settings.defaultSequenceId) {
+    const sequence = await showSequencePicker(runId, context.linkedinUrl);
+    if (!sequence) {
+      return null;
+    }
+    context.sequenceId = String(sequence.id || "").trim();
+    context.sequenceName = String(sequence.name || "").trim();
   }
 
   return context;
@@ -2460,6 +3274,7 @@ async function init() {
   if (cachedSettings?.enabled && isLinkedInProfilePage()) {
     const profileContext = getProfileContext();
     prefetchProjects(generateRunId()).catch(() => {});
+    prefetchSequences(generateRunId()).catch(() => {});
     prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
   }
 
@@ -2470,6 +3285,7 @@ async function init() {
       if (cachedSettings?.enabled && isLinkedInProfilePage()) {
         const profileContext = getProfileContext();
         prefetchProjects(generateRunId()).catch(() => {});
+        prefetchSequences(generateRunId()).catch(() => {});
         prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
       }
     }
@@ -2482,6 +3298,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (cachedSettings?.enabled && isLinkedInProfilePage()) {
       const profileContext = getProfileContext();
       prefetchProjects(generateRunId()).catch(() => {});
+      prefetchSequences(generateRunId()).catch(() => {});
       prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
     }
     sendResponse({ ok: true });

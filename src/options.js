@@ -18,6 +18,7 @@ const SHORTCUT_LABELS = {
   addToProject: "Add to Project",
   openActivity: "Open Profile in Gem",
   setCustomField: "Set Custom Field",
+  setReminder: "Set Reminder",
   sendSequence: "Open Sequence",
   viewActivityFeed: "View Activity Feed"
 };
@@ -60,6 +61,7 @@ function readInputs() {
       addToProject: getShortcutValue("addToProject"),
       openActivity: getShortcutValue("openActivity"),
       setCustomField: getShortcutValue("setCustomField"),
+      setReminder: getShortcutValue("setReminder"),
       sendSequence: getShortcutValue("sendSequence"),
       viewActivityFeed: getShortcutValue("viewActivityFeed")
     }
@@ -82,6 +84,7 @@ function writeInputs(settings) {
   setShortcutValue("addToProject", settings.shortcuts.addToProject || "");
   setShortcutValue("openActivity", settings.shortcuts.openActivity || "");
   setShortcutValue("setCustomField", settings.shortcuts.setCustomField || "");
+  setShortcutValue("setReminder", settings.shortcuts.setReminder || "");
   setShortcutValue("sendSequence", settings.shortcuts.sendSequence || "");
   setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
 }
@@ -89,9 +92,6 @@ function writeInputs(settings) {
 function validateSettings(settings) {
   if (!settings.backendBaseUrl) {
     return "Backend base URL is required.";
-  }
-  if (!settings.sequenceComposeUrlTemplate) {
-    return "Sequence URL template is required.";
   }
 
   const seen = new Set();
