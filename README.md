@@ -112,43 +112,6 @@ Open extension **Options** and set:
 2. Trigger `Add Prospect` (default: `Cmd+Option+1`) or click button from popup.
 3. Confirm success toast/log entry.
 
-## Backend configuration reference
-
-`backend/.env.example` documents all supported values.
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `PORT` | No | Backend port (default `8787`) |
-| `GEM_API_KEY` | Yes (Gem actions) | Gem API auth key |
-| `GEM_API_BASE_URL` | No | Gem API base URL (default `https://api.gem.com`) |
-| `GEM_DEFAULT_USER_ID` | Recommended | Default Gem user ID for create/add/reminder attribution |
-| `GEM_DEFAULT_USER_EMAIL` | Recommended fallback | Used to resolve Gem user when ID not supplied |
-| `BACKEND_SHARED_TOKEN` | Recommended | If set, every POST route requires matching `X-Backend-Token` |
-| `LOG_DIR` | No | Backend log directory (default `./logs`) |
-| `LOG_MAX_BYTES` | No | Rotate `events.jsonl` after threshold (default `5242880`) |
-| `PROJECTS_SCAN_MAX` | No | Max project scan size |
-| `ASHBY_API_KEY` | Yes (Ashby actions) | Ashby API key |
-| `ASHBY_API_BASE_URL` | No | Ashby API base URL (default `https://api.ashbyhq.com`) |
-| `ASHBY_CREDITED_TO_USER_ID` | No | Explicit Ashby credited user ID |
-| `ASHBY_CREDITED_TO_USER_EMAIL` | No | Fallback for credited user lookup |
-| `ASHBY_JOBS_SCAN_MAX` | No | Max Ashby jobs scan size |
-| `ASHBY_WRITE_ENABLED` | No | Master switch for Ashby mutating calls (default `false`) |
-| `ASHBY_WRITE_REQUIRE_CONFIRMATION` | No | Requires confirmation token for writes (default `true`) |
-| `ASHBY_WRITE_CONFIRMATION_TOKEN` | Strongly recommended | Confirmation token for Ashby writes |
-| `ASHBY_WRITE_ALLOWED_METHODS` | No | Comma-separated allowlist of permitted Ashby write RPC methods |
-
-## Extension settings reference
-
-In Options:
-
-- `Enable extension`: global on/off.
-- `Backend Base URL`: backend address.
-- `Backend Shared Token`: must match backend env if enabled.
-- `Created By User ID`: fallback when backend default is not set.
-- `Project ID`, `Sequence ID`, `Custom Field ID`, `Custom Field Value`: optional defaults.
-- `Activity URL Template`, `Sequence URL Template`: optional URL fallback templates.
-- Shortcut editor: validates uniqueness and requires modifier keys.
-
 Default shortcut map:
 
 - `Cmd+Option+1` Add Prospect
@@ -161,62 +124,9 @@ Default shortcut map:
 - `Cmd+Option+9` Edit Sequence
 - `Cmd+Option+0` Open Profile in Ashby
 
-## Backend endpoints (for debugging)
+## Backend configuration reference
 
-- `GET /health`
-- `POST /api/candidates/find-by-linkedin`
-- `POST /api/candidates/create-from-linkedin`
-- `POST /api/projects/add-candidate`
-- `POST /api/projects/list`
-- `POST /api/ashby/jobs/list`
-- `POST /api/ashby/candidates/find-by-linkedin`
-- `POST /api/ashby/upload-candidate`
-- `POST /api/custom-fields/list`
-- `POST /api/candidates/set-custom-field`
-- `POST /api/candidates/set-due-date`
-- `POST /api/candidates/get`
-- `POST /api/sequences/list`
-- `POST /api/sequences/get`
-- `POST /api/users/list`
-- `POST /api/logs/client`
-- `POST /api/logs/recent`
-
-If `BACKEND_SHARED_TOKEN` is set, include:
-
-```http
-X-Backend-Token: <your token>
-```
-
-## Logs and observability
-
-- Backend logs: `backend/logs/events.jsonl` (rotates when max size is exceeded).
-- Extension local logs: stored in Chrome local storage.
-- Options page can:
-  - Refresh and merge backend + local logs.
-  - Export rendered logs as JSON.
-  - Clear local logs.
-
-## Troubleshooting
-
-- `Could not reach backend (...)`
-  - Ensure backend is running and `Backend Base URL` is correct.
-  - Default startup command: `cd backend && npm start`.
-
-- `Unauthorized`
-  - `BACKEND_SHARED_TOKEN` is set on backend but missing/mismatched in extension options.
-
-- `Missing backend base URL in extension settings`
-  - Set `Backend Base URL` in options.
-
-- `Could not determine LinkedIn handle from current profile`
-  - Open a real LinkedIn profile URL (`/in/...`) and retry.
-
-- Ashby actions fail
-  - Set `ASHBY_API_KEY`.
-  - If writes are intended, verify `ASHBY_WRITE_ENABLED`, confirmation token, and allowlisted method config.
-
-- Sequence action opens editor instead of sending
-  - Expected behavior. Gem send/activate is intentionally handled in Gem UI.
+`backend/.env.example` documents all supported values.
 
 ## Development notes
 
