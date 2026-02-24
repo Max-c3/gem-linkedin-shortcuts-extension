@@ -16,6 +16,14 @@ const INVITE_ADD_NOTE_KEY = "n";
 const PROFILE_ACTION_BAND_TOP_OFFSET = 160;
 const PROFILE_ACTION_BAND_BOTTOM_OFFSET = 420;
 const PROFILE_ACTION_COLUMN_MAX_X_OFFSET = 520;
+const CUSTOM_FIELD_MEMORY_CACHE_LIMIT = 40;
+const CUSTOM_FIELD_MEMORY_TTL_MS = 30 * 60 * 1000;
+const PROFILE_URL_POLL_INTERVAL_MS = 300;
+const customFieldMemoryCache = new Map();
+const customFieldWarmPromises = new Map();
+let lastPrefetchedProfileContextKey = "";
+let profileUrlPollTimerId = 0;
+let profileUrlPollLastUrl = "";
 
 function isContextInvalidatedError(message) {
   return /Extension context invalidated|Receiving end does not exist|The message port closed before a response was received/i.test(
@@ -385,6 +393,147 @@ function listCustomFieldsForContext(context, runId, options = {}) {
   });
 }
 
+function getCustomFieldContextKey(context) {
+  const handle = String(context?.linkedInHandle || "").trim().toLowerCase();
+  if (handle) {
+    return `handle:${handle}`;
+  }
+  const rawUrl = String(context?.linkedinUrl || "").trim().toLowerCase();
+  if (!rawUrl) {
+    return "";
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.search = "";
+    parsed.hash = "";
+    return `url:${parsed.toString().replace(/\/$/, "")}`;
+  } catch (_error) {
+    return `url:${rawUrl.replace(/[?#].*$/, "").replace(/\/$/, "")}`;
+  }
+}
+
+function normalizeCustomFieldsForPicker(data) {
+  const input = Array.isArray(data) ? data : Array.isArray(data?.customFields) ? data.customFields : [];
+  return input
+    .map((field) => ({
+      id: String(field.id || ""),
+      name: String(field.name || ""),
+      scope: String(field.scope || ""),
+      valueType: String(field.valueType || ""),
+      options: Array.isArray(field.options)
+        ? field.options.map((option) => ({
+            id: String(option.id || ""),
+            value: String(option.value || "")
+          }))
+        : []
+    }))
+    .filter((field) => field.id && field.name);
+}
+
+function getCustomFieldMemoryEntry(context) {
+  const key = getCustomFieldContextKey(context);
+  if (!key) {
+    return { key: "", entry: null, isFresh: false };
+  }
+  const entry = customFieldMemoryCache.get(key) || null;
+  if (!entry) {
+    return { key, entry: null, isFresh: false };
+  }
+  return {
+    key,
+    entry,
+    isFresh: Date.now() - Number(entry.fetchedAt || 0) <= CUSTOM_FIELD_MEMORY_TTL_MS
+  };
+}
+
+function setCustomFieldMemoryEntry(context, data) {
+  const key = getCustomFieldContextKey(context);
+  if (!key) {
+    return;
+  }
+  const normalizedFields = normalizeCustomFieldsForPicker(data);
+  customFieldMemoryCache.delete(key);
+  customFieldMemoryCache.set(key, {
+    fetchedAt: Date.now(),
+    customFields: normalizedFields
+  });
+  while (customFieldMemoryCache.size > CUSTOM_FIELD_MEMORY_CACHE_LIMIT) {
+    const oldestKey = customFieldMemoryCache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    customFieldMemoryCache.delete(oldestKey);
+  }
+}
+
+function warmCustomFieldsForContext(context, runId, options = {}) {
+  const key = getCustomFieldContextKey(context);
+  if (!key) {
+    return Promise.resolve(null);
+  }
+  if (!options.forceRefresh) {
+    const existingPromise = customFieldWarmPromises.get(key);
+    if (existingPromise) {
+      return existingPromise;
+    }
+  }
+
+  const promise = listCustomFieldsForContext(context, runId, {
+    preferCache: options.preferCache !== false,
+    refreshInBackground: options.refreshInBackground !== false,
+    forceRefresh: Boolean(options.forceRefresh)
+  })
+    .then((data) => {
+      setCustomFieldMemoryEntry(context, data);
+      return data;
+    })
+    .finally(() => {
+      if (customFieldWarmPromises.get(key) === promise) {
+        customFieldWarmPromises.delete(key);
+      }
+    });
+
+  customFieldWarmPromises.set(key, promise);
+  return promise;
+}
+
+function prefetchPickersForCurrentProfile() {
+  if (!cachedSettings?.enabled || !isLinkedInProfilePage()) {
+    return;
+  }
+  const profileContext = getProfileContext();
+  const contextKey = getCustomFieldContextKey(profileContext);
+  if (!contextKey || contextKey === lastPrefetchedProfileContextKey) {
+    return;
+  }
+  lastPrefetchedProfileContextKey = contextKey;
+  prefetchProjects(generateRunId()).catch(() => {});
+  prefetchSequences(generateRunId()).catch(() => {});
+  warmCustomFieldsForContext(profileContext, generateRunId(), {
+    preferCache: true,
+    refreshInBackground: true
+  }).catch(() => {});
+}
+
+function startProfileUrlPrefetchWatcher() {
+  if (profileUrlPollTimerId) {
+    return;
+  }
+  profileUrlPollLastUrl = normalizeLinkedInUrl(window.location.href);
+  profileUrlPollTimerId = window.setInterval(() => {
+    const currentUrl = normalizeLinkedInUrl(window.location.href);
+    if (currentUrl === profileUrlPollLastUrl) {
+      return;
+    }
+    profileUrlPollLastUrl = currentUrl;
+    if (!isLinkedInProfilePage()) {
+      lastPrefetchedProfileContextKey = "";
+      return;
+    }
+    prefetchPickersForCurrentProfile();
+  }, PROFILE_URL_POLL_INTERVAL_MS);
+}
+
 function listActivityFeedForContext(context, runId, limit = ACTIVITY_FEED_LIMIT) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
@@ -444,7 +593,12 @@ function findActionByShortcut(shortcut) {
     return "";
   }
   const mapping = cachedSettings.shortcuts || {};
-  return Object.keys(mapping).find((actionId) => normalizeShortcut(mapping[actionId]) === shortcut) || "";
+  const validActionIds = new Set(Object.values(ACTIONS));
+  return (
+    Object.keys(mapping).find(
+      (actionId) => validActionIds.has(actionId) && normalizeShortcut(mapping[actionId]) === shortcut
+    ) || ""
+  );
 }
 
 function filterProjectsByQuery(projects, query) {
@@ -465,27 +619,6 @@ function prefetchProjects(runId) {
         type: "PREFETCH_PROJECTS",
         runId: runId || "",
         limit: 0
-      },
-      () => {
-        if (chrome.runtime.lastError) {
-          const msg = chrome.runtime.lastError.message || "";
-          if (isContextInvalidatedError(msg)) {
-            triggerContextRecovery(msg);
-          }
-        }
-        resolve();
-      }
-    );
-  });
-}
-
-function prefetchCustomFields(context, runId) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      {
-        type: "PREFETCH_CUSTOM_FIELDS_FOR_CONTEXT",
-        context,
-        runId: runId || ""
       },
       () => {
         if (chrome.runtime.lastError) {
@@ -1313,14 +1446,16 @@ async function showCustomFieldPicker(runId, context) {
     overlay.appendChild(modal);
     document.documentElement.appendChild(overlay);
 
-    let loading = true;
+    const memoryEntry = getCustomFieldMemoryEntry(context);
+    const hasMemory = Boolean(memoryEntry.entry);
+    let loading = !hasMemory;
     let loadError = "";
     let step = "fields";
     let selectedIndex = 0;
     let currentPage = 0;
     let valueNumberBuffer = "";
     let valueBufferTimer = null;
-    let allFields = [];
+    let allFields = hasMemory ? memoryEntry.entry.customFields.slice() : [];
     let fieldsForPage = [];
     let selectedField = null;
     let valueChoices = [];
@@ -1426,30 +1561,36 @@ async function showCustomFieldPicker(runId, context) {
       }
     }
 
-    function normalizeCustomFields(data) {
-      return (Array.isArray(data?.customFields) ? data.customFields : [])
-        .map((field) => ({
-          id: String(field.id || ""),
-          name: String(field.name || ""),
-          scope: String(field.scope || ""),
-          valueType: String(field.valueType || ""),
-          options: Array.isArray(field.options)
-            ? field.options.map((option) => ({
-                id: String(option.id || ""),
-                value: String(option.value || "")
-              }))
-            : []
-        }))
-        .filter((field) => field.id && field.name);
-    }
-
     function applyLoadedCustomFields(data) {
       if (!pickerActive) {
         return;
       }
       loading = false;
       loadError = "";
-      allFields = normalizeCustomFields(data);
+      allFields = normalizeCustomFieldsForPicker(data);
+      setCustomFieldMemoryEntry(context, allFields);
+
+      if (step === "values" && selectedField) {
+        const refreshedField = allFields.find((field) => field.id === selectedField.id) || selectedField;
+        selectedField = refreshedField;
+        const nextChoices =
+          Array.isArray(refreshedField.options) && refreshedField.options.length > 0
+            ? refreshedField.options.slice()
+            : [{ id: "__manual__", value: "Type a custom value..." }];
+        const activeChoiceId = valueChoices[selectedIndex]?.id || "";
+        valueChoices = nextChoices;
+        if (activeChoiceId) {
+          const matchedChoiceIndex = nextChoices.findIndex((option) => option.id === activeChoiceId);
+          selectedIndex = matchedChoiceIndex >= 0 ? matchedChoiceIndex : 0;
+        } else {
+          selectedIndex = 0;
+        }
+        title.textContent = `Set ${selectedField.name}`;
+        subtitle.textContent = "Press a number to choose a value.";
+        renderValues();
+        return;
+      }
+
       currentPage = 0;
       selectedIndex = 0;
       renderFields();
@@ -1740,11 +1881,14 @@ async function showCustomFieldPicker(runId, context) {
       link: linkedinUrl
     });
 
-    listCustomFieldsForContext(context, runId, {
+    warmCustomFieldsForContext(context, runId, {
       preferCache: true,
       refreshInBackground: true
     })
       .then(async (data) => {
+        if (!data) {
+          return;
+        }
         applyLoadedCustomFields(data);
         await logEvent({
           source: "extension.content",
@@ -1757,38 +1901,9 @@ async function showCustomFieldPicker(runId, context) {
             candidateId: data.candidateId || "",
             fromCache: Boolean(data.fromCache),
             stale: Boolean(data.stale),
-            durationMs: Date.now() - startedAt
-          }
-        });
-
-        if (data.fromCache && data.stale) {
-          try {
-            const refreshed = await listCustomFieldsForContext(context, runId, { forceRefresh: true });
-            applyLoadedCustomFields(refreshed);
-            await logEvent({
-              source: "extension.content",
-              event: "custom_field_picker.revalidated",
-              actionId: ACTIONS.SET_CUSTOM_FIELD,
-              runId,
-              message: `Refreshed custom fields from backend (${allFields.length}).`,
-              link: linkedinUrl,
-              details: {
-                candidateId: refreshed.candidateId || "",
-                durationMs: Date.now() - startedAt
-              }
-            });
-          } catch (refreshError) {
-            await logEvent({
-              source: "extension.content",
-              level: "warn",
-              event: "custom_field_picker.revalidate_failed",
-              actionId: ACTIONS.SET_CUSTOM_FIELD,
-              runId,
-              message: refreshError?.message || "Custom field cache refresh failed.",
-              link: linkedinUrl
-            });
-          }
-        }
+              durationMs: Date.now() - startedAt
+            }
+          });
       })
       .catch(async (error) => {
         if (!pickerActive) {
@@ -3366,6 +3481,10 @@ async function getRuntimeContext(actionId, settings, runId) {
   }
 
   if (actionId === ACTIONS.SET_CUSTOM_FIELD) {
+    warmCustomFieldsForContext(context, runId, {
+      preferCache: true,
+      refreshInBackground: true
+    }).catch(() => {});
     const selection = await showCustomFieldPicker(runId, context);
     if (!selection) {
       return null;
@@ -3447,8 +3566,22 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       return;
     }
 
-    if (actionId === ACTIONS.VIEW_ACTIVITY_FEED) {
-      await showActivityFeed(effectiveRunId, initialContext);
+    if (actionId === "viewActivityFeed") {
+      const message = "View Activity Feed is retired for now.";
+      showToast(message, true);
+      await logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "action.retired",
+        actionId,
+        runId: effectiveRunId,
+        message,
+        link: initialContext.linkedinUrl
+      });
+      // Retired branch kept for future restore:
+      // if (actionId === ACTIONS.VIEW_ACTIVITY_FEED) {
+      //   await showActivityFeed(effectiveRunId, initialContext);
+      // }
       return;
     }
 
@@ -4155,14 +4288,15 @@ function onKeyDown(event) {
 
 async function init() {
   window.addEventListener("keydown", onKeyDown, true);
+  startProfileUrlPrefetchWatcher();
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === "sync" && changes.settings) {
       cachedSettings = deepMerge(DEFAULT_SETTINGS, changes.settings.newValue || {});
       if (cachedSettings?.enabled && isLinkedInProfilePage()) {
-        const profileContext = getProfileContext();
-        prefetchProjects(generateRunId()).catch(() => {});
-        prefetchSequences(generateRunId()).catch(() => {});
-        prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
+        lastPrefetchedProfileContextKey = "";
+        prefetchPickersForCurrentProfile();
+      } else {
+        lastPrefetchedProfileContextKey = "";
       }
     }
   });
@@ -4183,10 +4317,8 @@ async function init() {
   }
 
   if (cachedSettings?.enabled && isLinkedInProfilePage()) {
-    const profileContext = getProfileContext();
-    prefetchProjects(generateRunId()).catch(() => {});
-    prefetchSequences(generateRunId()).catch(() => {});
-    prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
+    lastPrefetchedProfileContextKey = "";
+    prefetchPickersForCurrentProfile();
   }
 }
 
@@ -4194,10 +4326,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "SETTINGS_UPDATED") {
     cachedSettings = deepMerge(DEFAULT_SETTINGS, message.settings || {});
     if (cachedSettings?.enabled && isLinkedInProfilePage()) {
-      const profileContext = getProfileContext();
-      prefetchProjects(generateRunId()).catch(() => {});
-      prefetchSequences(generateRunId()).catch(() => {});
-      prefetchCustomFields(profileContext, generateRunId()).catch(() => {});
+      lastPrefetchedProfileContextKey = "";
+      prefetchPickersForCurrentProfile();
+    } else {
+      lastPrefetchedProfileContextKey = "";
     }
     sendResponse({ ok: true });
     return false;
