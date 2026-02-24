@@ -1799,6 +1799,7 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
   return refreshed;
 }
 
+/*
 async function listActivityFeedForContext(settings, context, runId, limit = 120) {
   const actionId = ACTIONS.VIEW_ACTIVITY_FEED;
   const audit = { actionId, runId };
@@ -1829,6 +1830,11 @@ async function listActivityFeedForContext(settings, context, runId, limit = 120)
     candidate: candidateData,
     activities
   };
+}
+*/
+
+async function listActivityFeedForContext() {
+  throw new Error("View Activity Feed is retired for now.");
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -2087,19 +2093,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "LIST_ACTIVITY_FEED_FOR_CONTEXT") {
-    getSettings()
-      .then(async (settings) => {
-        const runId = message.runId || generateId();
-        const context = message.context || {};
-        const data = await listActivityFeedForContext(settings, context, runId, message.limit);
-        sendResponse({
-          ok: true,
-          runId,
-          candidate: data.candidate,
-          activities: data.activities
-        });
-      })
-      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    // Retired for now:
+    // getSettings()
+    //   .then(async (settings) => {
+    //     const runId = message.runId || generateId();
+    //     const context = message.context || {};
+    //     const data = await listActivityFeedForContext(settings, context, runId, message.limit);
+    //     sendResponse({
+    //       ok: true,
+    //       runId,
+    //       candidate: data.candidate,
+    //       activities: data.activities
+    //     });
+    //   })
+    //   .catch((error) => sendResponse({ ok: false, message: error.message }));
+    sendResponse({ ok: false, message: "View Activity Feed is retired for now." });
     return true;
   }
 

@@ -2638,7 +2638,8 @@ const routes = {
   "/api/candidates/set-due-date": setCandidateDueDate,
   "/api/candidates/get": getCandidate,
   "/api/sequences/list": listSequences,
-  "/api/candidates/activity-feed": listCandidateActivityFeed,
+  // Retired for now:
+  // "/api/candidates/activity-feed": listCandidateActivityFeed,
   "/api/sequences/get": getSequence,
   "/api/users/list": listUsers,
   "/api/logs/client": ingestClientLog,

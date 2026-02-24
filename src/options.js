@@ -22,8 +22,9 @@ const SHORTCUT_LABELS = {
   setCustomField: "Set Custom Field",
   setReminder: "Set Reminder",
   sendSequence: "Open Sequence",
-  editSequence: "Edit Sequence",
-  viewActivityFeed: "View Activity Feed"
+  editSequence: "Edit Sequence"
+  // Retired for now:
+  // viewActivityFeed: "View Activity Feed"
 };
 
 function setStatus(text, isError = false) {
@@ -68,8 +69,9 @@ function readInputs() {
       setCustomField: getShortcutValue("setCustomField"),
       setReminder: getShortcutValue("setReminder"),
       sendSequence: getShortcutValue("sendSequence"),
-      editSequence: getShortcutValue("editSequence"),
-      viewActivityFeed: getShortcutValue("viewActivityFeed")
+      editSequence: getShortcutValue("editSequence")
+      // Retired for now:
+      // viewActivityFeed: getShortcutValue("viewActivityFeed")
     }
   };
 }
@@ -95,7 +97,8 @@ function writeInputs(settings) {
   setShortcutValue("setReminder", settings.shortcuts.setReminder || "");
   setShortcutValue("sendSequence", settings.shortcuts.sendSequence || "");
   setShortcutValue("editSequence", settings.shortcuts.editSequence || "");
-  setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
+  // Retired for now:
+  // setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
 }
 
 function validateSettings(settings) {
