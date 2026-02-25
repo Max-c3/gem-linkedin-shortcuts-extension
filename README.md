@@ -66,20 +66,16 @@ GEM_DEFAULT_USER_ID=<your_gem_user_id>
 EOF
 ```
 
+!! Ideally just ask Max to send you the content of his .env-file !!
+
 Set at least:
 
 - `GEM_API_KEY`
 - `GEM_DEFAULT_USER_ID` or `GEM_DEFAULT_USER_EMAIL`
-
-!! Ideally just ask Max to send you the content of his .env-file !!
-
-If you want Ashby actions, also set:
-
 - `ASHBY_API_KEY`
-
-For stronger security, also set:
-
 - `BACKEND_SHARED_TOKEN` (random, long value)
+
+The Backend_shared_token needs to be added in the "Options" in the Extension itself, when opened in Google Chrome. More later.
 
 ### 3. Start backend
 
@@ -113,18 +109,11 @@ Expected response:
 Open extension **Options** and set:
 
 - `Backend Base URL`: `http://localhost:8787` (default)
-- `Backend Shared Token`: required only when `BACKEND_SHARED_TOKEN` is set in `backend/.env`
+- `Backend Shared Token`: you set the same token (can be any combination of characters) in the .env-file and then in the Chrome extension (> Options). Ask Max if you're unsure about this.
 - `Created By User ID`: if you did not set a default user in backend env
-- Any optional defaults (project, sequence, custom field)
 - Your preferred shortcuts
 
-### 6. Verify end-to-end
-
-1. Open any LinkedIn profile (`https://www.linkedin.com/in/...`).
-2. Trigger `Add Prospect` (default: `Cmd+Option+1`) or click button from popup.
-3. Confirm success toast/log entry.
-
-Default shortcut map:
+### 6. Default shortcut map:
 
 - `Cmd+Option+1` Add Prospect
 - `Cmd+Option+2` Add to Project
