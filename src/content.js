@@ -13,6 +13,11 @@ const ACTIVITY_FEED_LIMIT = 150;
 const CONNECT_SHORTCUT = "Cmd+Option+Z";
 const INVITE_SEND_WITHOUT_NOTE_KEY = "w";
 const INVITE_ADD_NOTE_KEY = "n";
+const REMINDER_PRESET_SHORTCUTS = [
+  { key: "a", label: "1 week", kind: "days", amount: 7 },
+  { key: "s", label: "3 months", kind: "months", amount: 3 },
+  { key: "d", label: "6 months", kind: "months", amount: 6 }
+];
 const PROFILE_ACTION_BAND_TOP_OFFSET = 160;
 const PROFILE_ACTION_BAND_BOTTOM_OFFSET = 420;
 const PROFILE_ACTION_COLUMN_MAX_X_OFFSET = 520;
@@ -114,6 +119,46 @@ function pad2(value) {
 function getTodayIsoDate() {
   const now = new Date();
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+function formatDateAsIso(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function addMonthsClamped(baseDate, monthsToAdd) {
+  const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+  const startDay = start.getDate();
+  const targetMonthStart = new Date(start.getFullYear(), start.getMonth() + monthsToAdd, 1);
+  const lastDayOfTargetMonth = new Date(
+    targetMonthStart.getFullYear(),
+    targetMonthStart.getMonth() + 1,
+    0
+  ).getDate();
+  return new Date(
+    targetMonthStart.getFullYear(),
+    targetMonthStart.getMonth(),
+    Math.min(startDay, lastDayOfTargetMonth)
+  );
+}
+
+function getReminderPresetIsoDate(preset) {
+  const today = new Date();
+  const todayLocal = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (!preset || typeof preset !== "object") {
+    return formatDateAsIso(todayLocal);
+  }
+  if (preset.kind === "days") {
+    const next = new Date(todayLocal.getFullYear(), todayLocal.getMonth(), todayLocal.getDate());
+    next.setDate(next.getDate() + Number(preset.amount || 0));
+    return formatDateAsIso(next);
+  }
+  if (preset.kind === "months") {
+    return formatDateAsIso(addMonthsClamped(todayLocal, Number(preset.amount || 0)));
+  }
+  return formatDateAsIso(todayLocal);
 }
 
 function formatIsoDateForDisplay(dateValue) {
@@ -1193,6 +1238,7 @@ function createReminderPickerStyles() {
       padding: 18px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
       color: #1f2328;
+      position: relative;
     }
     #gem-reminder-picker-title {
       font-size: 20px;
@@ -1237,6 +1283,39 @@ function createReminderPickerStyles() {
       color: #1f2328;
       background: #fff;
     }
+    .gem-reminder-picker-quick-actions {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .gem-reminder-picker-quick-btn {
+      border: 1px solid #c5cedd;
+      border-radius: 8px;
+      background: #f8fafe;
+      color: #1f2328;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    .gem-reminder-picker-quick-btn:hover {
+      background: #edf2fc;
+    }
+    .gem-reminder-picker-quick-key {
+      display: inline-block;
+      min-width: 18px;
+      margin-right: 6px;
+      padding: 2px 5px;
+      border-radius: 5px;
+      border: 1px solid #bcc7d8;
+      background: #fff;
+      font-size: 11px;
+      line-height: 1.1;
+      text-transform: uppercase;
+      color: #344255;
+      text-align: center;
+    }
     #gem-reminder-picker-error {
       min-height: 18px;
       font-size: 12px;
@@ -1267,6 +1346,62 @@ function createReminderPickerStyles() {
       color: #1f2328;
     }
     #gem-reminder-picker-save {
+      background: #1e69d2;
+      color: #fff;
+    }
+    #gem-reminder-picker-confirm-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5;
+    }
+    #gem-reminder-picker-confirm-mask.visible {
+      display: flex;
+    }
+    #gem-reminder-picker-confirm-card {
+      width: min(440px, 100%);
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+    }
+    #gem-reminder-picker-confirm-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+    }
+    #gem-reminder-picker-confirm-body {
+      font-size: 14px;
+      color: #32363c;
+      margin-bottom: 14px;
+      word-break: break-word;
+    }
+    #gem-reminder-picker-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-reminder-picker-confirm-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    #gem-reminder-picker-confirm-cancel {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    #gem-reminder-picker-confirm-ok {
+      border-color: #1e69d2;
       background: #1e69d2;
       color: #fff;
     }
@@ -1967,12 +2102,61 @@ async function showReminderPicker(runId, context) {
     dateInput.type = "date";
     dateRow.appendChild(dateInput);
 
+    const quickActionRow = document.createElement("div");
+    quickActionRow.className = "gem-reminder-picker-quick-actions";
+    const shortcutByKey = new Map();
+    REMINDER_PRESET_SHORTCUTS.forEach((preset) => {
+      shortcutByKey.set(preset.key, preset);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gem-reminder-picker-quick-btn";
+      button.dataset.shortcut = preset.key;
+      const keyTag = document.createElement("span");
+      keyTag.className = "gem-reminder-picker-quick-key";
+      keyTag.textContent = preset.key;
+      const label = document.createElement("span");
+      label.textContent = preset.label;
+      button.appendChild(keyTag);
+      button.appendChild(label);
+      quickActionRow.appendChild(button);
+    });
+    dateRow.appendChild(quickActionRow);
+
     const errorEl = document.createElement("div");
     errorEl.id = "gem-reminder-picker-error";
 
     const hint = document.createElement("div");
     hint.className = "gem-reminder-picker-hint";
-    hint.textContent = "Esc to cancel. Press Tab from note to jump to date, then Enter to save.";
+    hint.textContent =
+      "Esc to cancel. Press Tab from note to date. Type date + Enter, or use A (1 week), S (3 months), D (6 months).";
+
+    const confirmMask = document.createElement("div");
+    confirmMask.id = "gem-reminder-picker-confirm-mask";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-reminder-picker-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-reminder-picker-confirm-title";
+    confirmTitle.textContent = "Confirm Reminder";
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-reminder-picker-confirm-body";
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-reminder-picker-confirm-actions";
+    const confirmCancelBtn = document.createElement("button");
+    confirmCancelBtn.id = "gem-reminder-picker-confirm-cancel";
+    confirmCancelBtn.className = "gem-reminder-picker-confirm-btn";
+    confirmCancelBtn.type = "button";
+    confirmCancelBtn.textContent = "Cancel";
+    const confirmOkBtn = document.createElement("button");
+    confirmOkBtn.id = "gem-reminder-picker-confirm-ok";
+    confirmOkBtn.className = "gem-reminder-picker-confirm-btn";
+    confirmOkBtn.type = "button";
+    confirmOkBtn.textContent = "Confirm";
+    confirmActions.appendChild(confirmCancelBtn);
+    confirmActions.appendChild(confirmOkBtn);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    confirmMask.appendChild(confirmCard);
 
     const actions = document.createElement("div");
     actions.className = "gem-reminder-picker-actions";
@@ -1999,10 +2183,12 @@ async function showReminderPicker(runId, context) {
     modal.appendChild(errorEl);
     modal.appendChild(hint);
     modal.appendChild(actions);
+    modal.appendChild(confirmMask);
     overlay.appendChild(modal);
     document.documentElement.appendChild(overlay);
 
     let selectedDate = getTodayIsoDate();
+    let confirmationPreset = null;
     const startedAt = Date.now();
 
     function setError(message) {
@@ -2044,6 +2230,58 @@ async function showReminderPicker(runId, context) {
       saveBtn.click();
     }
 
+    function isConfirming() {
+      return Boolean(confirmationPreset);
+    }
+
+    function updateConfirmationMask() {
+      if (!confirmationPreset) {
+        confirmMask.classList.remove("visible");
+        dateInput.focus();
+        return;
+      }
+      confirmBody.textContent = `Set reminder for ${confirmationPreset.label} from today (${formatIsoDateForDisplay(
+        confirmationPreset.dueDate
+      )})?`;
+      confirmMask.classList.add("visible");
+      confirmOkBtn.focus();
+    }
+
+    function openPresetConfirmation(preset) {
+      if (!preset) {
+        return;
+      }
+      const dueDate = getReminderPresetIsoDate(preset);
+      if (!dueDate) {
+        return;
+      }
+      setSelectedDate(dueDate);
+      setError("");
+      confirmationPreset = {
+        key: preset.key,
+        label: preset.label,
+        dueDate
+      };
+      updateConfirmationMask();
+    }
+
+    function closePresetConfirmation() {
+      if (!confirmationPreset) {
+        return;
+      }
+      confirmationPreset = null;
+      updateConfirmationMask();
+    }
+
+    function confirmPresetSelection() {
+      if (!confirmationPreset) {
+        return;
+      }
+      confirmationPreset = null;
+      updateConfirmationMask();
+      submitReminder();
+    }
+
     setSelectedDate(selectedDate);
 
     dateInput.addEventListener("change", () => {
@@ -2062,6 +2300,15 @@ async function showReminderPicker(runId, context) {
     });
 
     dateInput.addEventListener("keydown", (event) => {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        const shortcutKey = String(event.key || "").trim().toLowerCase();
+        const preset = shortcutByKey.get(shortcutKey);
+        if (preset) {
+          event.preventDefault();
+          openPresetConfirmation(preset);
+          return;
+        }
+      }
       if (event.key === "Enter") {
         event.preventDefault();
         // Let the native date input commit its current segment before submitting.
@@ -2076,8 +2323,38 @@ async function showReminderPicker(runId, context) {
       }
     });
 
+    quickActionRow.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest(".gem-reminder-picker-quick-btn") : null;
+      if (!target) {
+        return;
+      }
+      const shortcutKey = String(target.getAttribute("data-shortcut") || "").trim().toLowerCase();
+      if (!shortcutKey) {
+        return;
+      }
+      const preset = shortcutByKey.get(shortcutKey);
+      if (!preset) {
+        return;
+      }
+      openPresetConfirmation(preset);
+    });
+
     cancelBtn.addEventListener("click", () => {
       cancelPicker("Reminder picker cancelled.");
+    });
+
+    confirmOkBtn.addEventListener("click", () => {
+      confirmPresetSelection();
+    });
+
+    confirmCancelBtn.addEventListener("click", () => {
+      closePresetConfirmation();
+    });
+
+    confirmMask.addEventListener("click", (event) => {
+      if (event.target === confirmMask) {
+        closePresetConfirmation();
+      }
     });
 
     modal.addEventListener("submit", async (event) => {
@@ -2120,6 +2397,18 @@ async function showReminderPicker(runId, context) {
     overlay.addEventListener(
       "keydown",
       (event) => {
+        if (isConfirming()) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            confirmPresetSelection();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closePresetConfirmation();
+            return;
+          }
+        }
         if (event.key === "Escape") {
           event.preventDefault();
           cancelPicker("Reminder picker cancelled.");
