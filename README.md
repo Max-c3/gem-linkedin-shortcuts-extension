@@ -21,9 +21,10 @@ From a LinkedIn profile page (`https://www.linkedin.com/in/...`), the extension 
 5. Open candidate profile in Gem.
 6. Set a Gem custom field value.
 7. Add note to candidate in Gem.
-8. Set a reminder (note + due date).
-9. Open sequence in Gem UI.
-10. Edit sequence in Gem UI.
+8. Manage candidate emails (add email, copy primary email, view/copy all, set primary).
+9. Set a reminder (note + due date).
+10. Open sequence in Gem UI.
+11. Edit sequence in Gem UI.
 
 ## Architecture and security model
 
@@ -54,10 +55,18 @@ cd gem-linkedin-shortcuts-extension
 
 ```bash
 cd backend
-cp .env.example .env
+cat > .env <<'EOF'
+PORT=8787
+GEM_API_KEY=<your_gem_api_key>
+GEM_DEFAULT_USER_ID=<your_gem_user_id>
+# Optional:
+# GEM_DEFAULT_USER_EMAIL=<your_email@example.com>
+# ASHBY_API_KEY=<your_ashby_api_key>
+# BACKEND_SHARED_TOKEN=<random_long_token>
+EOF
 ```
 
-Edit `backend/.env` and set at least:
+Set at least:
 
 - `GEM_API_KEY`
 - `GEM_DEFAULT_USER_ID` or `GEM_DEFAULT_USER_EMAIL`
@@ -104,7 +113,7 @@ Expected response:
 Open extension **Options** and set:
 
 - `Backend Base URL`: `http://localhost:8787` (default)
-- `Backend Shared Token`: required only if backend has `BACKEND_SHARED_TOKEN`
+- `Backend Shared Token`: required only when `BACKEND_SHARED_TOKEN` is set in `backend/.env`
 - `Created By User ID`: if you did not set a default user in backend env
 - Any optional defaults (project, sequence, custom field)
 - Your preferred shortcuts
@@ -123,14 +132,17 @@ Default shortcut map:
 - `Cmd+Option+4` Set Custom Field
 - `Cmd+Option+5` Open Sequence
 - `Cmd+Option+6` Add Note to Candidate
+- `Cmd+Option+E` Manage Emails
 - `Cmd+Option+7` Set Reminder
 - `Cmd+Option+8` Upload to Ashby
 - `Cmd+Option+9` Edit Sequence
 - `Cmd+Option+0` Open Profile in Ashby
 
-## Backend configuration reference
+## Troubleshooting
 
-`backend/.env.example` documents all supported values.
+- If you see `Could not load projects: Unauthorized`, check whether `BACKEND_SHARED_TOKEN` is set in `backend/.env`.
+- If it is set, the same token must be entered in extension **Options** (`Backend Shared Token`).
+- If you do not want token auth locally, remove `BACKEND_SHARED_TOKEN` from `backend/.env` and restart the backend.
 
 ## Development notes
 
