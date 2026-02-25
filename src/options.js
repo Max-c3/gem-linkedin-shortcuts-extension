@@ -21,6 +21,7 @@ const SHORTCUT_LABELS = {
   openActivity: "Open Profile in Gem",
   setCustomField: "Set Custom Field",
   addNoteToCandidate: "Add Note to Candidate",
+  manageEmails: "Manage Emails",
   setReminder: "Set Reminder",
   sendSequence: "Open Sequence",
   editSequence: "Edit Sequence"
@@ -69,6 +70,7 @@ function readInputs() {
       openActivity: getShortcutValue("openActivity"),
       setCustomField: getShortcutValue("setCustomField"),
       addNoteToCandidate: getShortcutValue("addNoteToCandidate"),
+      manageEmails: getShortcutValue("manageEmails"),
       setReminder: getShortcutValue("setReminder"),
       sendSequence: getShortcutValue("sendSequence"),
       editSequence: getShortcutValue("editSequence")
@@ -97,6 +99,7 @@ function writeInputs(settings) {
   setShortcutValue("openActivity", settings.shortcuts.openActivity || "");
   setShortcutValue("setCustomField", settings.shortcuts.setCustomField || "");
   setShortcutValue("addNoteToCandidate", settings.shortcuts.addNoteToCandidate || "");
+  setShortcutValue("manageEmails", settings.shortcuts.manageEmails || "");
   setShortcutValue("setReminder", settings.shortcuts.setReminder || "");
   setShortcutValue("sendSequence", settings.shortcuts.sendSequence || "");
   setShortcutValue("editSequence", settings.shortcuts.editSequence || "");

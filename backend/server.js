@@ -1089,10 +1089,28 @@ async function listCustomFields(payload, audit) {
   }
 
   let candidateProjectIds = [];
+  const candidateCustomFieldMembershipById = new Map();
   const candidateId = String(payload.candidateId || "").trim();
   if (candidateId) {
     const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
     candidateProjectIds = Array.isArray(candidate?.project_ids) ? candidate.project_ids.map((id) => String(id || "")) : [];
+    const memberships = Array.isArray(candidate?.custom_fields) ? candidate.custom_fields : [];
+    memberships.forEach((membership) => {
+      const membershipFieldId = String(membership?.id || membership?.custom_field_id || "").trim();
+      if (!membershipFieldId) {
+        return;
+      }
+      const valueOptionIdsRaw = Array.isArray(membership?.value_option_ids)
+        ? membership.value_option_ids
+        : Array.isArray(membership?.option_ids)
+          ? membership.option_ids
+          : [];
+      const valueOptionIds = valueOptionIdsRaw.map((id) => String(id || "").trim()).filter(Boolean);
+      candidateCustomFieldMembershipById.set(membershipFieldId, {
+        value: membership?.value,
+        valueOptionIds
+      });
+    });
   }
 
   const seen = new Set();
@@ -1127,10 +1145,42 @@ async function listCustomFields(payload, audit) {
       }
       return false;
     })
-    .map((field) => ({
-      ...field,
-      options: field.options.sort((a, b) => a.value.localeCompare(b.value))
-    }))
+    .map((field) => {
+      const membership = candidateCustomFieldMembershipById.get(field.id) || null;
+      let currentOptionIds = Array.isArray(membership?.valueOptionIds) ? membership.valueOptionIds.slice() : [];
+      const optionValueById = new Map(field.options.map((option) => [option.id, option.value]));
+      const optionIdByLowerValue = new Map(
+        field.options.map((option) => [String(option.value || "").trim().toLowerCase(), option.id])
+      );
+      let currentValueLabels = [];
+
+      if (currentOptionIds.length > 0) {
+        currentValueLabels = currentOptionIds.map((id) => optionValueById.get(id) || id).filter(Boolean);
+      } else if (Array.isArray(membership?.value)) {
+        currentValueLabels = membership.value.map((value) => String(value || "").trim()).filter(Boolean);
+      } else if (membership?.value !== undefined && membership?.value !== null) {
+        const rawValue = String(membership.value || "").trim();
+        if (rawValue) {
+          currentValueLabels = [rawValue];
+        }
+      }
+
+      if (currentOptionIds.length === 0 && currentValueLabels.length > 0) {
+        const derivedOptionIds = currentValueLabels
+          .map((label) => optionIdByLowerValue.get(String(label || "").trim().toLowerCase()) || "")
+          .filter(Boolean);
+        if (derivedOptionIds.length > 0) {
+          currentOptionIds = Array.from(new Set(derivedOptionIds));
+        }
+      }
+
+      return {
+        ...field,
+        currentOptionIds,
+        currentValueLabels,
+        options: field.options.sort((a, b) => a.value.localeCompare(b.value))
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 
   if (requestedLimit > 0) {
@@ -1152,17 +1202,25 @@ async function setCandidateCustomField(payload, audit) {
 
   const valueType = String(payload.customFieldValueType || payload.valueType || "").trim();
   const optionId = String(payload.customFieldOptionId || payload.optionId || "").trim();
+  const optionIdsRaw = Array.isArray(payload.customFieldOptionIds)
+    ? payload.customFieldOptionIds
+    : Array.isArray(payload.optionIds)
+      ? payload.optionIds
+      : [];
+  const optionIds = optionIdsRaw.map((id) => String(id || "").trim()).filter(Boolean);
   let value = payload.value === undefined ? null : payload.value;
   if (valueType === "single_select") {
-    if (!optionId) {
+    const singleValue = optionId || optionIds[0] || "";
+    if (!singleValue) {
       throw new Error("single_select custom fields require option id.");
     }
-    value = optionId;
+    value = singleValue;
   } else if (valueType === "multi_select") {
-    if (!optionId) {
+    const multiValues = optionIds.length > 0 ? optionIds : optionId ? [optionId] : [];
+    if (multiValues.length === 0) {
       throw new Error("multi_select custom fields require option id.");
     }
-    value = [optionId];
+    value = Array.from(new Set(multiValues));
   }
 
   const body = {
@@ -1254,6 +1312,209 @@ async function setCandidateDueDate(payload, audit) {
 
   const candidate = await gemRequest(`/v0/candidates/${candidateId}`, { method: "PUT", body }, audit);
   return { candidate, dueDate, userId };
+}
+
+function normalizeCandidateEmailAddress(raw) {
+  return String(raw || "").trim();
+}
+
+function isValidEmailAddress(raw) {
+  const value = normalizeCandidateEmailAddress(raw);
+  if (!value || value.length > 255) {
+    return false;
+  }
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function ensureSinglePrimaryEmail(entries, preferredLower = "") {
+  const list = Array.isArray(entries) ? entries : [];
+  let primaryIndex = -1;
+  if (preferredLower) {
+    primaryIndex = list.findIndex((entry) => String(entry?.emailAddress || "").toLowerCase() === preferredLower);
+  }
+  if (primaryIndex < 0) {
+    primaryIndex = list.findIndex((entry) => entry?.isPrimary);
+  }
+  if (primaryIndex < 0 && list.length > 0) {
+    primaryIndex = 0;
+  }
+  return list.map((entry, index) => ({
+    emailAddress: String(entry?.emailAddress || "").trim(),
+    isPrimary: index === primaryIndex
+  }));
+}
+
+function extractCandidateEmailsForUpdate(candidate) {
+  const deduped = [];
+  const byLower = new Map();
+
+  function pushEmail(rawEmail, isPrimary = false) {
+    const emailAddress = normalizeCandidateEmailAddress(rawEmail);
+    if (!emailAddress || !isValidEmailAddress(emailAddress)) {
+      return;
+    }
+    const lower = emailAddress.toLowerCase();
+    const existingIndex = byLower.get(lower);
+    if (existingIndex !== undefined) {
+      if (isPrimary) {
+        deduped[existingIndex].isPrimary = true;
+      }
+      return;
+    }
+    byLower.set(lower, deduped.length);
+    deduped.push({ emailAddress, isPrimary: Boolean(isPrimary) });
+  }
+
+  const rawEmails = Array.isArray(candidate?.emails) ? candidate.emails : [];
+  for (const item of rawEmails) {
+    if (typeof item === "string") {
+      pushEmail(item, false);
+      continue;
+    }
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    pushEmail(
+      firstNonEmpty(item.email_address, item.emailAddress, item.email, item.value, item.address),
+      item.is_primary === true || item.isPrimary === true
+    );
+  }
+
+  const emailAddresses = Array.isArray(candidate?.email_addresses) ? candidate.email_addresses : [];
+  for (const item of emailAddresses) {
+    if (typeof item === "string") {
+      pushEmail(item, false);
+      continue;
+    }
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    pushEmail(
+      firstNonEmpty(item.email_address, item.emailAddress, item.email, item.value, item.address),
+      item.is_primary === true || item.isPrimary === true
+    );
+  }
+
+  const directPrimary = firstNonEmpty(candidate?.primary_email, candidate?.email, candidate?.email_address);
+  if (directPrimary) {
+    pushEmail(directPrimary, true);
+  }
+
+  return ensureSinglePrimaryEmail(deduped);
+}
+
+function toGemEmailPayload(entries) {
+  return (Array.isArray(entries) ? entries : []).map((entry) => ({
+    email_address: String(entry?.emailAddress || "").trim(),
+    is_primary: Boolean(entry?.isPrimary)
+  }));
+}
+
+function buildCandidateEmailResponse(candidateId, emails) {
+  const normalized = ensureSinglePrimaryEmail(
+    (Array.isArray(emails) ? emails : [])
+      .map((entry) => ({
+        emailAddress: normalizeCandidateEmailAddress(entry?.emailAddress),
+        isPrimary: Boolean(entry?.isPrimary)
+      }))
+      .filter((entry) => entry.emailAddress && isValidEmailAddress(entry.emailAddress))
+  );
+  const primary = normalized.find((entry) => entry.isPrimary) || null;
+  return {
+    candidateId: String(candidateId || ""),
+    emails: normalized,
+    primaryEmail: primary ? primary.emailAddress : ""
+  };
+}
+
+async function listCandidateEmails(payload, audit) {
+  const candidateId = String(payload.candidateId || "").trim();
+  if (!candidateId) {
+    throw new Error("candidateId is required.");
+  }
+  const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
+  const emails = extractCandidateEmailsForUpdate(candidate);
+  return buildCandidateEmailResponse(candidateId, emails);
+}
+
+async function addCandidateEmail(payload, audit) {
+  const candidateId = String(payload.candidateId || "").trim();
+  if (!candidateId) {
+    throw new Error("candidateId is required.");
+  }
+  const emailAddress = normalizeCandidateEmailAddress(payload.email || payload.emailAddress);
+  if (!isValidEmailAddress(emailAddress)) {
+    throw new Error("A valid email address is required.");
+  }
+
+  const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
+  const current = extractCandidateEmailsForUpdate(candidate);
+  const lower = emailAddress.toLowerCase();
+  const existing = current.find((entry) => entry.emailAddress.toLowerCase() === lower);
+  const next = existing
+    ? current.slice()
+    : current.concat({
+        emailAddress,
+        isPrimary: false
+      });
+
+  if (next.length > 20) {
+    throw new Error("Gem supports up to 20 email addresses per candidate.");
+  }
+
+  const updatedEntries = ensureSinglePrimaryEmail(next, lower);
+  const updatedCandidate = await gemRequest(
+    `/v0/candidates/${candidateId}`,
+    {
+      method: "PUT",
+      body: {
+        emails: toGemEmailPayload(updatedEntries)
+      }
+    },
+    audit
+  );
+  const updatedEmails = extractCandidateEmailsForUpdate(updatedCandidate);
+  return buildCandidateEmailResponse(candidateId, ensureSinglePrimaryEmail(updatedEmails, lower));
+}
+
+async function setCandidatePrimaryEmail(payload, audit) {
+  const candidateId = String(payload.candidateId || "").trim();
+  if (!candidateId) {
+    throw new Error("candidateId is required.");
+  }
+  const emailAddress = normalizeCandidateEmailAddress(payload.email || payload.emailAddress);
+  if (!isValidEmailAddress(emailAddress)) {
+    throw new Error("A valid email address is required.");
+  }
+
+  const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
+  const current = extractCandidateEmailsForUpdate(candidate);
+  if (current.length === 0) {
+    throw new Error("Candidate has no stored emails.");
+  }
+  const lower = emailAddress.toLowerCase();
+  const existing = current.find((entry) => entry.emailAddress.toLowerCase() === lower);
+  if (!existing) {
+    throw new Error("Email is not stored on this candidate.");
+  }
+  const alreadyPrimary = current.find((entry) => entry.isPrimary)?.emailAddress?.toLowerCase() === lower;
+  if (alreadyPrimary) {
+    return buildCandidateEmailResponse(candidateId, current);
+  }
+
+  const updatedEntries = ensureSinglePrimaryEmail(current, lower);
+  const updatedCandidate = await gemRequest(
+    `/v0/candidates/${candidateId}`,
+    {
+      method: "PUT",
+      body: {
+        emails: toGemEmailPayload(updatedEntries)
+      }
+    },
+    audit
+  );
+  const updatedEmails = extractCandidateEmailsForUpdate(updatedCandidate);
+  return buildCandidateEmailResponse(candidateId, ensureSinglePrimaryEmail(updatedEmails, lower));
 }
 
 async function getCandidate(payload, audit) {
@@ -2940,6 +3201,9 @@ const routes = {
   "/api/candidates/add-note": addCandidateNote,
   "/api/candidates/add_note": addCandidateNote,
   "/api/candidates/set-due-date": setCandidateDueDate,
+  "/api/candidates/emails/list": listCandidateEmails,
+  "/api/candidates/emails/add": addCandidateEmail,
+  "/api/candidates/emails/set-primary": setCandidatePrimaryEmail,
   "/api/candidates/get": getCandidate,
   "/api/sequences/list": listSequences,
   // Retired for now:

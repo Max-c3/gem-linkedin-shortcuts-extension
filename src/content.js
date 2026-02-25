@@ -19,15 +19,22 @@ const REMINDER_PRESET_SHORTCUTS = [
   { key: "s", label: "3 months", kind: "months", amount: 3 },
   { key: "d", label: "6 months", kind: "months", amount: 6 }
 ];
+const EMAIL_MENU_ADD_KEY = "a";
+const EMAIL_MENU_COPY_PRIMARY_KEY = "s";
+const EMAIL_MENU_VIEW_ALL_KEY = "d";
 const PROFILE_ACTION_BAND_TOP_OFFSET = 160;
 const PROFILE_ACTION_BAND_BOTTOM_OFFSET = 420;
 const PROFILE_ACTION_COLUMN_MAX_X_OFFSET = 520;
 const CUSTOM_FIELD_MEMORY_CACHE_LIMIT = 40;
 const CUSTOM_FIELD_MEMORY_TTL_MS = 30 * 60 * 1000;
+const CANDIDATE_EMAIL_MEMORY_CACHE_LIMIT = 80;
+const CANDIDATE_EMAIL_MEMORY_TTL_MS = 30 * 60 * 1000;
 const PROFILE_URL_POLL_INTERVAL_MS = 300;
 const PROFILE_IDENTITY_RETRY_INTERVAL_MS = 1200;
 const customFieldMemoryCache = new Map();
 const customFieldWarmPromises = new Map();
+const candidateEmailMemoryCache = new Map();
+const candidateEmailWarmPromises = new Map();
 let lastPrefetchedProfileContextKey = "";
 let profileUrlPollTimerId = 0;
 let profileUrlPollLastUrl = "";
@@ -323,6 +330,93 @@ function formatIsoDateForDisplay(dateValue) {
   });
 }
 
+function normalizeEmailAddressForPicker(value) {
+  return String(value || "").trim();
+}
+
+function isValidEmailAddressForPicker(value) {
+  const email = normalizeEmailAddressForPicker(value);
+  if (!email || email.length > 255) {
+    return false;
+  }
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function normalizeCandidateEmailsForPicker(data) {
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.emails) ? data.emails : [];
+  const deduped = [];
+  const byLower = new Map();
+
+  for (const item of rows) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const emailAddress = normalizeEmailAddressForPicker(item.emailAddress || item.email_address || item.email);
+    if (!emailAddress) {
+      continue;
+    }
+    const lower = emailAddress.toLowerCase();
+    const existingIndex = byLower.get(lower);
+    const isPrimary = Boolean(item.isPrimary || item.is_primary);
+    if (existingIndex !== undefined) {
+      if (isPrimary) {
+        deduped[existingIndex].isPrimary = true;
+      }
+      continue;
+    }
+    byLower.set(lower, deduped.length);
+    deduped.push({ emailAddress, isPrimary });
+  }
+
+  let primaryIndex = deduped.findIndex((entry) => entry.isPrimary);
+  if (primaryIndex < 0 && deduped.length > 0) {
+    primaryIndex = 0;
+  }
+  return deduped.map((entry, index) => ({
+    emailAddress: entry.emailAddress,
+    isPrimary: index === primaryIndex
+  }));
+}
+
+function getPrimaryEmailForPicker(emails) {
+  const normalized = normalizeCandidateEmailsForPicker(emails);
+  const primary = normalized.find((entry) => entry.isPrimary);
+  return primary ? primary.emailAddress : "";
+}
+
+async function copyTextToClipboard(value) {
+  const text = String(value || "");
+  if (!text) {
+    return false;
+  }
+
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_error) {
+    // Fallback below.
+  }
+
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "readonly");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return Boolean(copied);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function ensureToastContainer() {
   if (toastContainer) {
     return toastContainer;
@@ -585,6 +679,113 @@ function listCustomFieldsForContext(context, runId, options = {}) {
   });
 }
 
+function listCandidateEmailsForContext(context, runId, options = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "LIST_CANDIDATE_EMAILS_FOR_CONTEXT",
+        context,
+        runId: runId || "",
+        preferCache: Boolean(options.preferCache),
+        refreshInBackground: options.refreshInBackground !== false,
+        forceRefresh: Boolean(options.forceRefresh),
+        allowCreate: options.allowCreate !== false
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not load candidate emails"));
+          return;
+        }
+        resolve({
+          candidateId: String(response.candidateId || ""),
+          emails: normalizeCandidateEmailsForPicker(response.emails),
+          primaryEmail: normalizeEmailAddressForPicker(response.primaryEmail || getPrimaryEmailForPicker(response.emails)),
+          fromCache: Boolean(response.fromCache),
+          stale: Boolean(response.stale)
+        });
+      }
+    );
+  });
+}
+
+function addCandidateEmailForContext(context, email, runId) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "ADD_CANDIDATE_EMAIL_FOR_CONTEXT",
+        context,
+        email: normalizeEmailAddressForPicker(email),
+        runId: runId || ""
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not add email"));
+          return;
+        }
+        resolve({
+          candidateId: String(response.candidateId || ""),
+          emails: normalizeCandidateEmailsForPicker(response.emails),
+          primaryEmail: normalizeEmailAddressForPicker(response.primaryEmail || getPrimaryEmailForPicker(response.emails))
+        });
+      }
+    );
+  });
+}
+
+function setPrimaryCandidateEmailForContext(context, email, runId) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "SET_PRIMARY_CANDIDATE_EMAIL_FOR_CONTEXT",
+        context,
+        email: normalizeEmailAddressForPicker(email),
+        runId: runId || ""
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not update primary email"));
+          return;
+        }
+        resolve({
+          candidateId: String(response.candidateId || ""),
+          emails: normalizeCandidateEmailsForPicker(response.emails),
+          primaryEmail: normalizeEmailAddressForPicker(response.primaryEmail || getPrimaryEmailForPicker(response.emails))
+        });
+      }
+    );
+  });
+}
+
 function getCustomFieldContextKey(context) {
   const handle = String(context?.linkedInHandle || "").trim().toLowerCase();
   if (handle) {
@@ -612,6 +813,12 @@ function normalizeCustomFieldsForPicker(data) {
       name: String(field.name || ""),
       scope: String(field.scope || ""),
       valueType: String(field.valueType || ""),
+      currentOptionIds: Array.isArray(field.currentOptionIds)
+        ? field.currentOptionIds.map((id) => String(id || "").trim()).filter(Boolean)
+        : [],
+      currentValueLabels: Array.isArray(field.currentValueLabels)
+        ? field.currentValueLabels.map((value) => String(value || "").trim()).filter(Boolean)
+        : [],
       options: Array.isArray(field.options)
         ? field.options.map((option) => ({
             id: String(option.id || ""),
@@ -689,6 +896,79 @@ function warmCustomFieldsForContext(context, runId, options = {}) {
   return promise;
 }
 
+function getCandidateEmailMemoryEntry(context) {
+  const key = getCustomFieldContextKey(context);
+  if (!key) {
+    return { key: "", entry: null, isFresh: false };
+  }
+  const entry = candidateEmailMemoryCache.get(key) || null;
+  if (!entry) {
+    return { key, entry: null, isFresh: false };
+  }
+  return {
+    key,
+    entry,
+    isFresh: Date.now() - Number(entry.fetchedAt || 0) <= CANDIDATE_EMAIL_MEMORY_TTL_MS
+  };
+}
+
+function setCandidateEmailMemoryEntry(context, data) {
+  const key = getCustomFieldContextKey(context);
+  if (!key) {
+    return;
+  }
+  const emails = normalizeCandidateEmailsForPicker(data?.emails);
+  const primaryEmail = normalizeEmailAddressForPicker(data?.primaryEmail || getPrimaryEmailForPicker(emails));
+  candidateEmailMemoryCache.delete(key);
+  candidateEmailMemoryCache.set(key, {
+    fetchedAt: Date.now(),
+    candidateId: String(data?.candidateId || ""),
+    emails,
+    primaryEmail
+  });
+  while (candidateEmailMemoryCache.size > CANDIDATE_EMAIL_MEMORY_CACHE_LIMIT) {
+    const oldestKey = candidateEmailMemoryCache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    candidateEmailMemoryCache.delete(oldestKey);
+  }
+}
+
+function warmCandidateEmailsForContext(context, runId, options = {}) {
+  const baseKey = getCustomFieldContextKey(context);
+  if (!baseKey) {
+    return Promise.resolve(null);
+  }
+  const allowCreate = options.allowCreate !== false;
+  const key = `${baseKey}|${allowCreate ? "create" : "nocreate"}`;
+  if (!options.forceRefresh) {
+    const existingPromise = candidateEmailWarmPromises.get(key);
+    if (existingPromise) {
+      return existingPromise;
+    }
+  }
+
+  const promise = listCandidateEmailsForContext(context, runId, {
+    preferCache: options.preferCache !== false,
+    refreshInBackground: options.refreshInBackground !== false,
+    forceRefresh: Boolean(options.forceRefresh),
+    allowCreate
+  })
+    .then((data) => {
+      setCandidateEmailMemoryEntry(context, data);
+      return data;
+    })
+    .finally(() => {
+      if (candidateEmailWarmPromises.get(key) === promise) {
+        candidateEmailWarmPromises.delete(key);
+      }
+    });
+
+  candidateEmailWarmPromises.set(key, promise);
+  return promise;
+}
+
 function prefetchPickersForCurrentProfile() {
   if (!cachedSettings?.enabled || !isLinkedInProfilePage()) {
     return;
@@ -704,6 +984,11 @@ function prefetchPickersForCurrentProfile() {
   warmCustomFieldsForContext(profileContext, generateRunId(), {
     preferCache: true,
     refreshInBackground: true
+  }).catch(() => {});
+  warmCandidateEmailsForContext(profileContext, generateRunId(), {
+    preferCache: true,
+    refreshInBackground: true,
+    allowCreate: false
   }).catch(() => {});
 }
 
@@ -1416,16 +1701,47 @@ function createCustomFieldPickerStyles() {
       padding: 16px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
       color: #1f2328;
+      position: relative;
+    }
+    #gem-custom-field-picker-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
     }
     #gem-custom-field-picker-title {
       font-size: 20px;
       font-weight: 700;
-      margin-bottom: 6px;
+      margin: 0;
+    }
+    #gem-custom-field-picker-current-values {
+      min-height: 24px;
+      padding: 6px 10px;
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      background: #f8fafe;
+      font-size: 12px;
+      color: #2f3a4b;
+      text-align: right;
+      max-width: 52%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: none;
+      line-height: 1.25;
+    }
+    #gem-custom-field-picker-current-values.visible {
+      display: block;
+    }
+    .gem-custom-field-picker-current-label {
+      font-weight: 600;
+      margin-right: 6px;
     }
     #gem-custom-field-picker-subtitle {
       font-size: 13px;
       color: #4f5358;
       margin-bottom: 12px;
+      margin-top: 6px;
     }
     #gem-custom-field-picker-results {
       border: 1px solid #d4dae3;
@@ -1450,6 +1766,12 @@ function createCustomFieldPickerStyles() {
     .gem-custom-field-picker-item.active {
       background: #eaf2fe;
     }
+    .gem-custom-field-picker-item.selected {
+      background: #eef6ec;
+    }
+    .gem-custom-field-picker-item.active.selected {
+      background: #dcebd8;
+    }
     .gem-custom-field-picker-hotkey {
       min-width: 28px;
       height: 24px;
@@ -1467,6 +1789,11 @@ function createCustomFieldPickerStyles() {
     .gem-custom-field-picker-value {
       color: #1f2328;
       font-weight: 500;
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .gem-custom-field-picker-meta {
       font-size: 12px;
@@ -1489,6 +1816,62 @@ function createCustomFieldPickerStyles() {
       margin-top: 8px;
       font-size: 12px;
       color: #5b6168;
+    }
+    #gem-custom-field-picker-confirm-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5;
+    }
+    #gem-custom-field-picker-confirm-mask.visible {
+      display: flex;
+    }
+    #gem-custom-field-picker-confirm-card {
+      width: min(440px, 100%);
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+    }
+    #gem-custom-field-picker-confirm-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+    }
+    #gem-custom-field-picker-confirm-body {
+      font-size: 14px;
+      color: #32363c;
+      margin-bottom: 14px;
+      word-break: break-word;
+    }
+    #gem-custom-field-picker-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-custom-field-picker-confirm-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    #gem-custom-field-picker-confirm-cancel {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    #gem-custom-field-picker-confirm-ok {
+      border-color: #1e69d2;
+      background: #1e69d2;
+      color: #fff;
     }
   `;
   document.documentElement.appendChild(style);
@@ -1690,6 +2073,205 @@ function createReminderPickerStyles() {
   document.documentElement.appendChild(style);
 }
 
+function createEmailPickerStyles() {
+  if (document.getElementById("gem-email-picker-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gem-email-picker-style";
+  style.textContent = `
+    #gem-email-picker-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #gem-email-picker-modal {
+      width: min(740px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+      padding: 18px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #1f2328;
+      position: relative;
+    }
+    #gem-email-picker-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    #gem-email-picker-subtitle {
+      font-size: 13px;
+      color: #4f5358;
+      margin-bottom: 12px;
+    }
+    #gem-email-picker-error {
+      min-height: 18px;
+      font-size: 12px;
+      color: #a61d24;
+      margin-bottom: 8px;
+    }
+    #gem-email-picker-list {
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      max-height: 320px;
+      overflow: auto;
+      background: #fff;
+    }
+    .gem-email-picker-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid #eff2f7;
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    .gem-email-picker-item:last-child {
+      border-bottom: none;
+    }
+    .gem-email-picker-item.active {
+      background: #eaf2fe;
+    }
+    .gem-email-picker-item.primary {
+      background: #eef6ec;
+    }
+    .gem-email-picker-item.active.primary {
+      background: #dcebd8;
+    }
+    .gem-email-picker-hotkey {
+      min-width: 28px;
+      height: 24px;
+      border: 1px solid #b9c3d3;
+      border-radius: 6px;
+      text-align: center;
+      line-height: 22px;
+      font-weight: 600;
+      color: #2f3a4b;
+      background: #f5f8fc;
+      font-size: 12px;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .gem-email-picker-value {
+      color: #1f2328;
+      font-weight: 500;
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gem-email-picker-meta {
+      font-size: 12px;
+      color: #5b6168;
+      flex-shrink: 0;
+    }
+    .gem-email-picker-primary-badge {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #b8ccba;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #27502d;
+      background: #e8f3e7;
+    }
+    #gem-email-picker-input {
+      width: 100%;
+      border: 1px solid #b6beca;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 15px;
+      margin-bottom: 10px;
+      color: #1f2328;
+    }
+    .gem-email-picker-hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #5b6168;
+    }
+    .gem-email-picker-empty {
+      padding: 12px;
+      font-size: 13px;
+      color: #5b6168;
+    }
+    .gem-email-picker-status {
+      min-height: 18px;
+      padding: 8px 2px 0;
+      font-size: 12px;
+      color: #5b6168;
+    }
+    .gem-email-picker-status.error {
+      color: #a61d24;
+    }
+    #gem-email-picker-confirm-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5;
+    }
+    #gem-email-picker-confirm-mask.visible {
+      display: flex;
+    }
+    #gem-email-picker-confirm-card {
+      width: min(440px, 100%);
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+    }
+    #gem-email-picker-confirm-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+    }
+    #gem-email-picker-confirm-body {
+      font-size: 14px;
+      color: #32363c;
+      margin-bottom: 14px;
+      word-break: break-word;
+    }
+    #gem-email-picker-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-email-picker-confirm-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    #gem-email-picker-confirm-cancel {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    #gem-email-picker-confirm-ok {
+      border-color: #1e69d2;
+      background: #1e69d2;
+      color: #fff;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
 function createActivityFeedStyles() {
   if (document.getElementById("gem-activity-feed-style")) {
     return;
@@ -1836,9 +2418,15 @@ async function showCustomFieldPicker(runId, context) {
     const modal = document.createElement("div");
     modal.id = "gem-custom-field-picker-modal";
 
+    const header = document.createElement("div");
+    header.id = "gem-custom-field-picker-header";
+
     const title = document.createElement("div");
     title.id = "gem-custom-field-picker-title";
     title.textContent = "Set Custom Field";
+
+    const currentValues = document.createElement("div");
+    currentValues.id = "gem-custom-field-picker-current-values";
 
     const subtitle = document.createElement("div");
     subtitle.id = "gem-custom-field-picker-subtitle";
@@ -1854,11 +2442,42 @@ async function showCustomFieldPicker(runId, context) {
     hint.className = "gem-custom-field-picker-hint";
     hint.textContent = "Esc to cancel. Arrow keys + Enter also work.";
 
-    modal.appendChild(title);
+    const confirmMask = document.createElement("div");
+    confirmMask.id = "gem-custom-field-picker-confirm-mask";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-custom-field-picker-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-custom-field-picker-confirm-title";
+    confirmTitle.textContent = "Confirm Custom Field Update";
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-custom-field-picker-confirm-body";
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-custom-field-picker-confirm-actions";
+    const confirmCancelBtn = document.createElement("button");
+    confirmCancelBtn.id = "gem-custom-field-picker-confirm-cancel";
+    confirmCancelBtn.className = "gem-custom-field-picker-confirm-btn";
+    confirmCancelBtn.type = "button";
+    confirmCancelBtn.textContent = "Cancel";
+    const confirmOkBtn = document.createElement("button");
+    confirmOkBtn.id = "gem-custom-field-picker-confirm-ok";
+    confirmOkBtn.className = "gem-custom-field-picker-confirm-btn";
+    confirmOkBtn.type = "button";
+    confirmOkBtn.textContent = "Confirm";
+    confirmActions.appendChild(confirmCancelBtn);
+    confirmActions.appendChild(confirmOkBtn);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    confirmMask.appendChild(confirmCard);
+
+    header.appendChild(title);
+    header.appendChild(currentValues);
+    modal.appendChild(header);
     modal.appendChild(subtitle);
     modal.appendChild(results);
     modal.appendChild(pageInfo);
     modal.appendChild(hint);
+    modal.appendChild(confirmMask);
     overlay.appendChild(modal);
     document.documentElement.appendChild(overlay);
 
@@ -1869,26 +2488,64 @@ async function showCustomFieldPicker(runId, context) {
     let step = "fields";
     let selectedIndex = 0;
     let currentPage = 0;
-    let valueNumberBuffer = "";
-    let valueBufferTimer = null;
     let allFields = hasMemory ? memoryEntry.entry.customFields.slice() : [];
     let fieldsForPage = [];
     let selectedField = null;
     let valueChoices = [];
+    const pendingMultiOptionIds = new Set();
+    let hasEditedMultiSelection = false;
+    let pendingMultiConfirmation = null;
     let pickerActive = true;
     const startedAt = Date.now();
 
-    function clearValueBuffer() {
-      valueNumberBuffer = "";
-      if (valueBufferTimer) {
-        clearTimeout(valueBufferTimer);
-        valueBufferTimer = null;
+    function clearPendingMultiSelection() {
+      pendingMultiOptionIds.clear();
+    }
+
+    function seedPendingMultiSelectionFromExisting(field) {
+      clearPendingMultiSelection();
+      if (!isMultiSelectField(field)) {
+        return;
       }
+      const currentOptionIds = getCurrentOptionIdsForField(field, Array.isArray(field?.options) ? field.options : []);
+      currentOptionIds.forEach((id) => pendingMultiOptionIds.add(id));
+    }
+
+    function getCurrentOptionIdsForField(field, choices) {
+      const optionIds = new Set();
+      const directOptionIds = Array.isArray(field?.currentOptionIds) ? field.currentOptionIds : [];
+      directOptionIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+        .forEach((id) => optionIds.add(id));
+
+      if (optionIds.size > 0) {
+        return optionIds;
+      }
+
+      const currentLabels = Array.isArray(field?.currentValueLabels) ? field.currentValueLabels : [];
+      if (currentLabels.length === 0 || !Array.isArray(choices) || choices.length === 0) {
+        return optionIds;
+      }
+
+      const normalizedCurrentLabels = new Set(
+        currentLabels.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+      );
+      choices.forEach((option) => {
+        const optionValue = String(option?.value || "").trim().toLowerCase();
+        if (optionValue && normalizedCurrentLabels.has(optionValue)) {
+          const optionId = String(option?.id || "").trim();
+          if (optionId) {
+            optionIds.add(optionId);
+          }
+        }
+      });
+
+      return optionIds;
     }
 
     function cleanup() {
       pickerActive = false;
-      clearValueBuffer();
       overlay.remove();
     }
 
@@ -1908,9 +2565,119 @@ async function showCustomFieldPicker(runId, context) {
       }
     }
 
+    function isMultiSelectField(field) {
+      return String(field?.valueType || "").toLowerCase() === "multi_select";
+    }
+
+    function summarizeLabels(values, maxVisible = 3) {
+      if (!Array.isArray(values) || values.length === 0) {
+        return "None";
+      }
+      const labels = values
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      if (labels.length === 0) {
+        return "None";
+      }
+      if (labels.length <= maxVisible) {
+        return labels.join(", ");
+      }
+      return `${labels.slice(0, maxVisible).join(", ")} +${labels.length - maxVisible} more`;
+    }
+
+    function setCurrentValuesBadge(field) {
+      if (!field || step !== "values") {
+        currentValues.classList.remove("visible");
+        currentValues.textContent = "";
+        return;
+      }
+      currentValues.classList.add("visible");
+      const values = Array.isArray(field.currentValueLabels) ? field.currentValueLabels : [];
+      currentValues.innerHTML = "";
+      const label = document.createElement("span");
+      label.className = "gem-custom-field-picker-current-label";
+      label.textContent = "Current:";
+      const valueText = document.createElement("span");
+      valueText.textContent = summarizeLabels(values, 4);
+      currentValues.appendChild(label);
+      currentValues.appendChild(valueText);
+    }
+
+    function setHintText(text) {
+      hint.textContent = text;
+    }
+
+    function updateValuesPageInfo() {
+      if (step !== "values") {
+        pageInfo.textContent = "";
+        return;
+      }
+      if (isMultiSelectField(selectedField)) {
+        const selectedCount = pendingMultiOptionIds.size;
+        pageInfo.textContent =
+          selectedCount > 0
+            ? `${selectedCount} value${selectedCount === 1 ? "" : "s"} selected. Press Enter to review.`
+            : "Press a letter to select additional values.";
+        return;
+      }
+      pageInfo.textContent = "";
+    }
+
+    function isConfirmingMultiSelection() {
+      return Boolean(pendingMultiConfirmation);
+    }
+
+    function updateMultiConfirmationMask() {
+      if (!pendingMultiConfirmation) {
+        confirmMask.classList.remove("visible");
+        modal.focus();
+        return;
+      }
+      confirmBody.textContent = pendingMultiConfirmation.message;
+      confirmMask.classList.add("visible");
+      confirmOkBtn.focus();
+    }
+
+    function closeMultiConfirmation() {
+      if (!pendingMultiConfirmation) {
+        return;
+      }
+      pendingMultiConfirmation = null;
+      updateMultiConfirmationMask();
+    }
+
+    function buildValueChoicesForField(field) {
+      const options = Array.isArray(field?.options) ? field.options.slice() : [];
+      const valueType = String(field?.valueType || "").toLowerCase();
+      if (options.length > 0) {
+        return options;
+      }
+      if (valueType === "single_select" || valueType === "multi_select") {
+        return [];
+      }
+      return [{ id: "__manual__", value: "Type a custom value..." }];
+    }
+
+    function setValuesHeaderForField(field) {
+      title.textContent = `Set ${field.name}`;
+      if (isMultiSelectField(field)) {
+        subtitle.textContent = "Press letters to select additional values, then press Enter to continue.";
+        setHintText(
+          "Esc to go back. Letter shortcuts toggle immediately. Enter reviews selection. In confirmation: Enter confirms, Esc cancels."
+        );
+      } else {
+        subtitle.textContent = "Press a number to choose a value.";
+        setHintText("Esc to go back. Number shortcuts apply immediately. Arrow keys + Enter also work.");
+      }
+      setCurrentValuesBadge(field);
+    }
+
     function renderFields() {
       updatePageFields();
       results.innerHTML = "";
+      currentValues.classList.remove("visible");
+      currentValues.textContent = "";
+      setHintText("Esc to cancel. Arrow keys + Enter also work.");
       if (loading) {
         const loadingNode = document.createElement("div");
         loadingNode.className = "gem-custom-field-picker-empty";
@@ -1989,10 +2756,7 @@ async function showCustomFieldPicker(runId, context) {
       if (step === "values" && selectedField) {
         const refreshedField = allFields.find((field) => field.id === selectedField.id) || selectedField;
         selectedField = refreshedField;
-        const nextChoices =
-          Array.isArray(refreshedField.options) && refreshedField.options.length > 0
-            ? refreshedField.options.slice()
-            : [{ id: "__manual__", value: "Type a custom value..." }];
+        const nextChoices = buildValueChoicesForField(refreshedField);
         const activeChoiceId = valueChoices[selectedIndex]?.id || "";
         valueChoices = nextChoices;
         if (activeChoiceId) {
@@ -2001,8 +2765,22 @@ async function showCustomFieldPicker(runId, context) {
         } else {
           selectedIndex = 0;
         }
-        title.textContent = `Set ${selectedField.name}`;
-        subtitle.textContent = "Press a number to choose a value.";
+        if (pendingMultiOptionIds.size > 0) {
+          const validOptionIds = new Set(nextChoices.map((option) => option.id));
+          Array.from(pendingMultiOptionIds).forEach((optionId) => {
+            if (!validOptionIds.has(optionId)) {
+              pendingMultiOptionIds.delete(optionId);
+            }
+          });
+        }
+        if (isMultiSelectField(selectedField) && !hasEditedMultiSelection) {
+          seedPendingMultiSelectionFromExisting(selectedField);
+          const firstSelectedIndex = valueChoices.findIndex((option) => pendingMultiOptionIds.has(option.id));
+          if (firstSelectedIndex >= 0) {
+            selectedIndex = firstSelectedIndex;
+          }
+        }
+        setValuesHeaderForField(selectedField);
         renderValues();
         return;
       }
@@ -2015,14 +2793,23 @@ async function showCustomFieldPicker(runId, context) {
     function openValuesForField(field) {
       step = "values";
       selectedField = field;
-      selectedIndex = 0;
-      clearValueBuffer();
-      valueChoices = Array.isArray(field?.options) ? field.options.slice() : [];
-      if (valueChoices.length === 0) {
-        valueChoices = [{ id: "__manual__", value: "Type a custom value..." }];
+      closeMultiConfirmation();
+      hasEditedMultiSelection = false;
+      seedPendingMultiSelectionFromExisting(field);
+      valueChoices = buildValueChoicesForField(field);
+      if (valueChoices.length > 0) {
+        const currentOptionIds = getCurrentOptionIdsForField(field, valueChoices);
+        if (isMultiSelectField(field)) {
+          const firstSelectedIndex = valueChoices.findIndex((option) => pendingMultiOptionIds.has(option.id));
+          selectedIndex = firstSelectedIndex >= 0 ? firstSelectedIndex : 0;
+        } else {
+          const firstCurrentIndex = valueChoices.findIndex((option) => currentOptionIds.has(option.id));
+          selectedIndex = firstCurrentIndex >= 0 ? firstCurrentIndex : 0;
+        }
+      } else {
+        selectedIndex = 0;
       }
-      title.textContent = `Set ${field.name}`;
-      subtitle.textContent = "Press a number to choose a value.";
+      setValuesHeaderForField(field);
       renderValues();
       logEvent({
         source: "extension.content",
@@ -2038,7 +2825,7 @@ async function showCustomFieldPicker(runId, context) {
       });
     }
 
-    function chooseValue(option) {
+    function finishSingleChoice(option) {
       if (!selectedField) {
         return;
       }
@@ -2052,6 +2839,7 @@ async function showCustomFieldPicker(runId, context) {
           customFieldName: selectedField.name || "",
           customFieldValue: typed,
           customFieldOptionId: "",
+          customFieldOptionIds: [],
           customFieldValueType: selectedField.valueType || "text"
         });
         return;
@@ -2061,26 +2849,124 @@ async function showCustomFieldPicker(runId, context) {
         customFieldName: selectedField.name || "",
         customFieldValue: option.value || "",
         customFieldOptionId: option.id || "",
+        customFieldOptionIds: option.id ? [option.id] : [],
         customFieldValueType: selectedField.valueType || ""
       });
     }
 
+    function toggleMultiChoice(option) {
+      const optionId = String(option?.id || "").trim();
+      if (!optionId || optionId === "__manual__") {
+        return;
+      }
+      hasEditedMultiSelection = true;
+      if (pendingMultiOptionIds.has(optionId)) {
+        pendingMultiOptionIds.delete(optionId);
+      } else {
+        pendingMultiOptionIds.add(optionId);
+      }
+      renderValues();
+    }
+
+    function buildSelectedMultiOptionIds() {
+      if (!selectedField) {
+        return [];
+      }
+      const validOptionIds = new Set(valueChoices.map((option) => String(option.id || "").trim()).filter(Boolean));
+      const selected = Array.from(pendingMultiOptionIds)
+        .map((id) => String(id || "").trim())
+        .filter((id) => id && validOptionIds.has(id));
+      return Array.from(new Set(selected));
+    }
+
+    function openMultiConfirmation() {
+      if (!selectedField || !isMultiSelectField(selectedField)) {
+        return;
+      }
+      if (pendingMultiOptionIds.size === 0 && !hasEditedMultiSelection) {
+        return;
+      }
+      const selectedOptionIds = buildSelectedMultiOptionIds();
+      const selectedLabels = valueChoices
+        .filter((option) => pendingMultiOptionIds.has(option.id))
+        .map((option) => option.value || option.id || "")
+        .filter(Boolean);
+      const existingOptionIds = getCurrentOptionIdsForField(selectedField, valueChoices);
+      const additionalLabels = valueChoices
+        .filter((option) => pendingMultiOptionIds.has(option.id) && !existingOptionIds.has(option.id))
+        .map((option) => option.value || option.id || "")
+        .filter(Boolean);
+      const removedLabels = valueChoices
+        .filter((option) => existingOptionIds.has(option.id) && !pendingMultiOptionIds.has(option.id))
+        .map((option) => option.value || option.id || "")
+        .filter(Boolean);
+      const currentSummary = summarizeLabels(selectedField.currentValueLabels, 3);
+      const selectedSummary = summarizeLabels(selectedLabels, 4);
+      const additionalSummary = summarizeLabels(additionalLabels, 4);
+      const removedSummary = summarizeLabels(removedLabels, 4);
+      pendingMultiConfirmation = {
+        selectedOptionIds,
+        selectedLabels,
+        message: `Set ${selectedOptionIds.length} selected value${selectedOptionIds.length === 1 ? "" : "s"} for "${
+          selectedField.name
+        }"? Current: ${currentSummary}. Selected: ${selectedSummary}. Additional: ${additionalSummary}. Removed: ${removedSummary}.`
+      };
+      updateMultiConfirmationMask();
+    }
+
+    function confirmMultiSelection() {
+      if (!selectedField || !pendingMultiConfirmation) {
+        return;
+      }
+      const selectedOptionIds = Array.isArray(pendingMultiConfirmation.selectedOptionIds)
+        ? pendingMultiConfirmation.selectedOptionIds
+        : [];
+      const selectionLabels = Array.isArray(pendingMultiConfirmation.selectedLabels)
+        ? pendingMultiConfirmation.selectedLabels
+        : [];
+      pendingMultiConfirmation = null;
+      finish({
+        customFieldId: selectedField.id,
+        customFieldName: selectedField.name || "",
+        customFieldValue: selectionLabels.join(", "),
+        customFieldOptionId: selectedOptionIds[0] || "",
+        customFieldOptionIds: selectedOptionIds,
+        customFieldValueType: selectedField.valueType || ""
+      });
+    }
+
+    function getSingleSelectShortcutIndexFromKey(key) {
+      if (!/^[0-9]$/.test(key)) {
+        return -1;
+      }
+      if (key === "0") {
+        return 9;
+      }
+      return Number(key) - 1;
+    }
+
     function renderValues() {
       results.innerHTML = "";
+      const isMulti = isMultiSelectField(selectedField);
+      const currentOptionIds = getCurrentOptionIdsForField(selectedField, valueChoices);
       if (valueChoices.length === 0) {
         const empty = document.createElement("div");
         empty.className = "gem-custom-field-picker-empty";
         empty.textContent = "No values available for this field.";
         results.appendChild(empty);
+        updateValuesPageInfo();
         return;
       }
       valueChoices.forEach((option, index) => {
         const item = document.createElement("div");
-        item.className = `gem-custom-field-picker-item${index === selectedIndex ? " active" : ""}`;
+        const isActive = index === selectedIndex;
+        const isCurrentlySet = currentOptionIds.has(option.id);
+        const isSelected = isMulti ? pendingMultiOptionIds.has(option.id) : isCurrentlySet;
+        item.className = `gem-custom-field-picker-item${isActive ? " active" : ""}${isSelected ? " selected" : ""}`;
 
         const hotkey = document.createElement("div");
         hotkey.className = "gem-custom-field-picker-hotkey";
-        hotkey.textContent = String(index + 1);
+        hotkey.textContent = isMulti ? CUSTOM_FIELD_SHORTCUT_KEYS[index] || "" : String(index + 1);
 
         const value = document.createElement("div");
         value.className = "gem-custom-field-picker-value";
@@ -2088,6 +2974,12 @@ async function showCustomFieldPicker(runId, context) {
 
         item.appendChild(hotkey);
         item.appendChild(value);
+        if (isCurrentlySet) {
+          const existingTag = document.createElement("div");
+          existingTag.className = "gem-custom-field-picker-meta";
+          existingTag.textContent = "current";
+          item.appendChild(existingTag);
+        }
         item.addEventListener("mouseenter", () => {
           if (selectedIndex === index) {
             return;
@@ -2095,14 +2987,24 @@ async function showCustomFieldPicker(runId, context) {
           selectedIndex = index;
           renderValues();
         });
-        item.addEventListener("click", () => chooseValue(option));
+        item.addEventListener("click", () => {
+          selectedIndex = index;
+          if (isMulti) {
+            toggleMultiChoice(option);
+            return;
+          }
+          finishSingleChoice(option);
+        });
         results.appendChild(item);
       });
-      pageInfo.textContent = "";
+      updateValuesPageInfo();
     }
 
     function goBackToFields() {
       step = "fields";
+      closeMultiConfirmation();
+      clearPendingMultiSelection();
+      hasEditedMultiSelection = false;
       selectedField = null;
       selectedIndex = 0;
       title.textContent = "Set Custom Field";
@@ -2157,55 +3059,43 @@ async function showCustomFieldPicker(runId, context) {
       }
     }
 
-    function handleValuesNumberKey(key) {
-      if (!/^[0-9]$/.test(key)) {
+    function handleValuesNumberKey(event) {
+      if (isMultiSelectField(selectedField)) {
         return false;
       }
-      valueNumberBuffer += key;
-      if (valueBufferTimer) {
-        clearTimeout(valueBufferTimer);
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return false;
       }
-      valueBufferTimer = setTimeout(() => {
-        const exactIndex = Number(valueNumberBuffer);
-        if (
-          valueNumberBuffer &&
-          Number.isFinite(exactIndex) &&
-          String(exactIndex) === valueNumberBuffer &&
-          exactIndex >= 1 &&
-          exactIndex <= valueChoices.length
-        ) {
-          const option = valueChoices[exactIndex - 1];
-          clearValueBuffer();
-          chooseValue(option);
-          return;
-        }
-        clearValueBuffer();
-      }, 800);
-
-      const matches = [];
-      for (let i = 1; i <= valueChoices.length; i += 1) {
-        const token = String(i);
-        if (token.startsWith(valueNumberBuffer)) {
-          matches.push(i);
-        }
+      const key = String(event.key || "");
+      const shortcutIndex = getSingleSelectShortcutIndexFromKey(key);
+      if (shortcutIndex < 0) {
+        return false;
       }
-      if (matches.length === 0) {
-        clearValueBuffer();
+      if (shortcutIndex >= valueChoices.length) {
         return true;
       }
+      selectedIndex = shortcutIndex;
+      finishSingleChoice(valueChoices[shortcutIndex]);
+      return true;
+    }
 
-      const exact = Number(valueNumberBuffer);
-      const hasExact =
-        Number.isFinite(exact) &&
-        String(exact) === valueNumberBuffer &&
-        exact >= 1 &&
-        exact <= valueChoices.length;
-      const hasLongerPrefix = matches.some((index) => String(index) !== valueNumberBuffer);
-      if (hasExact && !hasLongerPrefix) {
-        clearValueBuffer();
-        chooseValue(valueChoices[exact - 1]);
+    function handleValuesLetterKey(event) {
+      if (!isMultiSelectField(selectedField)) {
+        return false;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return false;
+      }
+      const lower = String(event.key || "").toLowerCase();
+      const idx = CUSTOM_FIELD_SHORTCUT_KEYS.indexOf(lower);
+      if (idx < 0) {
+        return false;
+      }
+      if (idx >= valueChoices.length) {
         return true;
       }
+      selectedIndex = idx;
+      toggleMultiChoice(valueChoices[idx]);
       return true;
     }
 
@@ -2226,21 +3116,54 @@ async function showCustomFieldPicker(runId, context) {
         }
         return;
       }
-      if (event.key === "Enter") {
+      if (isMultiSelectField(selectedField) && event.key === " ") {
         event.preventDefault();
         if (valueChoices.length > 0) {
-          chooseValue(valueChoices[selectedIndex]);
+          toggleMultiChoice(valueChoices[selectedIndex]);
         }
         return;
       }
-      if (handleValuesNumberKey(event.key)) {
+      if (event.key === "Enter") {
         event.preventDefault();
+        if (valueChoices.length > 0) {
+          if (isMultiSelectField(selectedField)) {
+            if (pendingMultiOptionIds.size > 0 || hasEditedMultiSelection) {
+              openMultiConfirmation();
+              return;
+            }
+            toggleMultiChoice(valueChoices[selectedIndex]);
+            return;
+          }
+          finishSingleChoice(valueChoices[selectedIndex]);
+        }
+        return;
+      }
+      if (handleValuesLetterKey(event)) {
+        event.preventDefault();
+        return;
+      }
+      if (handleValuesNumberKey(event)) {
+        event.preventDefault();
+        return;
       }
     }
 
     overlay.addEventListener(
       "keydown",
       (event) => {
+        if (isConfirmingMultiSelection()) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            confirmMultiSelection();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closeMultiConfirmation();
+            return;
+          }
+        }
+
         if (event.key === "Escape") {
           event.preventDefault();
           if (step === "values") {
@@ -2268,6 +3191,20 @@ async function showCustomFieldPicker(runId, context) {
       },
       true
     );
+
+    confirmOkBtn.addEventListener("click", () => {
+      confirmMultiSelection();
+    });
+
+    confirmCancelBtn.addEventListener("click", () => {
+      closeMultiConfirmation();
+    });
+
+    confirmMask.addEventListener("click", (event) => {
+      if (event.target === confirmMask) {
+        closeMultiConfirmation();
+      }
+    });
 
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) {
@@ -2317,9 +3254,9 @@ async function showCustomFieldPicker(runId, context) {
             candidateId: data.candidateId || "",
             fromCache: Boolean(data.fromCache),
             stale: Boolean(data.stale),
-              durationMs: Date.now() - startedAt
-            }
-          });
+            durationMs: Date.now() - startedAt
+          }
+        });
       })
       .catch(async (error) => {
         if (!pickerActive) {
@@ -2719,6 +3656,693 @@ async function showReminderPicker(runId, context) {
       actionId: ACTIONS.SET_REMINDER,
       runId,
       message: "Reminder picker opened.",
+      link: linkedinUrl
+    });
+  });
+}
+
+async function showEmailPicker(runId, context) {
+  createEmailPickerStyles();
+  const linkedinUrl = context.linkedinUrl || window.location.href;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-email-picker-overlay";
+
+    const modal = document.createElement("div");
+    modal.id = "gem-email-picker-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-email-picker-title";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-email-picker-subtitle";
+
+    const errorEl = document.createElement("div");
+    errorEl.id = "gem-email-picker-error";
+
+    const content = document.createElement("div");
+    content.id = "gem-email-picker-list";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-email-picker-hint";
+
+    const confirmMask = document.createElement("div");
+    confirmMask.id = "gem-email-picker-confirm-mask";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-email-picker-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-email-picker-confirm-title";
+    confirmTitle.textContent = "Confirm Email Update";
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-email-picker-confirm-body";
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-email-picker-confirm-actions";
+    const confirmCancelBtn = document.createElement("button");
+    confirmCancelBtn.id = "gem-email-picker-confirm-cancel";
+    confirmCancelBtn.className = "gem-email-picker-confirm-btn";
+    confirmCancelBtn.type = "button";
+    confirmCancelBtn.textContent = "Cancel";
+    const confirmOkBtn = document.createElement("button");
+    confirmOkBtn.id = "gem-email-picker-confirm-ok";
+    confirmOkBtn.className = "gem-email-picker-confirm-btn";
+    confirmOkBtn.type = "button";
+    confirmOkBtn.textContent = "Confirm";
+    confirmActions.appendChild(confirmCancelBtn);
+    confirmActions.appendChild(confirmOkBtn);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    confirmMask.appendChild(confirmCard);
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(errorEl);
+    modal.appendChild(content);
+    modal.appendChild(hint);
+    modal.appendChild(confirmMask);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    const emailMemoryEntry = getCandidateEmailMemoryEntry(context);
+    const hasEmailMemory = Boolean(emailMemoryEntry.entry);
+    let step = "menu";
+    let loading = !hasEmailMemory;
+    let busy = false;
+    let loadError = "";
+    let selectedIndex = 0;
+    let emails = hasEmailMemory ? normalizeCandidateEmailsForPicker(emailMemoryEntry.entry.emails) : [];
+    let primaryEmail = hasEmailMemory
+      ? normalizeEmailAddressForPicker(emailMemoryEntry.entry.primaryEmail || getPrimaryEmailForPicker(emailMemoryEntry.entry.emails))
+      : "";
+    let pendingAddEmail = "";
+    let disposed = false;
+    const addInput = document.createElement("input");
+    addInput.id = "gem-email-picker-input";
+    addInput.type = "text";
+    addInput.autocomplete = "off";
+    addInput.placeholder = "name@company.com";
+
+    function cleanup() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      overlay.remove();
+    }
+
+    function finish(result = null) {
+      cleanup();
+      resolve(result);
+    }
+
+    function setError(message) {
+      errorEl.textContent = message || "";
+    }
+
+    function setHint(message) {
+      hint.textContent = message || "";
+    }
+
+    function isConfirming() {
+      return Boolean(pendingAddEmail);
+    }
+
+    function updateConfirmMask() {
+      if (!pendingAddEmail) {
+        confirmMask.classList.remove("visible");
+        if (step === "add") {
+          addInput.focus();
+        } else {
+          modal.focus();
+        }
+        return;
+      }
+      confirmBody.textContent = `Add "${pendingAddEmail}" and set it as the primary email?`;
+      confirmMask.classList.add("visible");
+      confirmOkBtn.focus();
+    }
+
+    function openAddConfirmation() {
+      const emailAddress = normalizeEmailAddressForPicker(addInput.value || "");
+      if (!isValidEmailAddressForPicker(emailAddress)) {
+        setError("Enter a valid email address.");
+        return;
+      }
+      setError("");
+      pendingAddEmail = emailAddress;
+      updateConfirmMask();
+    }
+
+    function closeAddConfirmation() {
+      if (!pendingAddEmail) {
+        return;
+      }
+      pendingAddEmail = "";
+      updateConfirmMask();
+    }
+
+    function applyEmailData(data) {
+      emails = normalizeCandidateEmailsForPicker(data?.emails);
+      primaryEmail = normalizeEmailAddressForPicker(data?.primaryEmail || getPrimaryEmailForPicker(emails));
+      if (!primaryEmail && emails.length > 0) {
+        primaryEmail = emails[0].emailAddress;
+      }
+      setCandidateEmailMemoryEntry(context, {
+        candidateId: String(data?.candidateId || ""),
+        emails,
+        primaryEmail
+      });
+      const primaryIndex = emails.findIndex((entry) => entry.isPrimary);
+      selectedIndex = primaryIndex >= 0 ? primaryIndex : 0;
+    }
+
+    async function refreshEmails(options = {}) {
+      const quiet = Boolean(options.quiet);
+      if (!quiet) {
+        loading = true;
+        loadError = "";
+        render();
+      }
+      try {
+        const data = await warmCandidateEmailsForContext(context, runId, {
+          preferCache: true,
+          refreshInBackground: true,
+          allowCreate: true
+        });
+        if (!data) {
+          loading = false;
+          render();
+          return;
+        }
+        loading = false;
+        applyEmailData(data);
+      } catch (error) {
+        loading = false;
+        loadError = error.message || "Failed to load emails.";
+        setError(loadError);
+      }
+      render();
+    }
+
+    async function copyEmailValue(value, options = {}) {
+      const emailAddress = normalizeEmailAddressForPicker(value);
+      if (!emailAddress) {
+        setError("No email available to copy.");
+        return false;
+      }
+      const copied = await copyTextToClipboard(emailAddress);
+      if (!copied) {
+        setError("Could not copy email.");
+        return false;
+      }
+      showToast(`Copied email: ${emailAddress}`);
+      setError("");
+      await logEvent({
+        source: "extension.content",
+        event: "email_picker.copied",
+        actionId: ACTIONS.MANAGE_EMAILS,
+        runId,
+        message: `Copied ${options.kind || "email"} ${emailAddress}.`,
+        link: linkedinUrl,
+        details: {
+          kind: options.kind || "email",
+          emailAddress
+        }
+      });
+      return true;
+    }
+
+    async function copyPrimaryEmailAndClose() {
+      if (loading) {
+        setError("Still loading emails. Try again in a second.");
+        return;
+      }
+      if (loadError) {
+        setError(loadError);
+        return;
+      }
+      const copied = await copyEmailValue(primaryEmail, { kind: "primary_email" });
+      if (copied) {
+        finish({
+          type: "copy-primary",
+          emailAddress: primaryEmail
+        });
+      }
+    }
+
+    async function confirmAddEmail() {
+      if (!pendingAddEmail || busy) {
+        return;
+      }
+      const emailAddress = pendingAddEmail;
+      busy = true;
+      try {
+        const data = await addCandidateEmailForContext(context, emailAddress, runId);
+        applyEmailData(data);
+        showToast(`Added and set primary email: ${emailAddress}`);
+        await logEvent({
+          source: "extension.content",
+          event: "email_picker.added",
+          actionId: ACTIONS.MANAGE_EMAILS,
+          runId,
+          message: `Added email ${emailAddress} and set as primary.`,
+          link: linkedinUrl,
+          details: {
+            emailAddress,
+            emailCount: emails.length
+          }
+        });
+        finish({
+          type: "add-email",
+          emailAddress
+        });
+      } catch (error) {
+        setError(error.message || "Could not add email.");
+      } finally {
+        busy = false;
+        pendingAddEmail = "";
+        updateConfirmMask();
+      }
+    }
+
+    function setPrimaryEmailByIndex(index) {
+      if (busy || loading || loadError) {
+        return Promise.resolve();
+      }
+      const selected = emails[index];
+      if (!selected) {
+        return Promise.resolve();
+      }
+      if (selected.isPrimary) {
+        showToast(`Primary email already set: ${selected.emailAddress}`);
+        finish({
+          type: "set-primary-email",
+          emailAddress: selected.emailAddress
+        });
+        return Promise.resolve();
+      }
+      const selectedEmail = selected.emailAddress;
+      const previousEmails = emails.map((entry) => ({ ...entry }));
+      const previousPrimaryEmail = primaryEmail;
+
+      // Optimistic local update so the interaction feels instant.
+      emails = emails.map((entry, entryIndex) => ({
+        emailAddress: entry.emailAddress,
+        isPrimary: entryIndex === index
+      }));
+      primaryEmail = selectedEmail;
+      selectedIndex = index;
+      setCandidateEmailMemoryEntry(context, {
+        candidateId: "",
+        emails,
+        primaryEmail
+      });
+      showToast(`Set primary email: ${selectedEmail}`);
+      finish({
+        type: "set-primary-email",
+        emailAddress: selectedEmail
+      });
+
+      setPrimaryCandidateEmailForContext(context, selectedEmail, runId)
+        .then(async (data) => {
+          setCandidateEmailMemoryEntry(context, {
+            candidateId: String(data?.candidateId || ""),
+            emails: data?.emails || [],
+            primaryEmail: data?.primaryEmail || selectedEmail
+          });
+          await logEvent({
+            source: "extension.content",
+            event: "email_picker.primary_set",
+            actionId: ACTIONS.MANAGE_EMAILS,
+            runId,
+            message: `Set primary email to ${selectedEmail}.`,
+            link: linkedinUrl,
+            details: {
+              emailAddress: selectedEmail
+            }
+          });
+        })
+        .catch((error) => {
+          setCandidateEmailMemoryEntry(context, {
+            candidateId: "",
+            emails: previousEmails,
+            primaryEmail: previousPrimaryEmail
+          });
+          showToast(error.message || "Could not update primary email.", true);
+        });
+
+      return Promise.resolve();
+    }
+
+    async function copyEmailByQuickIndex(index) {
+      if (loading || loadError) {
+        return;
+      }
+      const selected = emails[index];
+      if (!selected) {
+        return;
+      }
+      selectedIndex = index;
+      render();
+      await copyEmailValue(selected.emailAddress, {
+        kind: "email",
+        index: index + 1
+      });
+    }
+
+    function openAddStep() {
+      step = "add";
+      setError("");
+      render();
+    }
+
+    function openListStep() {
+      step = "list";
+      const primaryIndex = emails.findIndex((entry) => entry.isPrimary);
+      selectedIndex = primaryIndex >= 0 ? primaryIndex : 0;
+      setError("");
+      render();
+      requestAnimationFrame(() => {
+        modal.focus();
+      });
+    }
+
+    function openMenuStep() {
+      step = "menu";
+      setError("");
+      render();
+      requestAnimationFrame(() => {
+        modal.focus();
+      });
+    }
+
+    function createMenuItem(shortcutLabel, label, meta, onClick) {
+      const item = document.createElement("div");
+      item.className = "gem-email-picker-item";
+      const hotkey = document.createElement("div");
+      hotkey.className = "gem-email-picker-hotkey";
+      hotkey.textContent = String(shortcutLabel || "").toUpperCase();
+      const value = document.createElement("div");
+      value.className = "gem-email-picker-value";
+      value.textContent = label;
+      const details = document.createElement("div");
+      details.className = "gem-email-picker-meta";
+      details.textContent = meta || "";
+      item.appendChild(hotkey);
+      item.appendChild(value);
+      item.appendChild(details);
+      item.addEventListener("click", onClick);
+      return item;
+    }
+
+    function renderMenuStep() {
+      title.textContent = "Manage Emails";
+      subtitle.textContent = primaryEmail
+        ? `Current primary email: ${primaryEmail}`
+        : "No primary email set yet for this candidate.";
+      setHint("Press A to add email, S to copy primary email, D to view all emails. Esc to cancel.");
+
+      content.innerHTML = "";
+      content.appendChild(
+        createMenuItem(EMAIL_MENU_ADD_KEY, "Add Email", "Add a new email and set as primary", () => {
+          openAddStep();
+        })
+      );
+      content.appendChild(
+        createMenuItem(EMAIL_MENU_COPY_PRIMARY_KEY, "Copy Primary Email", "Copy current primary email", () => {
+          copyPrimaryEmailAndClose().catch(() => {});
+        })
+      );
+      content.appendChild(
+        createMenuItem(EMAIL_MENU_VIEW_ALL_KEY, "View All Emails", "View, copy, and set primary email", () => {
+          openListStep();
+        })
+      );
+      const statusNode = document.createElement("div");
+      statusNode.className = `gem-email-picker-status${loadError ? " error" : ""}`;
+      if (loading) {
+        statusNode.textContent = "Loading emails...";
+      } else if (loadError) {
+        statusNode.textContent = `Could not load emails: ${loadError}`;
+      } else {
+        statusNode.textContent = "";
+      }
+      content.appendChild(statusNode);
+    }
+
+    function renderAddStep() {
+      title.textContent = "Add Email";
+      subtitle.textContent = "Paste or type the email address, then press Enter.";
+      setHint("Esc to go back. Enter opens confirmation.");
+      content.innerHTML = "";
+      content.appendChild(addInput);
+      addInput.focus();
+      addInput.select();
+    }
+
+    function renderListStep() {
+      title.textContent = "All Emails";
+      subtitle.textContent = "Press a number to copy an email. Arrow keys + Enter sets primary.";
+      setHint("Esc to go back. Enter sets selected email as primary.");
+
+      content.innerHTML = "";
+      if (loading) {
+        const loadingNode = document.createElement("div");
+        loadingNode.className = "gem-email-picker-empty";
+        loadingNode.textContent = "Loading emails...";
+        content.appendChild(loadingNode);
+        return;
+      }
+      if (loadError) {
+        const errorNode = document.createElement("div");
+        errorNode.className = "gem-email-picker-empty";
+        errorNode.textContent = `Could not load emails: ${loadError}`;
+        content.appendChild(errorNode);
+        return;
+      }
+      if (emails.length === 0) {
+        const emptyNode = document.createElement("div");
+        emptyNode.className = "gem-email-picker-empty";
+        emptyNode.textContent = "No emails stored for this candidate yet.";
+        content.appendChild(emptyNode);
+        return;
+      }
+
+      emails.forEach((entry, index) => {
+        const item = document.createElement("div");
+        const isActive = index === selectedIndex;
+        item.className = `gem-email-picker-item${isActive ? " active" : ""}${entry.isPrimary ? " primary" : ""}`;
+
+        const hotkey = document.createElement("div");
+        hotkey.className = "gem-email-picker-hotkey";
+        hotkey.textContent = String(index + 1);
+
+        const value = document.createElement("div");
+        value.className = "gem-email-picker-value";
+        value.textContent = entry.emailAddress;
+
+        item.appendChild(hotkey);
+        item.appendChild(value);
+
+        if (entry.isPrimary) {
+          const badge = document.createElement("span");
+          badge.className = "gem-email-picker-primary-badge";
+          badge.textContent = "Primary";
+          item.appendChild(badge);
+        }
+
+        item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
+          selectedIndex = index;
+          render();
+        });
+        item.addEventListener("click", () => {
+          selectedIndex = index;
+          render();
+        });
+        item.addEventListener("dblclick", () => {
+          selectedIndex = index;
+          setPrimaryEmailByIndex(index).catch(() => {});
+        });
+        content.appendChild(item);
+      });
+    }
+
+    function render() {
+      if (disposed) {
+        return;
+      }
+      if (step === "menu") {
+        renderMenuStep();
+        return;
+      }
+      if (step === "add") {
+        renderAddStep();
+        return;
+      }
+      renderListStep();
+    }
+
+    function getQuickSelectIndex(event) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return -1;
+      }
+      const code = String(event?.code || "");
+      let rawDigit = "";
+      if (/^Digit[0-9]$/.test(code)) {
+        rawDigit = code.slice(5);
+      } else if (/^Numpad[0-9]$/.test(code)) {
+        rawDigit = code.slice(6);
+      } else if (/^[0-9]$/.test(String(event?.key || "")) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        rawDigit = String(event.key);
+      } else {
+        return -1;
+      }
+      const value = rawDigit === "0" ? 10 : Number(rawDigit);
+      if (!Number.isFinite(value) || value <= 0) {
+        return -1;
+      }
+      return value - 1;
+    }
+
+    function cancelPicker(message) {
+      logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "email_picker.cancelled",
+        actionId: ACTIONS.MANAGE_EMAILS,
+        runId,
+        message,
+        link: linkedinUrl
+      });
+      finish(null);
+    }
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (isConfirming()) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            confirmAddEmail().catch(() => {});
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closeAddConfirmation();
+            return;
+          }
+        }
+
+        if (step === "add") {
+          if ((event.metaKey || event.ctrlKey) && String(event.key || "").toLowerCase() === "v") {
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            openAddConfirmation();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            openMenuStep();
+          }
+          return;
+        }
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          if (step === "list") {
+            openMenuStep();
+            return;
+          }
+          cancelPicker("Email picker cancelled.");
+          return;
+        }
+
+        if (step === "menu") {
+          if (event.metaKey || event.ctrlKey || event.altKey) {
+            return;
+          }
+          const key = String(event.key || "").toLowerCase();
+          if (key === EMAIL_MENU_ADD_KEY) {
+            event.preventDefault();
+            openAddStep();
+            return;
+          }
+          if (key === EMAIL_MENU_COPY_PRIMARY_KEY) {
+            event.preventDefault();
+            copyPrimaryEmailAndClose().catch(() => {});
+            return;
+          }
+          if (key === EMAIL_MENU_VIEW_ALL_KEY) {
+            event.preventDefault();
+            openListStep();
+          }
+          return;
+        }
+
+        if (loading || loadError || emails.length === 0) {
+          return;
+        }
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          selectedIndex = (selectedIndex + 1) % emails.length;
+          render();
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          selectedIndex = (selectedIndex - 1 + emails.length) % emails.length;
+          render();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          setPrimaryEmailByIndex(selectedIndex).catch(() => {});
+          return;
+        }
+        const quickIndex = getQuickSelectIndex(event);
+        if (quickIndex >= 0) {
+          event.preventDefault();
+          copyEmailByQuickIndex(quickIndex).catch(() => {});
+        }
+      },
+      true
+    );
+
+    confirmOkBtn.addEventListener("click", () => {
+      confirmAddEmail().catch(() => {});
+    });
+    confirmCancelBtn.addEventListener("click", () => {
+      closeAddConfirmation();
+    });
+    confirmMask.addEventListener("click", (event) => {
+      if (event.target === confirmMask) {
+        closeAddConfirmation();
+      }
+    });
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        cancelPicker("Email picker cancelled by outside click.");
+      }
+    });
+
+    modal.tabIndex = -1;
+    modal.focus();
+    render();
+    refreshEmails({ quiet: hasEmailMemory }).catch(() => {});
+
+    logEvent({
+      source: "extension.content",
+      event: "email_picker.opened",
+      actionId: ACTIONS.MANAGE_EMAILS,
+      runId,
+      message: "Email picker opened.",
       link: linkedinUrl
     });
   });
@@ -4339,6 +5963,7 @@ async function getRuntimeContext(actionId, settings, runId) {
     context.customFieldId = selection.customFieldId || "";
     context.customFieldValue = selection.customFieldValue || "";
     context.customFieldOptionId = selection.customFieldOptionId || "";
+    context.customFieldOptionIds = Array.isArray(selection.customFieldOptionIds) ? selection.customFieldOptionIds.slice() : [];
     context.customFieldValueType = selection.customFieldValueType || "";
     context.customFieldName = selection.customFieldName || "";
   }
@@ -4432,6 +6057,15 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       return;
     }
 
+    if (actionId === ACTIONS.MANAGE_EMAILS) {
+      const result = await showEmailPicker(effectiveRunId, initialContext);
+      if (!result) {
+        showToast("Action cancelled.", true);
+        return;
+      }
+      return;
+    }
+
     const context = await getRuntimeContext(actionId, settings, effectiveRunId);
     if (!context) {
       showToast("Action cancelled.", true);
@@ -4462,6 +6096,17 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
     });
     const result = await runAction(actionId, context);
     if (result?.ok) {
+      if (actionId === ACTIONS.SET_CUSTOM_FIELD) {
+        try {
+          await warmCustomFieldsForContext(context, result.runId || effectiveRunId, {
+            preferCache: false,
+            refreshInBackground: false,
+            forceRefresh: true
+          });
+        } catch (_error) {
+          // Ignore refresh errors; action itself already succeeded.
+        }
+      }
       showToast(result.message || "Action completed.");
       if (actionId === ACTIONS.UPLOAD_TO_ASHBY && result.link) {
         showAshbyUploadResultCard(result.link, result.message || "Candidate uploaded to Ashby.");

@@ -22,9 +22,13 @@ const ASHBY_JOB_RECENT_USAGE_LIMIT = 300;
 const CUSTOM_FIELD_CACHE_KEY = "customFieldPickerCache";
 const CUSTOM_FIELD_CACHE_TTL_MS = 10 * 60 * 1000;
 const CUSTOM_FIELD_CACHE_LIMIT = 200;
+const CANDIDATE_EMAIL_CACHE_KEY = "candidateEmailPickerCache";
+const CANDIDATE_EMAIL_CACHE_TTL_MS = 10 * 60 * 1000;
+const CANDIDATE_EMAIL_CACHE_LIMIT = 200;
 let projectRefreshPromise = null;
 let sequenceRefreshPromise = null;
 const customFieldRefreshPromises = new Map();
+const candidateEmailRefreshPromises = new Map();
 
 function generateId() {
   if (crypto && crypto.randomUUID) {
@@ -341,6 +345,77 @@ async function setCachedCustomFieldsForContext(context, candidateId, customField
   await setCustomFieldCacheStore(pruned);
 }
 
+function isCandidateEmailCacheFresh(entry) {
+  if (!entry || !entry.fetchedAt) {
+    return false;
+  }
+  return Date.now() - Number(entry.fetchedAt) <= CANDIDATE_EMAIL_CACHE_TTL_MS;
+}
+
+function normalizeCandidateEmailCacheEntry(entry) {
+  return {
+    fetchedAt: Number(entry?.fetchedAt) || 0,
+    candidateId: String(entry?.candidateId || ""),
+    emails: normalizeCandidateEmailList(entry?.emails),
+    primaryEmail: normalizeEmailAddress(entry?.primaryEmail || getPrimaryEmailFromList(entry?.emails))
+  };
+}
+
+async function getCandidateEmailCacheStore() {
+  const data = await getFromLocalStorage(CANDIDATE_EMAIL_CACHE_KEY);
+  if (!data || typeof data !== "object") {
+    return {};
+  }
+  return data;
+}
+
+async function setCandidateEmailCacheStore(store) {
+  await setInLocalStorage(CANDIDATE_EMAIL_CACHE_KEY, store);
+}
+
+async function getCachedCandidateEmailsForContext(context) {
+  const key = getCustomFieldCacheKey(context);
+  if (!key) {
+    return { key: "", entry: null, isFresh: false };
+  }
+  const store = await getCandidateEmailCacheStore();
+  if (!store[key]) {
+    return { key, entry: null, isFresh: false };
+  }
+  const entry = normalizeCandidateEmailCacheEntry(store[key]);
+  return {
+    key,
+    entry,
+    isFresh: isCandidateEmailCacheFresh(entry)
+  };
+}
+
+async function setCachedCandidateEmailsForContext(context, candidateId, emails, primaryEmail) {
+  const key = getCustomFieldCacheKey(context);
+  if (!key) {
+    return;
+  }
+  const normalizedEmails = normalizeCandidateEmailList(emails);
+  const normalizedPrimaryEmail = normalizeEmailAddress(primaryEmail || getPrimaryEmailFromList(normalizedEmails));
+  const store = await getCandidateEmailCacheStore();
+  store[key] = {
+    fetchedAt: Date.now(),
+    candidateId: String(candidateId || ""),
+    emails: normalizedEmails,
+    primaryEmail: normalizedPrimaryEmail
+  };
+
+  const pruned = Object.entries(store)
+    .sort((a, b) => (Number(b[1]?.fetchedAt) || 0) - (Number(a[1]?.fetchedAt) || 0))
+    .slice(0, CANDIDATE_EMAIL_CACHE_LIMIT)
+    .reduce((acc, [cacheKey, value]) => {
+      acc[cacheKey] = value;
+      return acc;
+    }, {});
+
+  await setCandidateEmailCacheStore(pruned);
+}
+
 function normalizeProject(item) {
   if (!item || typeof item !== "object") {
     return null;
@@ -371,6 +446,62 @@ function normalizeSequence(item) {
     userId: String(item.userId || item.user_id || "").trim(),
     createdAt: String(item.createdAt || "").trim()
   };
+}
+
+function normalizeEmailAddress(value) {
+  return String(value || "").trim();
+}
+
+function normalizeCandidateEmailItem(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const emailAddress = normalizeEmailAddress(item.emailAddress || item.email_address || item.email || item.value);
+  if (!emailAddress) {
+    return null;
+  }
+  return {
+    emailAddress,
+    isPrimary: Boolean(item.isPrimary || item.is_primary)
+  };
+}
+
+function normalizeCandidateEmailList(items) {
+  const rows = Array.isArray(items) ? items : [];
+  const deduped = [];
+  const byLower = new Map();
+
+  for (const row of rows) {
+    const normalized = normalizeCandidateEmailItem(row);
+    if (!normalized) {
+      continue;
+    }
+    const lower = normalized.emailAddress.toLowerCase();
+    const existingIndex = byLower.get(lower);
+    if (existingIndex !== undefined) {
+      if (normalized.isPrimary) {
+        deduped[existingIndex].isPrimary = true;
+      }
+      continue;
+    }
+    byLower.set(lower, deduped.length);
+    deduped.push(normalized);
+  }
+
+  let primaryIndex = deduped.findIndex((entry) => entry.isPrimary);
+  if (primaryIndex < 0 && deduped.length > 0) {
+    primaryIndex = 0;
+  }
+  return deduped.map((entry, index) => ({
+    emailAddress: entry.emailAddress,
+    isPrimary: index === primaryIndex
+  }));
+}
+
+function getPrimaryEmailFromList(entries) {
+  const normalized = normalizeCandidateEmailList(entries);
+  const primary = normalized.find((entry) => entry.isPrimary);
+  return primary ? primary.emailAddress : "";
 }
 
 function stripLikelySequenceVariantSuffix(name) {
@@ -837,7 +968,12 @@ async function fetchBackendLogs(settings, limit = 200) {
   }
 
   if (!response.ok || !parsed?.ok) {
-    return { logs: [], error: parsed?.error || "Could not load backend logs." };
+    const backendMessage = parsed?.error || "Could not load backend logs.";
+    const errorMessage =
+      response.status === 401 && /unauthorized/i.test(String(backendMessage))
+        ? "Unauthorized. Check BACKEND_SHARED_TOKEN in backend/.env and extension Options."
+        : backendMessage;
+    return { logs: [], error: errorMessage };
   }
 
   return { logs: Array.isArray(parsed?.data?.logs) ? parsed.data.logs : [], error: "" };
@@ -986,12 +1122,17 @@ async function callBackend(path, payload, settings, audit = {}) {
 
   const durationMs = Date.now() - startedAt;
   if (!response.ok || !parsed?.ok) {
+    const backendMessage = parsed?.error || parsed?.message || "Backend request failed.";
+    const errorMessage =
+      response.status === 401 && /unauthorized/i.test(String(backendMessage))
+        ? "Unauthorized. Check BACKEND_SHARED_TOKEN in backend/.env and extension Options."
+        : backendMessage;
     logEvent(settings, {
       level: "error",
       event: "backend.call.error",
       actionId: audit.actionId,
       runId: audit.runId,
-      message: parsed?.error || parsed?.message || "Backend request failed.",
+      message: errorMessage,
       link: `${base}${path}`,
       durationMs,
       details: {
@@ -1000,7 +1141,7 @@ async function callBackend(path, payload, settings, audit = {}) {
         response: parsed
       }
     });
-    throw new Error(parsed?.error || parsed?.message || "Backend request failed.");
+    throw new Error(errorMessage);
   }
 
   logEvent(settings, {
@@ -1466,6 +1607,9 @@ async function runAction(actionId, context, settings, meta = {}) {
         ? context.customFieldValue
         : settings.customFieldValue;
     const customFieldOptionId = context.customFieldOptionId || "";
+    const customFieldOptionIds = Array.isArray(context.customFieldOptionIds)
+      ? context.customFieldOptionIds.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
     const customFieldValueType = context.customFieldValueType || "";
     if (!customFieldId) {
       const message = "Missing custom field ID.";
@@ -1488,6 +1632,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         customFieldId,
         value: customFieldValue,
         customFieldOptionId,
+        customFieldOptionIds,
         customFieldValueType
       },
       settings,
@@ -1503,7 +1648,8 @@ async function runAction(actionId, context, settings, meta = {}) {
       link: candidate.weblink || context.linkedinUrl,
       details: {
         candidateId: candidate.id,
-        customFieldId
+        customFieldId,
+        selectedOptionCount: customFieldOptionIds.length
       }
     });
     return { ok: true, message, runId, link: candidate.weblink || "" };
@@ -1853,6 +1999,197 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
   return refreshed;
 }
 
+async function findExistingCandidateIdForContext(settings, context, runId, actionId) {
+  const linkedInHandle = String(context?.linkedInHandle || "").trim();
+  const linkedinUrl = String(context?.linkedinUrl || "").trim();
+  if (!linkedInHandle && !linkedinUrl) {
+    return "";
+  }
+  const data = await callBackend(
+    "/api/candidates/find-by-linkedin",
+    {
+      linkedInHandle,
+      linkedInUrl: linkedinUrl
+    },
+    settings,
+    { actionId, runId, step: "findCandidateForEmailPrefetch" }
+  );
+  return String(data?.candidate?.id || "").trim();
+}
+
+async function refreshCandidateEmailsForContext(settings, context, runId, options = {}) {
+  const actionId = ACTIONS.MANAGE_EMAILS;
+  const allowCreate = options.allowCreate !== false;
+  let candidateId = "";
+
+  if (allowCreate) {
+    const candidate = await ensureCandidate(settings, context, { actionId, runId });
+    candidateId = String(candidate?.id || "").trim();
+  } else {
+    candidateId = await findExistingCandidateIdForContext(settings, context, runId, actionId);
+  }
+
+  if (!candidateId) {
+    await setCachedCandidateEmailsForContext(context, "", [], "");
+    return {
+      candidateId: "",
+      emails: [],
+      primaryEmail: "",
+      fromCache: false,
+      stale: false
+    };
+  }
+
+  const data = await callBackend(
+    "/api/candidates/emails/list",
+    {
+      candidateId
+    },
+    settings,
+    { actionId, runId, step: "listCandidateEmails" }
+  );
+  const emails = normalizeCandidateEmailList(data?.emails);
+  const primaryEmail = normalizeEmailAddress(data?.primaryEmail || getPrimaryEmailFromList(emails));
+  await setCachedCandidateEmailsForContext(context, String(data?.candidateId || candidateId), emails, primaryEmail);
+
+  return {
+    candidateId: String(data?.candidateId || candidateId),
+    emails,
+    primaryEmail,
+    fromCache: false,
+    stale: false
+  };
+}
+
+function ensureCandidateEmailRefresh(settings, context, runId, options = {}) {
+  const allowCreate = options.allowCreate !== false;
+  const baseKey = getCustomFieldCacheKey(context) || `fallback:${runId}`;
+  const key = `${baseKey}|${allowCreate ? "create" : "nocreate"}`;
+  const existing = candidateEmailRefreshPromises.get(key);
+  if (existing) {
+    return existing;
+  }
+  const promise = refreshCandidateEmailsForContext(settings, context, runId, { allowCreate }).finally(() => {
+    candidateEmailRefreshPromises.delete(key);
+  });
+  candidateEmailRefreshPromises.set(key, promise);
+  return promise;
+}
+
+async function listCandidateEmailsForContext(settings, context, runId, options = {}) {
+  const actionId = ACTIONS.MANAGE_EMAILS;
+  const preferCache = Boolean(options.preferCache);
+  const refreshInBackground = Boolean(options.refreshInBackground);
+  const forceRefresh = Boolean(options.forceRefresh);
+  const allowCreate = options.allowCreate !== false;
+
+  const cached = await getCachedCandidateEmailsForContext(context);
+  if (!forceRefresh && cached.entry) {
+    if (preferCache || cached.isFresh) {
+      if (!cached.isFresh && refreshInBackground) {
+        ensureCandidateEmailRefresh(settings, context, runId, { allowCreate }).catch(() => {});
+      }
+      logEvent(settings, {
+        event: "candidate.emails.loaded",
+        actionId,
+        runId,
+        message: `Loaded ${cached.entry.emails.length} candidate email${cached.entry.emails.length === 1 ? "" : "s"} from cache.`,
+        details: {
+          candidateId: cached.entry.candidateId,
+          stale: !cached.isFresh,
+          allowCreate
+        }
+      });
+      return {
+        candidateId: cached.entry.candidateId,
+        emails: cached.entry.emails,
+        primaryEmail: cached.entry.primaryEmail,
+        fromCache: true,
+        stale: !cached.isFresh
+      };
+    }
+  }
+
+  const refreshed = await ensureCandidateEmailRefresh(settings, context, runId, { allowCreate });
+  logEvent(settings, {
+    event: "candidate.emails.loaded",
+    actionId,
+    runId,
+    message: `Loaded ${refreshed.emails.length} candidate email${refreshed.emails.length === 1 ? "" : "s"} from backend.`,
+    details: {
+      candidateId: refreshed.candidateId,
+      stale: false,
+      allowCreate
+    }
+  });
+  return refreshed;
+}
+
+async function addCandidateEmailForContext(settings, context, runId, emailAddress) {
+  const actionId = ACTIONS.MANAGE_EMAILS;
+  const candidate = await ensureCandidate(settings, context, { actionId, runId });
+  const data = await callBackend(
+    "/api/candidates/emails/add",
+    {
+      candidateId: candidate.id,
+      email: String(emailAddress || "").trim()
+    },
+    settings,
+    { actionId, runId, step: "addCandidateEmail" }
+  );
+  const emails = normalizeCandidateEmailList(data?.emails);
+  const primaryEmail = getPrimaryEmailFromList(emails);
+  await setCachedCandidateEmailsForContext(context, String(data?.candidateId || candidate.id || ""), emails, primaryEmail);
+  logEvent(settings, {
+    event: "candidate.email.added",
+    actionId,
+    runId,
+    message: "Candidate email added and set primary.",
+    details: {
+      candidateId: String(data?.candidateId || candidate.id || ""),
+      emailAddress: String(emailAddress || "").trim(),
+      emailCount: emails.length
+    }
+  });
+  return {
+    candidateId: String(data?.candidateId || candidate.id || ""),
+    emails,
+    primaryEmail
+  };
+}
+
+async function setCandidatePrimaryEmailForContext(settings, context, runId, emailAddress) {
+  const actionId = ACTIONS.MANAGE_EMAILS;
+  const candidate = await ensureCandidate(settings, context, { actionId, runId });
+  const data = await callBackend(
+    "/api/candidates/emails/set-primary",
+    {
+      candidateId: candidate.id,
+      email: String(emailAddress || "").trim()
+    },
+    settings,
+    { actionId, runId, step: "setCandidatePrimaryEmail" }
+  );
+  const emails = normalizeCandidateEmailList(data?.emails);
+  const primaryEmail = getPrimaryEmailFromList(emails);
+  await setCachedCandidateEmailsForContext(context, String(data?.candidateId || candidate.id || ""), emails, primaryEmail);
+  logEvent(settings, {
+    event: "candidate.email.primary_set",
+    actionId,
+    runId,
+    message: "Candidate primary email updated.",
+    details: {
+      candidateId: String(data?.candidateId || candidate.id || ""),
+      primaryEmail
+    }
+  });
+  return {
+    candidateId: String(data?.candidateId || candidate.id || ""),
+    emails,
+    primaryEmail
+  };
+}
+
 /*
 async function listActivityFeedForContext(settings, context, runId, limit = 120) {
   const actionId = ACTIONS.VIEW_ACTIVITY_FEED;
@@ -2140,6 +2477,69 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           customFields: data.customFields,
           fromCache: Boolean(data.fromCache),
           stale: Boolean(data.stale)
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "LIST_CANDIDATE_EMAILS_FOR_CONTEXT") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const context = message.context || {};
+        const data = await listCandidateEmailsForContext(settings, context, runId, {
+          preferCache: Boolean(message.preferCache),
+          refreshInBackground: message.refreshInBackground !== false,
+          forceRefresh: Boolean(message.forceRefresh),
+          allowCreate: message.allowCreate !== false
+        });
+        sendResponse({
+          ok: true,
+          runId,
+          candidateId: data.candidateId,
+          emails: data.emails,
+          primaryEmail: data.primaryEmail,
+          fromCache: Boolean(data.fromCache),
+          stale: Boolean(data.stale)
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "ADD_CANDIDATE_EMAIL_FOR_CONTEXT") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const context = message.context || {};
+        const email = String(message.email || "").trim();
+        const data = await addCandidateEmailForContext(settings, context, runId, email);
+        sendResponse({
+          ok: true,
+          runId,
+          candidateId: data.candidateId,
+          emails: data.emails,
+          primaryEmail: data.primaryEmail
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "SET_PRIMARY_CANDIDATE_EMAIL_FOR_CONTEXT") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const context = message.context || {};
+        const email = String(message.email || "").trim();
+        const data = await setCandidatePrimaryEmailForContext(settings, context, runId, email);
+        sendResponse({
+          ok: true,
+          runId,
+          candidateId: data.candidateId,
+          emails: data.emails,
+          primaryEmail: data.primaryEmail
         });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));

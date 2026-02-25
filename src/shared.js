@@ -4,6 +4,7 @@ const ACTIONS = {
   ADD_PROSPECT: "addProspect",
   ADD_TO_PROJECT: "addToProject",
   ADD_NOTE_TO_CANDIDATE: "addNoteToCandidate",
+  MANAGE_EMAILS: "manageEmails",
   UPLOAD_TO_ASHBY: "uploadToAshby",
   OPEN_ASHBY_PROFILE: "openAshbyProfile",
   OPEN_ACTIVITY: "openActivity",
@@ -33,6 +34,7 @@ const DEFAULT_SETTINGS = {
     setCustomField: "Cmd+Option+4",
     sendSequence: "Cmd+Option+5",
     addNoteToCandidate: "Cmd+Option+6",
+    manageEmails: "Cmd+Option+E",
     // Retired for now:
     // viewActivityFeed: "<unassigned>",
     setReminder: "Cmd+Option+7",
