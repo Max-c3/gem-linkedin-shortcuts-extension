@@ -62,6 +62,8 @@ Edit `backend/.env` and set at least:
 - `GEM_API_KEY`
 - `GEM_DEFAULT_USER_ID` or `GEM_DEFAULT_USER_EMAIL`
 
+!! Ideally just ask Max to send you the content of his .env-file !!
+
 If you want Ashby actions, also set:
 
 - `ASHBY_API_KEY`
