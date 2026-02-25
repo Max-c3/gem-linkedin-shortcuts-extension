@@ -1865,7 +1865,18 @@ async function runAction(actionId, context, settings, meta = {}) {
   return { ok: false, message, runId };
 }
 
-async function refreshCustomFieldsForContext(settings, context, runId) {
+async function refreshCustomFieldsForContext(settings, context, runId, options = {}) {
+  const allowCreate = options.allowCreate !== false;
+  if (!allowCreate) {
+    const prefetched = await prefetchCustomFieldsForContext(settings, context, runId);
+    return {
+      candidateId: prefetched.candidateId,
+      customFields: prefetched.customFields,
+      fromCache: false,
+      stale: false
+    };
+  }
+
   const actionId = ACTIONS.SET_CUSTOM_FIELD;
   const audit = { actionId, runId };
   const candidate = await ensureCandidate(settings, context, audit);
@@ -1941,13 +1952,15 @@ async function prefetchCustomFieldsForContext(settings, context, runId) {
   };
 }
 
-function ensureCustomFieldRefresh(settings, context, runId) {
-  const key = getCustomFieldCacheKey(context) || `fallback:${runId}`;
+function ensureCustomFieldRefresh(settings, context, runId, options = {}) {
+  const allowCreate = options.allowCreate !== false;
+  const baseKey = getCustomFieldCacheKey(context) || `fallback:${runId}`;
+  const key = `${baseKey}|${allowCreate ? "create" : "nocreate"}`;
   const existing = customFieldRefreshPromises.get(key);
   if (existing) {
     return existing;
   }
-  const promise = refreshCustomFieldsForContext(settings, context, runId).finally(() => {
+  const promise = refreshCustomFieldsForContext(settings, context, runId, { allowCreate }).finally(() => {
     customFieldRefreshPromises.delete(key);
   });
   customFieldRefreshPromises.set(key, promise);
@@ -1958,13 +1971,14 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
   const preferCache = Boolean(options.preferCache);
   const refreshInBackground = Boolean(options.refreshInBackground);
   const forceRefresh = Boolean(options.forceRefresh);
+  const allowCreate = options.allowCreate !== false;
   const actionId = ACTIONS.SET_CUSTOM_FIELD;
 
   const cached = await getCachedCustomFieldsForContext(context);
   if (!forceRefresh && cached.entry) {
     if (preferCache || cached.isFresh) {
       if (!cached.isFresh && refreshInBackground) {
-        ensureCustomFieldRefresh(settings, context, runId).catch(() => {});
+        ensureCustomFieldRefresh(settings, context, runId, { allowCreate }).catch(() => {});
       }
       logEvent(settings, {
         event: "custom_fields.list.loaded",
@@ -1973,7 +1987,8 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
         message: `Loaded ${cached.entry.customFields.length} custom fields from cache.`,
         details: {
           candidateId: cached.entry.candidateId,
-          stale: !cached.isFresh
+          stale: !cached.isFresh,
+          allowCreate
         }
       });
       return {
@@ -1985,7 +2000,7 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
     }
   }
 
-  const refreshed = await ensureCustomFieldRefresh(settings, context, runId);
+  const refreshed = await ensureCustomFieldRefresh(settings, context, runId, { allowCreate });
   logEvent(settings, {
     event: "custom_fields.list.loaded",
     actionId,
@@ -1993,7 +2008,8 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
     message: `Loaded ${refreshed.customFields.length} custom fields from backend.`,
     details: {
       candidateId: refreshed.candidateId,
-      stale: false
+      stale: false,
+      allowCreate
     }
   });
   return refreshed;
@@ -2468,7 +2484,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const data = await listCustomFieldsForContext(settings, context, runId, {
           preferCache: Boolean(message.preferCache),
           refreshInBackground: message.refreshInBackground !== false,
-          forceRefresh: Boolean(message.forceRefresh)
+          forceRefresh: Boolean(message.forceRefresh),
+          allowCreate: message.allowCreate !== false
         });
         sendResponse({
           ok: true,

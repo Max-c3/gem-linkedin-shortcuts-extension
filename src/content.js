@@ -651,7 +651,8 @@ function listCustomFieldsForContext(context, runId, options = {}) {
         runId: runId || "",
         preferCache: Boolean(options.preferCache),
         refreshInBackground: options.refreshInBackground !== false,
-        forceRefresh: Boolean(options.forceRefresh)
+        forceRefresh: Boolean(options.forceRefresh),
+        allowCreate: options.allowCreate !== false
       },
       (response) => {
         if (chrome.runtime.lastError) {
@@ -866,10 +867,12 @@ function setCustomFieldMemoryEntry(context, data) {
 }
 
 function warmCustomFieldsForContext(context, runId, options = {}) {
-  const key = getCustomFieldContextKey(context);
-  if (!key) {
+  const baseKey = getCustomFieldContextKey(context);
+  if (!baseKey) {
     return Promise.resolve(null);
   }
+  const allowCreate = options.allowCreate !== false;
+  const key = `${baseKey}|${allowCreate ? "create" : "nocreate"}`;
   if (!options.forceRefresh) {
     const existingPromise = customFieldWarmPromises.get(key);
     if (existingPromise) {
@@ -880,7 +883,8 @@ function warmCustomFieldsForContext(context, runId, options = {}) {
   const promise = listCustomFieldsForContext(context, runId, {
     preferCache: options.preferCache !== false,
     refreshInBackground: options.refreshInBackground !== false,
-    forceRefresh: Boolean(options.forceRefresh)
+    forceRefresh: Boolean(options.forceRefresh),
+    allowCreate
   })
     .then((data) => {
       setCustomFieldMemoryEntry(context, data);
@@ -983,7 +987,8 @@ function prefetchPickersForCurrentProfile() {
   prefetchSequences(generateRunId()).catch(() => {});
   warmCustomFieldsForContext(profileContext, generateRunId(), {
     preferCache: true,
-    refreshInBackground: true
+    refreshInBackground: true,
+    allowCreate: false
   }).catch(() => {});
   warmCandidateEmailsForContext(profileContext, generateRunId(), {
     preferCache: true,
