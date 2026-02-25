@@ -1051,13 +1051,18 @@ function formatDateForHumans(rawDate) {
 }
 
 async function ensureCandidate(settings, context, audit) {
-  if (!context.linkedInHandle) {
-    throw new Error("Could not determine LinkedIn handle from current profile.");
+  const linkedInHandle = String(context.linkedInHandle || "").trim();
+  const linkedInUrl = String(context.linkedinUrl || "").trim();
+  if (!linkedInHandle && !linkedInUrl) {
+    throw new Error("Could not determine LinkedIn profile identity from current page.");
   }
 
   const found = await callBackend(
     "/api/candidates/find-by-linkedin",
-    { linkedInHandle: context.linkedInHandle },
+    {
+      linkedInHandle,
+      linkedInUrl
+    },
     settings,
     { ...audit, step: "findCandidate" }
   );
@@ -1067,10 +1072,11 @@ async function ensureCandidate(settings, context, audit) {
       actionId: audit.actionId,
       runId: audit.runId,
       message: `Candidate already exists: ${found.candidate.id}`,
-      link: context.linkedinUrl,
+      link: linkedInUrl || context.linkedinUrl,
       details: {
         candidateId: found.candidate.id,
-        linkedInHandle: context.linkedInHandle
+        linkedInHandle,
+        linkedInUrl
       }
     });
     return found.candidate;
@@ -1080,8 +1086,9 @@ async function ensureCandidate(settings, context, audit) {
   const created = await callBackend(
     "/api/candidates/create-from-linkedin",
     {
-      linkedInHandle: context.linkedInHandle,
-      profileUrl: context.linkedinUrl,
+      linkedInHandle,
+      linkedInUrl,
+      profileUrl: linkedInUrl || context.linkedinUrl,
       firstName: names.firstName,
       lastName: names.lastName,
       createdByUserId: context.createdByUserId || settings.createdByUserId
@@ -1099,10 +1106,11 @@ async function ensureCandidate(settings, context, audit) {
     actionId: audit.actionId,
     runId: audit.runId,
     message: `Created candidate ${created.candidate.id}`,
-    link: context.linkedinUrl,
+    link: linkedInUrl || context.linkedinUrl,
     details: {
       candidateId: created.candidate.id,
-      linkedInHandle: context.linkedInHandle
+      linkedInHandle,
+      linkedInUrl
     }
   });
   return created.candidate;
@@ -1125,7 +1133,8 @@ async function runAction(actionId, context, settings, meta = {}) {
       linkedInHandle: context.linkedInHandle || "",
       profileName: context.profileName || "",
       gemCandidateId: context.gemCandidateId || "",
-      ashbyJobId: context.ashbyJobId || ""
+      ashbyJobId: context.ashbyJobId || "",
+      candidateNoteLength: String(context.candidateNote || "").trim().length || 0
     }
   });
 
@@ -1498,6 +1507,51 @@ async function runAction(actionId, context, settings, meta = {}) {
       }
     });
     return { ok: true, message, runId, link: candidate.weblink || "" };
+  }
+
+  if (actionId === ACTIONS.ADD_NOTE_TO_CANDIDATE) {
+    const note = String(context.candidateNote || "").trim();
+    const userId = context.createdByUserId || settings.createdByUserId || "";
+    if (!note) {
+      const message = "Note is required.";
+      logEvent(settings, {
+        level: "warn",
+        event: "action.rejected",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: context.linkedinUrl
+      });
+      return { ok: false, message, runId };
+    }
+
+    const data = await callBackend(
+      "/api/candidates/add-note",
+      {
+        candidateId: candidate.id,
+        note,
+        userId
+      },
+      settings,
+      { ...audit, step: "addCandidateNote" }
+    );
+    const message = "Added note to candidate.";
+    logEvent(settings, {
+      event: "action.succeeded",
+      actionId,
+      runId,
+      source: `extension.${source}`,
+      message,
+      link: candidate.weblink || context.linkedinUrl,
+      details: {
+        candidateId: candidate.id,
+        userId,
+        noteLength: note.length,
+        noteId: String(data?.note?.id || "")
+      }
+    });
+    return { ok: true, message, runId, link: candidate.weblink || "", details: data || {} };
   }
 
   if (actionId === ACTIONS.SET_REMINDER) {

@@ -61,6 +61,8 @@ const PROJECTS_SCAN_MAX = Number(process.env.PROJECTS_SCAN_MAX || 20000);
 const SEQUENCES_SCAN_MAX = Number(process.env.SEQUENCES_SCAN_MAX || 20000);
 const ASHBY_JOBS_SCAN_MAX = Number(process.env.ASHBY_JOBS_SCAN_MAX || 5000);
 const ASHBY_CANDIDATES_SCAN_MAX = Number(process.env.ASHBY_CANDIDATES_SCAN_MAX || 100000);
+const GEM_CANDIDATE_LOOKUP_SCAN_MAX = Number(process.env.GEM_CANDIDATE_LOOKUP_SCAN_MAX || 0);
+const GEM_LINKEDIN_URL_LOOKUP_TTL_MS = Number(process.env.GEM_LINKEDIN_URL_LOOKUP_TTL_MS || 10 * 60 * 1000);
 const ASHBY_CANDIDATE_INDEX_TTL_MS = Number(process.env.ASHBY_CANDIDATE_INDEX_TTL_MS || 10 * 60 * 1000);
 const ASHBY_WRITE_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.ASHBY_WRITE_ENABLED || "false").trim());
 const ASHBY_WRITE_REQUIRE_CONFIRMATION = !/^(0|false|no|off)$/i.test(
@@ -93,6 +95,14 @@ let ashbyCandidateIndexCache = {
   linkedInToCandidateIds: {}
 };
 let ashbyCandidateIndexRefreshPromise = null;
+let gemLinkedInUrlLookupCache = {
+  builtAtMs: 0,
+  builtAt: "",
+  scannedCount: 0,
+  isComplete: false,
+  urlToCandidateIds: {}
+};
+let gemLinkedInUrlLookupRefreshPromise = null;
 
 function generateId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -592,20 +602,241 @@ function sanitizeLinkedInHandle(raw) {
   return String(raw || "").trim().replace(/^@/, "");
 }
 
-async function findCandidateByLinkedIn(linkedInHandle, audit) {
-  const handle = sanitizeLinkedInHandle(linkedInHandle);
-  if (!handle) {
-    throw new Error("linkedInHandle is required.");
+function getGemCandidateLinkedInKeys(candidate) {
+  const keys = new Set();
+  const addKey = (value) => {
+    const normalized = normalizeLinkedInUrl(value);
+    if (normalized && normalized.includes("linkedin.com/")) {
+      keys.add(normalized);
+    }
+  };
+
+  const handleUrl = buildLinkedInUrlFromHandle(candidate?.linked_in_handle || candidate?.linkedInHandle || "");
+  if (handleUrl) {
+    addKey(handleUrl);
   }
-  const list = await gemRequest(
-    "/v0/candidates",
-    {
-      query: { linked_in_handle: handle, page_size: 1 }
-    },
-    audit
-  );
-  const candidate = Array.isArray(list) && list.length > 0 ? list[0] : null;
-  return { candidate };
+
+  const profileUrls = Array.isArray(candidate?.profile_urls) ? candidate.profile_urls : [];
+  for (const url of profileUrls) {
+    addKey(url);
+  }
+
+  const profiles = Array.isArray(candidate?.profiles) ? candidate.profiles : [];
+  for (const profile of profiles) {
+    if (!profile || typeof profile !== "object") {
+      continue;
+    }
+    const network = normalizeTextToken(profile.network || profile.type || profile.site || "");
+    const profileUrl = firstNonEmpty(profile.url, profile.link, profile.href, profile.value);
+    if (profileUrl) {
+      if (network === "linkedin" || normalizeLinkedInUrl(profileUrl).includes("linkedin.com/")) {
+        addKey(profileUrl);
+      }
+      continue;
+    }
+    const username = firstNonEmpty(profile.username, profile.handle);
+    if (username && network === "linkedin") {
+      addKey(buildLinkedInUrlFromHandle(username));
+    }
+  }
+
+  return Array.from(keys);
+}
+
+function gemLinkedInLookupSize(cache = gemLinkedInUrlLookupCache) {
+  if (!cache || !cache.urlToCandidateIds || typeof cache.urlToCandidateIds !== "object") {
+    return 0;
+  }
+  return Object.keys(cache.urlToCandidateIds).length;
+}
+
+function getGemLinkedInLookupAgeMs(cache = gemLinkedInUrlLookupCache) {
+  if (!cache || !cache.builtAtMs) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Date.now() - Number(cache.builtAtMs);
+}
+
+function isGemLinkedInLookupFresh(cache = gemLinkedInUrlLookupCache) {
+  return getGemLinkedInLookupAgeMs(cache) <= GEM_LINKEDIN_URL_LOOKUP_TTL_MS;
+}
+
+function rememberGemCandidateLinkedInKeys(candidate) {
+  const candidateId = String(candidate?.id || "").trim();
+  if (!candidateId) {
+    return;
+  }
+  const keys = getGemCandidateLinkedInKeys(candidate);
+  if (keys.length === 0) {
+    return;
+  }
+  if (!gemLinkedInUrlLookupCache || typeof gemLinkedInUrlLookupCache !== "object") {
+    gemLinkedInUrlLookupCache = {
+      builtAtMs: Date.now(),
+      builtAt: new Date().toISOString(),
+      scannedCount: 0,
+      isComplete: false,
+      urlToCandidateIds: {}
+    };
+  }
+  const map = {
+    ...(gemLinkedInUrlLookupCache.urlToCandidateIds && typeof gemLinkedInUrlLookupCache.urlToCandidateIds === "object"
+      ? gemLinkedInUrlLookupCache.urlToCandidateIds
+      : {})
+  };
+  for (const key of keys) {
+    map[key] = candidateId;
+  }
+  gemLinkedInUrlLookupCache = {
+    builtAtMs: gemLinkedInUrlLookupCache.builtAtMs || Date.now(),
+    builtAt: gemLinkedInUrlLookupCache.builtAt || new Date().toISOString(),
+    scannedCount: Math.max(Number(gemLinkedInUrlLookupCache.scannedCount) || 0, Object.keys(map).length),
+    isComplete: Boolean(gemLinkedInUrlLookupCache.isComplete),
+    urlToCandidateIds: map
+  };
+}
+
+async function refreshGemLinkedInUrlLookup(audit) {
+  const configuredScanLimit = Number.isFinite(Number(GEM_CANDIDATE_LOOKUP_SCAN_MAX))
+    ? Number(GEM_CANDIDATE_LOOKUP_SCAN_MAX)
+    : 0;
+  const scanLimit = configuredScanLimit > 0 ? Math.min(configuredScanLimit, 50000) : 0;
+  if (scanLimit <= 0) {
+    return gemLinkedInUrlLookupCache;
+  }
+  const pageSize = 100;
+  const maxPages = Math.max(1, Math.ceil(scanLimit / pageSize));
+  const candidates = await listPaged("/v0/candidates", audit, {
+    pageSize,
+    maxPages,
+    limit: scanLimit
+  });
+
+  const urlToCandidateIds = {};
+  for (const candidate of candidates) {
+    const candidateId = String(candidate?.id || "").trim();
+    if (!candidateId) {
+      continue;
+    }
+    const keys = getGemCandidateLinkedInKeys(candidate);
+    for (const key of keys) {
+      if (!urlToCandidateIds[key]) {
+        urlToCandidateIds[key] = candidateId;
+      }
+    }
+  }
+
+  gemLinkedInUrlLookupCache = {
+    builtAtMs: Date.now(),
+    builtAt: new Date().toISOString(),
+    scannedCount: Array.isArray(candidates) ? candidates.length : 0,
+    isComplete: Array.isArray(candidates) ? candidates.length < scanLimit : false,
+    urlToCandidateIds
+  };
+
+  logEvent({
+    source: "backend",
+    event: "gem.linkedin_lookup.refreshed",
+    message: "Refreshed Gem LinkedIn URL lookup cache.",
+    requestId: audit.requestId,
+    route: audit.route,
+    runId: audit.runId,
+    actionId: audit.actionId,
+    details: {
+      scanLimit,
+      scannedCount: gemLinkedInUrlLookupCache.scannedCount,
+      urlCount: gemLinkedInLookupSize(gemLinkedInUrlLookupCache),
+      isComplete: gemLinkedInUrlLookupCache.isComplete
+    }
+  });
+
+  return gemLinkedInUrlLookupCache;
+}
+
+function ensureGemLinkedInUrlLookup(audit) {
+  if (!(Number.isFinite(Number(GEM_CANDIDATE_LOOKUP_SCAN_MAX)) && Number(GEM_CANDIDATE_LOOKUP_SCAN_MAX) > 0)) {
+    return Promise.resolve(gemLinkedInUrlLookupCache);
+  }
+  const fresh = isGemLinkedInLookupFresh(gemLinkedInUrlLookupCache);
+  if (fresh && gemLinkedInLookupSize(gemLinkedInUrlLookupCache) > 0) {
+    return Promise.resolve(gemLinkedInUrlLookupCache);
+  }
+  if (gemLinkedInUrlLookupRefreshPromise) {
+    return gemLinkedInUrlLookupRefreshPromise;
+  }
+  gemLinkedInUrlLookupRefreshPromise = refreshGemLinkedInUrlLookup(audit).finally(() => {
+    gemLinkedInUrlLookupRefreshPromise = null;
+  });
+  return gemLinkedInUrlLookupRefreshPromise;
+}
+
+async function findGemCandidateByLinkedInUrl(linkedInUrl, audit) {
+  const normalizedUrl = normalizeLinkedInUrl(linkedInUrl);
+  if (!normalizedUrl || !normalizedUrl.includes("linkedin.com/")) {
+    return null;
+  }
+
+  const cachedId = String(gemLinkedInUrlLookupCache?.urlToCandidateIds?.[normalizedUrl] || "").trim();
+  if (cachedId) {
+    try {
+      const candidate = await gemRequest(`/v0/candidates/${cachedId}`, {}, audit);
+      if (candidate?.id) {
+        rememberGemCandidateLinkedInKeys(candidate);
+        return candidate;
+      }
+    } catch (_error) {
+      // Fall through to full index refresh if cached id is stale.
+    }
+  }
+
+  const index = await ensureGemLinkedInUrlLookup(audit);
+  const indexedId = String(index?.urlToCandidateIds?.[normalizedUrl] || "").trim();
+  if (!indexedId) {
+    return null;
+  }
+  try {
+    const candidate = await gemRequest(`/v0/candidates/${indexedId}`, {}, audit);
+    if (candidate?.id) {
+      rememberGemCandidateLinkedInKeys(candidate);
+      return candidate;
+    }
+  } catch (_error) {
+    return null;
+  }
+  return null;
+}
+
+async function findCandidateByLinkedIn(payload, audit) {
+  const handle = sanitizeLinkedInHandle(payload?.linkedInHandle || payload?.linkedinHandle);
+  const linkedInUrl = firstNonEmpty(payload?.linkedInUrl, payload?.linkedinUrl, payload?.profileUrl);
+
+  if (!handle && !linkedInUrl) {
+    throw new Error("linkedInHandle or linkedInUrl is required.");
+  }
+
+  if (handle) {
+    const list = await gemRequest(
+      "/v0/candidates",
+      {
+        query: { linked_in_handle: handle, page_size: 1 }
+      },
+      audit
+    );
+    const byHandle = Array.isArray(list) && list.length > 0 ? list[0] : null;
+    if (byHandle?.id) {
+      rememberGemCandidateLinkedInKeys(byHandle);
+      return { candidate: byHandle };
+    }
+  }
+
+  if (linkedInUrl) {
+    const byUrl = await findGemCandidateByLinkedInUrl(linkedInUrl, audit);
+    if (byUrl?.id) {
+      return { candidate: byUrl };
+    }
+  }
+
+  return { candidate: null };
 }
 
 async function resolveCreatedByUserId(explicitUserId, audit) {
@@ -653,9 +884,10 @@ function normalizeIsoDate(raw) {
 }
 
 async function createCandidateFromLinkedIn(payload, audit) {
-  const linkedInHandle = sanitizeLinkedInHandle(payload.linkedInHandle);
-  if (!linkedInHandle) {
-    throw new Error("linkedInHandle is required.");
+  const linkedInHandle = sanitizeLinkedInHandle(payload?.linkedInHandle || payload?.linkedinHandle);
+  const linkedInUrl = firstNonEmpty(payload?.linkedInUrl, payload?.linkedinUrl, payload?.profileUrl);
+  if (!linkedInHandle && !linkedInUrl) {
+    throw new Error("linkedInHandle or linkedInUrl is required.");
   }
 
   const createdBy = await resolveCreatedByUserId(payload.createdByUserId, audit);
@@ -669,13 +901,14 @@ async function createCandidateFromLinkedIn(payload, audit) {
     created_by: createdBy,
     first_name: payload.firstName,
     last_name: payload.lastName,
-    linked_in_handle: linkedInHandle,
-    profile_urls: payload.profileUrl ? [payload.profileUrl] : undefined,
-    autofill: true
+    linked_in_handle: linkedInHandle || undefined,
+    profile_urls: linkedInUrl ? [linkedInUrl] : undefined,
+    autofill: Boolean(linkedInHandle)
   });
 
   try {
     const candidate = await gemRequest("/v0/candidates", { method: "POST", body }, audit);
+    rememberGemCandidateLinkedInKeys(candidate);
     return { candidate };
   } catch (error) {
     const duplicateId = error?.data?.errors?.duplicate_candidate?.id;
@@ -691,6 +924,7 @@ async function createCandidateFromLinkedIn(payload, audit) {
         details: { duplicateId }
       });
       const candidate = await gemRequest(`/v0/candidates/${duplicateId}`, {}, audit);
+      rememberGemCandidateLinkedInKeys(candidate);
       return { candidate };
     }
     throw error;
@@ -942,6 +1176,48 @@ async function setCandidateCustomField(payload, audit) {
 
   const candidate = await gemRequest(`/v0/candidates/${candidateId}`, { method: "PUT", body }, audit);
   return { candidate };
+}
+
+async function addCandidateNote(payload, audit) {
+  const candidateId = String(payload.candidateId || "").trim();
+  if (!candidateId) {
+    throw new Error("candidateId is required.");
+  }
+
+  const rawNote = payload.note === undefined || payload.note === null ? "" : String(payload.note);
+  const note = rawNote.trim();
+  if (!note) {
+    throw new Error("note is required.");
+  }
+  if (note.length > 10000) {
+    throw new Error("Candidate note must be 10000 characters or less.");
+  }
+
+  const userId = await resolveCreatedByUserId(payload.userId, audit);
+  if (!userId) {
+    throw new Error(
+      "Gem requires note.user_id. Set createdByUserId in extension options or GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env."
+    );
+  }
+
+  const noteRecord = await gemRequest(
+    "/v0/notes",
+    {
+      method: "POST",
+      body: {
+        candidate_id: candidateId,
+        user_id: userId,
+        content: note
+      }
+    },
+    audit
+  );
+
+  return {
+    note: noteRecord,
+    candidateId,
+    userId
+  };
 }
 
 async function setCandidateDueDate(payload, audit) {
@@ -1555,17 +1831,43 @@ function extractGemCandidatePhone(candidate) {
 
 function extractGemCandidateLinkedInUrl(candidate) {
   const profileUrls = Array.isArray(candidate?.profile_urls) ? candidate.profile_urls : [];
+  let recruiterUrlFallback = "";
   for (const url of profileUrls) {
     const normalized = normalizeLinkedInUrl(url);
     if (normalized.includes("linkedin.com/in/") || normalized.includes("linkedin.com/pub/")) {
       return String(url || "").trim();
+    }
+    if (!recruiterUrlFallback && normalized.includes("linkedin.com/")) {
+      recruiterUrlFallback = String(url || "").trim();
+    }
+  }
+
+  const profiles = Array.isArray(candidate?.profiles) ? candidate.profiles : [];
+  for (const profile of profiles) {
+    if (!profile || typeof profile !== "object") {
+      continue;
+    }
+    const profileUrl = firstNonEmpty(profile.url, profile.link, profile.href, profile.value);
+    const normalized = normalizeLinkedInUrl(profileUrl);
+    if (normalized.includes("linkedin.com/in/") || normalized.includes("linkedin.com/pub/")) {
+      return String(profileUrl || "").trim();
+    }
+    if (!recruiterUrlFallback && normalized.includes("linkedin.com/")) {
+      recruiterUrlFallback = String(profileUrl || "").trim();
+    }
+    const network = normalizeTextToken(profile.network || profile.type || profile.site || "");
+    if (!recruiterUrlFallback && network === "linkedin") {
+      const usernameUrl = buildLinkedInUrlFromHandle(firstNonEmpty(profile.username, profile.handle));
+      if (usernameUrl) {
+        recruiterUrlFallback = usernameUrl;
+      }
     }
   }
   const handleUrl = buildLinkedInUrlFromHandle(candidate?.linked_in_handle || candidate?.linkedInHandle || "");
   if (handleUrl) {
     return handleUrl;
   }
-  return "";
+  return recruiterUrlFallback;
 }
 
 function buildAshbyProfileUrl(rawUrl, candidateId = "") {
@@ -2626,7 +2928,7 @@ async function uploadGemCandidateToAshby(payload, audit) {
 }
 
 const routes = {
-  "/api/candidates/find-by-linkedin": (payload, audit) => findCandidateByLinkedIn(payload.linkedInHandle, audit),
+  "/api/candidates/find-by-linkedin": (payload, audit) => findCandidateByLinkedIn(payload, audit),
   "/api/candidates/create-from-linkedin": createCandidateFromLinkedIn,
   "/api/projects/add-candidate": addCandidateToProject,
   "/api/projects/list": listProjects,
@@ -2635,6 +2937,8 @@ const routes = {
   "/api/ashby/upload-candidate": uploadGemCandidateToAshby,
   "/api/custom-fields/list": listCustomFields,
   "/api/candidates/set-custom-field": setCandidateCustomField,
+  "/api/candidates/add-note": addCandidateNote,
+  "/api/candidates/add_note": addCandidateNote,
   "/api/candidates/set-due-date": setCandidateDueDate,
   "/api/candidates/get": getCandidate,
   "/api/sequences/list": listSequences,
@@ -2648,7 +2952,11 @@ const routes = {
 
 function getRouteFromRequest(req) {
   const parsed = new URL(req.url, `http://localhost:${PORT}`);
-  return parsed.pathname;
+  const pathname = String(parsed.pathname || "");
+  if (!pathname || pathname === "/") {
+    return "/";
+  }
+  return pathname.replace(/\/+$/, "");
 }
 
 const server = http.createServer(async (req, res) => {

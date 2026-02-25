@@ -20,6 +20,7 @@ const SHORTCUT_LABELS = {
   openAshbyProfile: "Open Profile in Ashby",
   openActivity: "Open Profile in Gem",
   setCustomField: "Set Custom Field",
+  addNoteToCandidate: "Add Note to Candidate",
   setReminder: "Set Reminder",
   sendSequence: "Open Sequence",
   editSequence: "Edit Sequence"
@@ -67,6 +68,7 @@ function readInputs() {
       openAshbyProfile: getShortcutValue("openAshbyProfile"),
       openActivity: getShortcutValue("openActivity"),
       setCustomField: getShortcutValue("setCustomField"),
+      addNoteToCandidate: getShortcutValue("addNoteToCandidate"),
       setReminder: getShortcutValue("setReminder"),
       sendSequence: getShortcutValue("sendSequence"),
       editSequence: getShortcutValue("editSequence")
@@ -94,6 +96,7 @@ function writeInputs(settings) {
   setShortcutValue("openAshbyProfile", settings.shortcuts.openAshbyProfile || "");
   setShortcutValue("openActivity", settings.shortcuts.openActivity || "");
   setShortcutValue("setCustomField", settings.shortcuts.setCustomField || "");
+  setShortcutValue("addNoteToCandidate", settings.shortcuts.addNoteToCandidate || "");
   setShortcutValue("setReminder", settings.shortcuts.setReminder || "");
   setShortcutValue("sendSequence", settings.shortcuts.sendSequence || "");
   setShortcutValue("editSequence", settings.shortcuts.editSequence || "");

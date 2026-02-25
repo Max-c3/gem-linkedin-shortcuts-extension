@@ -3,6 +3,7 @@
 const ACTIONS = {
   ADD_PROSPECT: "addProspect",
   ADD_TO_PROJECT: "addToProject",
+  ADD_NOTE_TO_CANDIDATE: "addNoteToCandidate",
   UPLOAD_TO_ASHBY: "uploadToAshby",
   OPEN_ASHBY_PROFILE: "openAshbyProfile",
   OPEN_ACTIVITY: "openActivity",
@@ -31,8 +32,9 @@ const DEFAULT_SETTINGS = {
     openActivity: "Cmd+Option+3",
     setCustomField: "Cmd+Option+4",
     sendSequence: "Cmd+Option+5",
+    addNoteToCandidate: "Cmd+Option+6",
     // Retired for now:
-    // viewActivityFeed: "Cmd+Option+6",
+    // viewActivityFeed: "<unassigned>",
     setReminder: "Cmd+Option+7",
     uploadToAshby: "Cmd+Option+8",
     editSequence: "Cmd+Option+9",

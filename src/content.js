@@ -13,6 +13,7 @@ const ACTIVITY_FEED_LIMIT = 150;
 const CONNECT_SHORTCUT = "Cmd+Option+Z";
 const INVITE_SEND_WITHOUT_NOTE_KEY = "w";
 const INVITE_ADD_NOTE_KEY = "n";
+const CANDIDATE_NOTE_MAX_LENGTH = 10000;
 const REMINDER_PRESET_SHORTCUTS = [
   { key: "a", label: "1 week", kind: "days", amount: 7 },
   { key: "s", label: "3 months", kind: "months", amount: 3 },
@@ -24,11 +25,18 @@ const PROFILE_ACTION_COLUMN_MAX_X_OFFSET = 520;
 const CUSTOM_FIELD_MEMORY_CACHE_LIMIT = 40;
 const CUSTOM_FIELD_MEMORY_TTL_MS = 30 * 60 * 1000;
 const PROFILE_URL_POLL_INTERVAL_MS = 300;
+const PROFILE_IDENTITY_RETRY_INTERVAL_MS = 1200;
 const customFieldMemoryCache = new Map();
 const customFieldWarmPromises = new Map();
 let lastPrefetchedProfileContextKey = "";
 let profileUrlPollTimerId = 0;
 let profileUrlPollLastUrl = "";
+let profileIdentityCache = {
+  pageUrl: "",
+  linkedinUrl: "",
+  linkedInHandle: "",
+  resolvedAtMs: 0
+};
 
 function isContextInvalidatedError(message) {
   return /Extension context invalidated|Receiving end does not exist|The message port closed before a response was received/i.test(
@@ -65,15 +73,33 @@ function generateRunId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function isLinkedInPublicProfilePath(pathname) {
+  return /^\/(?:in|pub)\/[^/]+(?:\/.*)?$/.test(String(pathname || ""));
+}
+
+function isLinkedInRecruiterProfilePath(pathname) {
+  return /^\/talent\/(?:search\/)?profile\/[^/]+(?:\/.*)?$/.test(String(pathname || ""));
+}
+
+function isLinkedInProfilePath(pathname) {
+  return isLinkedInPublicProfilePath(pathname) || isLinkedInRecruiterProfilePath(pathname);
+}
+
+function isLinkedInHost(hostname) {
+  return /(^|\.)linkedin\.com$/i.test(String(hostname || ""));
+}
+
 function isLinkedInProfilePage() {
   try {
     const parsed = new URL(window.location.href);
-    if (parsed.hostname !== "www.linkedin.com") {
+    if (!isLinkedInHost(parsed.hostname)) {
       return false;
     }
-    return /^\/in\/[^/]+(?:\/.*)?$/.test(parsed.pathname);
+    return isLinkedInProfilePath(parsed.pathname);
   } catch (_error) {
-    return /^https:\/\/www\.linkedin\.com\/in\/[^/]+(?:\/.*)?$/.test(window.location.href);
+    return /^https:\/\/www\.linkedin\.com\/(?:(?:in|pub)\/[^/]+|talent\/(?:search\/)?profile\/[^/]+)(?:\/.*)?$/.test(
+      window.location.href
+    );
   }
 }
 
@@ -88,10 +114,109 @@ function normalizeLinkedInUrl(url) {
   }
 }
 
+function normalizeLinkedInIdentifier(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/^@/, "")
+    .replace(/\/+$/, "");
+  if (!raw) {
+    return "";
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch (_error) {
+    return raw;
+  }
+}
+
+function toCanonicalLinkedInPublicProfileUrl(rawUrl) {
+  const input = String(rawUrl || "").trim();
+  if (!input) {
+    return "";
+  }
+  try {
+    const parsed = new URL(input, window.location.origin);
+    if (!isLinkedInHost(parsed.hostname) || !isLinkedInPublicProfilePath(parsed.pathname)) {
+      return "";
+    }
+    parsed.protocol = "https:";
+    parsed.hostname = "www.linkedin.com";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function findLinkedInPublicProfileUrlInInlineScripts() {
+  const scripts = Array.from(document.querySelectorAll("script:not([src])"));
+  const profileUrlPattern = /https?:\/\/(?:www\.)?linkedin\.com\/(?:in|pub)\/[A-Za-z0-9%._-]+/i;
+  const identifierPatterns = [
+    /"publicIdentifier"\s*:\s*"([^"]+)"/i,
+    /"public_identifier"\s*:\s*"([^"]+)"/i,
+    /"vanityName"\s*:\s*"([^"]+)"/i
+  ];
+
+  for (const script of scripts) {
+    const text = String(script?.textContent || "").trim();
+    if (!text || text.length > 800000) {
+      continue;
+    }
+    const normalized = text.replace(/\\\//g, "/");
+    const profileUrlMatch = normalized.match(profileUrlPattern);
+    if (profileUrlMatch?.[0]) {
+      return profileUrlMatch[0];
+    }
+    for (const pattern of identifierPatterns) {
+      const identifierMatch = normalized.match(pattern);
+      if (!identifierMatch?.[1]) {
+        continue;
+      }
+      const identifier = normalizeLinkedInIdentifier(identifierMatch[1]);
+      if (identifier) {
+        return `https://www.linkedin.com/in/${encodeURIComponent(identifier)}`;
+      }
+    }
+  }
+  return "";
+}
+
+function findLinkedInPublicProfileUrlInDom() {
+  const candidates = [];
+  const currentUrl = String(window.location.href || "").trim();
+  const canonicalHref = String(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "").trim();
+  const ogUrl = String(
+    document.querySelector("meta[property='og:url'], meta[name='og:url']")?.getAttribute("content") || ""
+  ).trim();
+  const inlineScriptUrl = findLinkedInPublicProfileUrlInInlineScripts();
+  candidates.push(currentUrl, canonicalHref, ogUrl, inlineScriptUrl);
+
+  for (const candidate of candidates) {
+    const canonical = toCanonicalLinkedInPublicProfileUrl(candidate);
+    if (canonical) {
+      return canonical;
+    }
+  }
+
+  const anchors = Array.from(
+    document.querySelectorAll("a[href*='/in/'], a[href*='linkedin.com/in/'], a[href*='/pub/'], a[href*='linkedin.com/pub/']")
+  );
+  for (const anchor of anchors.slice(0, 250)) {
+    const href = String(anchor.getAttribute("href") || anchor.href || "").trim();
+    const canonical = toCanonicalLinkedInPublicProfileUrl(href);
+    if (canonical) {
+      return canonical;
+    }
+  }
+
+  return normalizeLinkedInUrl(currentUrl);
+}
+
 function getLinkedInHandle(url) {
   try {
     const parsed = new URL(url);
-    const match = parsed.pathname.match(/^\/in\/([^/]+)/);
+    const match = parsed.pathname.match(/^\/(?:in|pub)\/([^/]+)/);
     return match ? decodeURIComponent(match[1]) : "";
   } catch (_error) {
     return "";
@@ -103,11 +228,33 @@ function getProfileName() {
   return heading ? heading.textContent.trim() : "";
 }
 
-function getProfileContext() {
-  const linkedinUrl = normalizeLinkedInUrl(window.location.href);
-  return {
+function refreshProfileIdentityFromDom(options = {}) {
+  const pageUrl = normalizeLinkedInUrl(window.location.href);
+  const force = Boolean(options.force);
+  const shouldRefresh =
+    force ||
+    profileIdentityCache.pageUrl !== pageUrl ||
+    (!profileIdentityCache.linkedInHandle &&
+      Date.now() - Number(profileIdentityCache.resolvedAtMs || 0) >= PROFILE_IDENTITY_RETRY_INTERVAL_MS);
+
+  if (!shouldRefresh) {
+    return;
+  }
+
+  const linkedinUrl = findLinkedInPublicProfileUrlInDom();
+  profileIdentityCache = {
+    pageUrl,
     linkedinUrl,
     linkedInHandle: getLinkedInHandle(linkedinUrl),
+    resolvedAtMs: Date.now()
+  };
+}
+
+function getProfileContext() {
+  refreshProfileIdentityFromDom();
+  return {
+    linkedinUrl: profileIdentityCache.linkedinUrl || normalizeLinkedInUrl(window.location.href),
+    linkedInHandle: profileIdentityCache.linkedInHandle || "",
     profileName: getProfileName()
   };
 }
@@ -996,6 +1143,140 @@ function createAshbyJobPickerStyles() {
       color: #1f2328;
     }
     #gem-ashby-job-picker-confirm-ok {
+      border-color: #4b3fa8;
+      background: #4b3fa8;
+      color: #fff;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function createCandidateNotePickerStyles() {
+  if (document.getElementById("gem-candidate-note-picker-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gem-candidate-note-picker-style";
+  style.textContent = `
+    #gem-candidate-note-picker-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #gem-candidate-note-picker-modal {
+      width: min(680px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #1f2328;
+      position: relative;
+    }
+    #gem-candidate-note-picker-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    #gem-candidate-note-picker-subtitle {
+      font-size: 13px;
+      color: #4f5358;
+      margin-bottom: 12px;
+    }
+    #gem-candidate-note-picker-input {
+      width: 100%;
+      min-height: 132px;
+      max-height: 280px;
+      border: 1px solid #b6beca;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      resize: vertical;
+      color: #1f2328;
+      font-family: inherit;
+    }
+    #gem-candidate-note-picker-meta {
+      margin-top: 6px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: #5b6168;
+      text-align: right;
+    }
+    #gem-candidate-note-picker-error {
+      min-height: 18px;
+      font-size: 12px;
+      color: #a61d24;
+      margin-bottom: 6px;
+    }
+    .gem-candidate-note-picker-hint {
+      margin-top: 4px;
+      font-size: 12px;
+      color: #5b6168;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #gem-candidate-note-picker-confirm-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5;
+    }
+    #gem-candidate-note-picker-confirm-mask.visible {
+      display: flex;
+    }
+    #gem-candidate-note-picker-confirm-card {
+      width: min(440px, 100%);
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+    }
+    #gem-candidate-note-picker-confirm-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+    }
+    #gem-candidate-note-picker-confirm-body {
+      font-size: 14px;
+      color: #32363c;
+      margin-bottom: 14px;
+      word-break: break-word;
+      white-space: pre-wrap;
+      max-height: 220px;
+      overflow: auto;
+    }
+    #gem-candidate-note-picker-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-candidate-note-picker-confirm-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    #gem-candidate-note-picker-confirm-cancel {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    #gem-candidate-note-picker-confirm-ok {
       border-color: #4b3fa8;
       background: #4b3fa8;
       color: #fff;
@@ -3748,6 +4029,275 @@ async function showAshbyJobPicker(runId, profileUrl) {
   });
 }
 
+async function showCandidateNotePicker(runId, context) {
+  createCandidateNotePickerStyles();
+  const linkedinUrl = context.linkedinUrl || window.location.href;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-candidate-note-picker-overlay";
+
+    const modal = document.createElement("div");
+    modal.id = "gem-candidate-note-picker-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-candidate-note-picker-title";
+    title.textContent = "Add Note to Candidate";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-candidate-note-picker-subtitle";
+    subtitle.textContent = "Type note, then press Enter to continue.";
+
+    const input = document.createElement("textarea");
+    input.id = "gem-candidate-note-picker-input";
+    input.placeholder = "Write candidate note...";
+    input.maxLength = CANDIDATE_NOTE_MAX_LENGTH;
+
+    const meta = document.createElement("div");
+    meta.id = "gem-candidate-note-picker-meta";
+
+    const errorEl = document.createElement("div");
+    errorEl.id = "gem-candidate-note-picker-error";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-candidate-note-picker-hint";
+    hint.textContent = "Enter to continue. Esc to cancel.";
+
+    const confirmMask = document.createElement("div");
+    confirmMask.id = "gem-candidate-note-picker-confirm-mask";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-candidate-note-picker-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-candidate-note-picker-confirm-title";
+    confirmTitle.textContent = "Confirm Add Note";
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-candidate-note-picker-confirm-body";
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-candidate-note-picker-confirm-actions";
+    const confirmCancelBtn = document.createElement("button");
+    confirmCancelBtn.id = "gem-candidate-note-picker-confirm-cancel";
+    confirmCancelBtn.className = "gem-candidate-note-picker-confirm-btn";
+    confirmCancelBtn.type = "button";
+    confirmCancelBtn.textContent = "Cancel";
+    const confirmOkBtn = document.createElement("button");
+    confirmOkBtn.id = "gem-candidate-note-picker-confirm-ok";
+    confirmOkBtn.className = "gem-candidate-note-picker-confirm-btn";
+    confirmOkBtn.type = "button";
+    confirmOkBtn.textContent = "Confirm";
+    confirmActions.appendChild(confirmCancelBtn);
+    confirmActions.appendChild(confirmOkBtn);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    confirmMask.appendChild(confirmCard);
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(input);
+    modal.appendChild(meta);
+    modal.appendChild(errorEl);
+    modal.appendChild(hint);
+    modal.appendChild(confirmMask);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let confirmationNote = "";
+    const startedAt = Date.now();
+    let disposed = false;
+
+    function setError(message) {
+      errorEl.textContent = message || "";
+    }
+
+    function updateMeta() {
+      meta.textContent = `${String(input.value || "").length}/${CANDIDATE_NOTE_MAX_LENGTH}`;
+    }
+
+    function cleanup() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      window.removeEventListener("keydown", onWindowKeyDown, true);
+      overlay.remove();
+    }
+
+    function finish(selection) {
+      cleanup();
+      resolve(selection || null);
+    }
+
+    function cancelPicker(message) {
+      logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "candidate_note_picker.cancelled",
+        actionId: ACTIONS.ADD_NOTE_TO_CANDIDATE,
+        runId,
+        message,
+        link: linkedinUrl
+      });
+      finish(null);
+    }
+
+    function isConfirming() {
+      return Boolean(confirmationNote);
+    }
+
+    function updateConfirmationMask() {
+      if (!confirmationNote) {
+        confirmMask.classList.remove("visible");
+        input.focus();
+        return;
+      }
+      confirmBody.textContent = `Add this note to candidate in Gem?\n\n${confirmationNote}`;
+      confirmMask.classList.add("visible");
+      confirmOkBtn.focus();
+    }
+
+    function openConfirmation() {
+      const note = String(input.value || "").trim();
+      if (!note) {
+        setError("Note is required.");
+        input.focus();
+        return;
+      }
+      setError("");
+      confirmationNote = note;
+      updateConfirmationMask();
+    }
+
+    function closeConfirmation() {
+      if (!confirmationNote) {
+        return;
+      }
+      confirmationNote = "";
+      updateConfirmationMask();
+    }
+
+    function confirmSelection() {
+      if (!confirmationNote) {
+        return;
+      }
+      const note = confirmationNote;
+      confirmationNote = "";
+      logEvent({
+        source: "extension.content",
+        event: "candidate_note_picker.submitted",
+        actionId: ACTIONS.ADD_NOTE_TO_CANDIDATE,
+        runId,
+        message: "Candidate note selected.",
+        link: linkedinUrl,
+        details: {
+          noteLength: note.length,
+          durationMs: Date.now() - startedAt
+        }
+      });
+      finish({
+        candidateNote: note
+      });
+    }
+
+    function onWindowKeyDown(event) {
+      if (disposed || event.defaultPrevented) {
+        return;
+      }
+      if (event.key === "Enter") {
+        if (isConfirming()) {
+          event.preventDefault();
+          event.stopPropagation();
+          confirmSelection();
+          return;
+        }
+        if (event.target === input) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        openConfirmation();
+        return;
+      }
+      if (event.key === "Escape") {
+        if (isConfirming()) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeConfirmation();
+          return;
+        }
+        if (event.target === input) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        cancelPicker("Candidate note picker cancelled.");
+      }
+    }
+    window.addEventListener("keydown", onWindowKeyDown, true);
+
+    input.addEventListener("input", () => {
+      setError("");
+      updateMeta();
+      if (isConfirming()) {
+        closeConfirmation();
+      }
+    });
+
+    input.addEventListener("keydown", (event) => {
+      if (isConfirming()) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          confirmSelection();
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeConfirmation();
+          return;
+        }
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        openConfirmation();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelPicker("Candidate note picker cancelled.");
+      }
+    });
+
+    confirmOkBtn.addEventListener("click", () => {
+      confirmSelection();
+    });
+    confirmCancelBtn.addEventListener("click", () => {
+      closeConfirmation();
+    });
+    confirmMask.addEventListener("click", (event) => {
+      if (event.target === confirmMask) {
+        closeConfirmation();
+      }
+    });
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        cancelPicker("Candidate note picker cancelled by outside click.");
+      }
+    });
+
+    updateMeta();
+    input.focus();
+
+    logEvent({
+      source: "extension.content",
+      event: "candidate_note_picker.opened",
+      actionId: ACTIONS.ADD_NOTE_TO_CANDIDATE,
+      runId,
+      message: "Candidate note picker opened.",
+      link: linkedinUrl
+    });
+  });
+}
+
 async function getRuntimeContext(actionId, settings, runId) {
   const context = getProfileContext();
 
@@ -3758,6 +4308,14 @@ async function getRuntimeContext(actionId, settings, runId) {
     }
     context.projectId = String(project.id || "").trim();
     context.projectName = String(project.name || "").trim();
+  }
+
+  if (actionId === ACTIONS.ADD_NOTE_TO_CANDIDATE) {
+    const selection = await showCandidateNotePicker(runId, context);
+    if (!selection) {
+      return null;
+    }
+    context.candidateNote = selection.candidateNote || "";
   }
 
   if (actionId === ACTIONS.UPLOAD_TO_ASHBY) {

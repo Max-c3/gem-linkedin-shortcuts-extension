@@ -20,9 +20,10 @@ From a LinkedIn profile page (`https://www.linkedin.com/in/...`), the extension 
 4. Open candidate profile in Ashby.
 5. Open candidate profile in Gem.
 6. Set a Gem custom field value.
-7. Set a reminder (note + due date).
-8. Open sequence in Gem UI.
-9. Edit sequence in Gem UI.
+7. Add note to candidate in Gem.
+8. Set a reminder (note + due date).
+9. Open sequence in Gem UI.
+10. Edit sequence in Gem UI.
 
 ## Architecture and security model
 
@@ -119,6 +120,7 @@ Default shortcut map:
 - `Cmd+Option+3` Open Profile in Gem
 - `Cmd+Option+4` Set Custom Field
 - `Cmd+Option+5` Open Sequence
+- `Cmd+Option+6` Add Note to Candidate
 - `Cmd+Option+7` Set Reminder
 - `Cmd+Option+8` Upload to Ashby
 - `Cmd+Option+9` Edit Sequence
