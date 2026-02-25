@@ -2,14 +2,6 @@
 
 Chrome extension + local backend that lets you run Gem and Ashby workflows from LinkedIn profile pages using keyboard shortcuts or popup buttons.
 
-## What this repo contains
-
-- `src/`: Manifest V3 extension code (background worker, LinkedIn/Gem content scripts, popup/options UI).
-- `backend/`: Node.js HTTP backend that holds API keys and exposes fixed action routes.
-- `references/`: API reference files used by the backend implementation.
-
-No frontend build step is required. The extension is loaded unpacked in Chrome.
-
 ## Core capabilities
 
 From a LinkedIn profile page (`https://www.linkedin.com/in/...`), the extension can:
@@ -26,15 +18,9 @@ From a LinkedIn profile page (`https://www.linkedin.com/in/...`), the extension 
 10. Open sequence in Gem UI.
 11. Edit sequence in Gem UI.
 
-## Architecture and security model
+## Quick start (first-time setup)
 
-- Extension never stores Gem/Ashby API keys.
-- Backend reads secrets from `backend/.env` (or `.env.local`).
-- Backend only exposes allowlisted action routes (not a generic proxy).
-- Optional shared-token auth (`X-Backend-Token`) can gate all backend routes.
-- Backend and extension logs redact token/key/secret/password-like fields.
-
-## Prerequisites
+### Prerequisites
 
 - macOS + Google Chrome (Manifest V3 extension flow is documented for Chrome).
 - Node.js 18+ (recommended).
@@ -42,7 +28,6 @@ From a LinkedIn profile page (`https://www.linkedin.com/in/...`), the extension 
   - Gem API key (required for Gem actions).
   - Ashby API key (only required for Ashby actions).
 
-## Quick start (first-time setup)
 
 ### 1. Clone and enter repo
 
@@ -66,16 +51,14 @@ GEM_DEFAULT_USER_ID=<your_gem_user_id>
 EOF
 ```
 
-!! Ideally just ask Max to send you the content of his .env-file !!
+❗️ Ideally just ask Max to send you the content of his .env-file!!
 
-Set at least:
+Otherwise, to get it to work, set at least:
 
 - `GEM_API_KEY`
 - `GEM_DEFAULT_USER_ID` or `GEM_DEFAULT_USER_EMAIL`
 - `ASHBY_API_KEY`
-- `BACKEND_SHARED_TOKEN` (random, long value)
-
-The Backend_shared_token needs to be added in the "Options" in the Extension itself, when opened in Google Chrome. More later.
+- `BACKEND_SHARED_TOKEN` (random, long value — more on this below!)
 
 ### 3. Start backend
 
@@ -103,17 +86,19 @@ Expected response:
 2. Enable **Developer mode**
 3. Click **Load unpacked**
 4. Select the repo root folder (`gem-linkedin-shortcuts-extension`)
+5. Refresh the loaded extension
+6. (Recommended) Click **Keyboard shortcuts** -> Set a shortcut for activating the extension (I use cmd + g)
+7. Open a Linkedin-profile (which is already stored in our gem)
+8. Activate the extension -> click "open options"
+9. ! The same **Backend Token** needs to be present in the field "Backend Shared Token" AND in the .env-file. It can be any combination of tokens, but it needs to be present in both. So:
+10. Add token to **Backend Shared Token (optional)** (it is NOT optional, need to fix this) — e.g.: 7a04ed5949f4fa047b3ed7db7c1e086538b9de070034d0e916b89421097778c5 -> then click "Save" at the bottom of the page.
+11. Open the .env-file, and add the SAME token (e.g.: BACKEND_SHARED_TOKEN=7a04ed5949f4fa047b3ed7db7c1e086538b9de070034d0e916b89421097778c5)
+12. Refresh the extension again + Reload the Linkedin-profile
+13. GTG!
 
-### 5. Configure extension options
-
-Open extension **Options** and set:
-
-- `Backend Base URL`: `http://localhost:8787` (default)
-- `Backend Shared Token`: you set the same token (can be any combination of characters) in the .env-file and then in the Chrome extension (> Options). Ask Max if you're unsure about this.
-- `Created By User ID`: if you did not set a default user in backend env
 - Your preferred shortcuts
 
-### 6. Default shortcut map:
+### 5. Default shortcut map:
 
 - `Cmd+Option+1` Add Prospect
 - `Cmd+Option+2` Add to Project
@@ -132,6 +117,14 @@ Open extension **Options** and set:
 - If you see `Could not load projects: Unauthorized`, check whether `BACKEND_SHARED_TOKEN` is set in `backend/.env`.
 - If it is set, the same token must be entered in extension **Options** (`Backend Shared Token`).
 - If you do not want token auth locally, remove `BACKEND_SHARED_TOKEN` from `backend/.env` and restart the backend.
+
+## Architecture and security model
+
+- Extension never stores Gem/Ashby API keys.
+- Backend reads secrets from `backend/.env`
+- Backend only exposes allowlisted action routes (not a generic proxy).
+- shared-token auth (`X-Backend-Token`) can gate all backend routes.
+- Backend and extension logs redact token/key/secret/password-like fields.
 
 ## Development notes
 
