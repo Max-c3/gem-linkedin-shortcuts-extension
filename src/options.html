@@ -25,7 +25,7 @@
             <input id="backendBaseUrl" type="text" />
           </label>
           <label class="row">
-            <span>Backend Shared Token</span>
+            <span>Backend Shared Token (optional)</span>
             <input id="backendSharedToken" type="password" autocomplete="off" />
           </label>
         </section>
@@ -39,6 +39,16 @@
             <span>Created By User ID</span>
             <input id="createdByUserId" type="text" />
           </label>
+          <label class="row">
+            <span>Gem User (recommended)</span>
+            <div class="shortcut-control">
+              <select id="gemUserSelect">
+                <option value="">Select user from Gem...</option>
+              </select>
+              <button id="load-gem-users" type="button" class="secondary">Load Users</button>
+            </div>
+          </label>
+          <p class="hint">Loads Gem users from backend. Selecting a user fills `Created By User ID`.</p>
           <label class="row">
             <span>Project ID</span>
             <input id="defaultProjectId" type="text" />

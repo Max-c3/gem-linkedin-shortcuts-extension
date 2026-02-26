@@ -155,12 +155,14 @@ section {
 
 input,
 textarea,
+select,
 button {
   font: inherit;
 }
 
 input,
-textarea {
+textarea,
+select {
   border: 1px solid #c3cad4;
   border-radius: 6px;
   padding: 8px 10px;

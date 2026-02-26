@@ -1,0 +1,12 @@
+{
+  "backendBaseUrl": "https://gem-linkedin-shortcuts-extension.onrender.com",
+  "backendSharedToken": "7a04ed5949f4fa047b3ed7db7c1e086538b9de070034d0e916b89421097778c5",
+  "createdByUserId": "",
+  "defaultProjectId": "",
+  "defaultSequenceId": "",
+  "customFieldId": "",
+  "customFieldValue": "",
+  "activityUrlTemplate": "",
+  "sequenceComposeUrlTemplate": "",
+  "shortcuts": {}
+}

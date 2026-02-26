@@ -25,10 +25,25 @@ const CUSTOM_FIELD_CACHE_LIMIT = 200;
 const CANDIDATE_EMAIL_CACHE_KEY = "candidateEmailPickerCache";
 const CANDIDATE_EMAIL_CACHE_TTL_MS = 10 * 60 * 1000;
 const CANDIDATE_EMAIL_CACHE_LIMIT = 200;
+const ORG_DEFAULTS_PATH = "src/org-defaults.json";
+const ORG_DEFAULT_SETTINGS_KEYS = [
+  "backendBaseUrl",
+  "backendSharedToken",
+  "createdByUserId",
+  "defaultProjectId",
+  "defaultSequenceId",
+  "customFieldId",
+  "customFieldValue",
+  "activityUrlTemplate",
+  "sequenceComposeUrlTemplate"
+];
 let projectRefreshPromise = null;
 let sequenceRefreshPromise = null;
 const customFieldRefreshPromises = new Map();
 const candidateEmailRefreshPromises = new Map();
+let orgDefaultsPromise = null;
+let orgDefaultsBootstrapPromise = null;
+let orgDefaultsBootstrapped = false;
 
 function generateId() {
   if (crypto && crypto.randomUUID) {
@@ -67,18 +82,195 @@ function redactForLog(value, depth = 0) {
   return String(value);
 }
 
-function getSettings() {
+async function getSettings() {
+  await ensureOrgDefaultsBootstrapped("getSettings");
   return new Promise((resolve) => {
     chrome.storage.sync.get("settings", (data) => {
-      resolve(deepMerge(DEFAULT_SETTINGS, data.settings || {}));
+      resolve(normalizeSettings(deepMerge(DEFAULT_SETTINGS, data.settings || {})));
     });
   });
 }
 
 function saveSettings(settings) {
+  const normalized = normalizeSettings(settings);
   return new Promise((resolve) => {
-    chrome.storage.sync.set({ settings }, () => resolve());
+    chrome.storage.sync.set({ settings: normalized }, () => resolve());
   });
+}
+
+function getStoredSyncSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get("settings", (data) => resolve(data.settings || {}));
+  });
+}
+
+function isLocalhostBackendUrl(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) {
+    return true;
+  }
+  try {
+    const parsed = new URL(value);
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "localhost" || host === "127.0.0.1";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function normalizeOrgDefaults(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const normalized = {};
+  for (const key of ORG_DEFAULT_SETTINGS_KEYS) {
+    if (typeof raw[key] === "string") {
+      normalized[key] = raw[key].trim();
+    }
+  }
+
+  const inputShortcuts = raw.shortcuts && typeof raw.shortcuts === "object" ? raw.shortcuts : {};
+  const normalizedShortcuts = {};
+  for (const actionId of Object.keys(DEFAULT_SETTINGS.shortcuts || {})) {
+    const shortcut = normalizeShortcut(inputShortcuts[actionId] || "");
+    if (shortcut) {
+      normalizedShortcuts[actionId] = shortcut;
+    }
+  }
+  if (Object.keys(normalizedShortcuts).length > 0) {
+    normalized.shortcuts = normalizedShortcuts;
+  }
+
+  return normalized;
+}
+
+async function loadOrgDefaults() {
+  if (orgDefaultsPromise) {
+    return orgDefaultsPromise;
+  }
+  orgDefaultsPromise = (async () => {
+    const url = chrome.runtime.getURL(ORG_DEFAULTS_PATH);
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    const raw = await response.json();
+    return normalizeOrgDefaults(raw);
+  })().catch(() => null);
+  return orgDefaultsPromise;
+}
+
+function mergeSettingsWithOrgDefaults(settings, orgDefaults) {
+  const next = normalizeSettings(settings);
+  if (!orgDefaults || typeof orgDefaults !== "object") {
+    return { changed: false, settings: next };
+  }
+
+  let changed = false;
+  const orgBackendBaseUrl = String(orgDefaults.backendBaseUrl || "").trim();
+  if (orgBackendBaseUrl && isLocalhostBackendUrl(next.backendBaseUrl)) {
+    next.backendBaseUrl = orgBackendBaseUrl;
+    changed = true;
+  }
+
+  const orgBackendToken = String(orgDefaults.backendSharedToken || "").trim();
+  if (orgBackendToken && !String(next.backendSharedToken || "").trim()) {
+    next.backendSharedToken = orgBackendToken;
+    changed = true;
+  }
+
+  const fillIfMissingKeys = ORG_DEFAULT_SETTINGS_KEYS.filter(
+    (key) => key !== "backendBaseUrl" && key !== "backendSharedToken"
+  );
+  for (const key of fillIfMissingKeys) {
+    const currentValue = String(next[key] || "").trim();
+    const orgValue = String(orgDefaults[key] || "").trim();
+    if (!orgValue) {
+      continue;
+    }
+    if (!currentValue) {
+      next[key] = orgValue;
+      changed = true;
+    }
+  }
+
+  const orgShortcuts = orgDefaults.shortcuts && typeof orgDefaults.shortcuts === "object" ? orgDefaults.shortcuts : {};
+  const mergedShortcuts = { ...(next.shortcuts || {}) };
+  for (const actionId of Object.keys(DEFAULT_SETTINGS.shortcuts || {})) {
+    const orgShortcut = normalizeShortcut(orgShortcuts[actionId] || "");
+    if (!orgShortcut) {
+      continue;
+    }
+    const currentShortcut = normalizeShortcut(mergedShortcuts[actionId] || "");
+    const defaultShortcut = normalizeShortcut(DEFAULT_SETTINGS.shortcuts[actionId] || "");
+    if (!currentShortcut || currentShortcut === defaultShortcut) {
+      if (currentShortcut !== orgShortcut) {
+        mergedShortcuts[actionId] = orgShortcut;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    next.shortcuts = mergedShortcuts;
+  }
+
+  return { changed, settings: normalizeSettings(next) };
+}
+
+async function bootstrapOrgDefaults(reason = "runtime") {
+  const orgDefaults = await loadOrgDefaults();
+  if (!orgDefaults) {
+    return { applied: false, reason: "missing_or_invalid_defaults_file" };
+  }
+  const stored = await getStoredSyncSettings();
+  const current = normalizeSettings(deepMerge(DEFAULT_SETTINGS, stored || {}));
+  const merged = mergeSettingsWithOrgDefaults(current, orgDefaults);
+  if (!merged.changed) {
+    return { applied: false, reason: "already_configured" };
+  }
+  await saveSettings(merged.settings);
+  await broadcastSettingsToLinkedInTabs(merged.settings);
+  logEvent(merged.settings, {
+    event: "settings.org_defaults.applied",
+    source: "extension.background",
+    message: "Applied org defaults for extension setup.",
+    details: {
+      reason,
+      orgDefaultsPath: ORG_DEFAULTS_PATH,
+      backendBaseUrl: merged.settings.backendBaseUrl || "",
+      hasBackendSharedToken: Boolean(String(merged.settings.backendSharedToken || "").trim())
+    }
+  });
+  return { applied: true, reason };
+}
+
+function ensureOrgDefaultsBootstrapped(reason = "runtime") {
+  if (orgDefaultsBootstrapped) {
+    return Promise.resolve();
+  }
+  if (orgDefaultsBootstrapPromise) {
+    return orgDefaultsBootstrapPromise;
+  }
+  orgDefaultsBootstrapPromise = bootstrapOrgDefaults(reason)
+    .catch((error) => {
+      const fallback = normalizeSettings(DEFAULT_SETTINGS);
+      logEvent(fallback, {
+        level: "warn",
+        event: "settings.org_defaults.failed",
+        source: "extension.background",
+        message: "Could not apply org defaults.",
+        details: {
+          reason,
+          error: error?.message || String(error || "unknown")
+        }
+      });
+    })
+    .finally(() => {
+      orgDefaultsBootstrapped = true;
+      orgDefaultsBootstrapPromise = null;
+    });
+  return orgDefaultsBootstrapPromise;
 }
 
 function normalizeSettings(input) {
@@ -904,6 +1096,27 @@ function normalizeAshbyJob(raw) {
   };
 }
 
+function normalizeGemUser(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const id = String(raw.id || "").trim();
+  if (!id) {
+    return null;
+  }
+  const firstName = String(raw.first_name || raw.firstName || "").trim();
+  const lastName = String(raw.last_name || raw.lastName || "").trim();
+  const name = String(raw.name || `${firstName} ${lastName}`.trim()).trim();
+  const email = String(raw.email || "").trim();
+  return {
+    id,
+    first_name: firstName,
+    last_name: lastName,
+    name,
+    email
+  };
+}
+
 function normalizeLogEntry(event) {
   return {
     id: event.id || generateId(),
@@ -1095,7 +1308,10 @@ async function callBackend(path, payload, settings, audit = {}) {
     });
   } catch (error) {
     const durationMs = Date.now() - startedAt;
-    const message = `Could not reach backend (${base}). Start backend with: cd /Users/maximilian/coding/gem-linkedin-shortcuts-extension/backend && npm start`;
+    const message =
+      `Could not reach backend (${base}). ` +
+      "If this org uses a hosted backend, verify backend URL/service health. " +
+      "For local development, start backend with: cd /Users/maximilian/coding/gem-linkedin-shortcuts-extension/backend && npm start";
     logEvent(settings, {
       level: "error",
       event: "backend.call.error",
@@ -2476,6 +2692,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LIST_GEM_USERS") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const actionId = "listUsers";
+        const pageSizeRaw = Number(message.pageSize);
+        const pageSize =
+          Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
+            ? Math.max(1, Math.min(Math.trunc(pageSizeRaw), 250))
+            : 250;
+        const email = String(message.email || "").trim();
+        const data = await callBackend(
+          "/api/users/list",
+          {
+            email: email || undefined,
+            pageSize
+          },
+          settings,
+          { actionId, runId, step: "listUsers" }
+        );
+        const users = Array.isArray(data?.users) ? data.users.map(normalizeGemUser).filter(Boolean) : [];
+        logEvent(settings, {
+          event: "gem.users.list.loaded",
+          actionId,
+          runId,
+          message: `Loaded ${users.length} Gem users.`,
+          details: {
+            pageSize,
+            email
+          }
+        });
+        sendResponse({ ok: true, users, runId });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
   if (message.type === "LIST_CUSTOM_FIELDS_FOR_CONTEXT") {
     getSettings()
       .then(async (settings) => {
@@ -2677,3 +2930,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return false;
 });
+
+chrome.runtime.onInstalled.addListener((details) => {
+  const reason = details?.reason ? `onInstalled:${details.reason}` : "onInstalled";
+  ensureOrgDefaultsBootstrapped(reason).catch(() => {});
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureOrgDefaultsBootstrapped("onStartup").catch(() => {});
+});
+
+ensureOrgDefaultsBootstrapped("serviceWorkerLoad").catch(() => {});

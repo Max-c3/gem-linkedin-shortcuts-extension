@@ -9,9 +9,13 @@ const exportLogsBtn = document.getElementById("export-logs");
 const clearLocalLogsBtn = document.getElementById("clear-local-logs");
 const logsMetaEl = document.getElementById("logs-meta");
 const logsListEl = document.getElementById("logs-list");
+const createdByUserIdInput = document.getElementById("createdByUserId");
+const gemUserSelectEl = document.getElementById("gemUserSelect");
+const loadGemUsersBtn = document.getElementById("load-gem-users");
 
 let activeShortcutEditor = null;
 let latestRenderedLogs = [];
+let gemUsersLoaded = false;
 
 const SHORTCUT_LABELS = {
   addProspect: "Add Prospect",
@@ -105,14 +109,12 @@ function writeInputs(settings) {
   setShortcutValue("editSequence", settings.shortcuts.editSequence || "");
   // Retired for now:
   // setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
+  syncUserPickerFromCurrentId();
 }
 
 function validateSettings(settings) {
   if (!settings.backendBaseUrl) {
     return "Backend base URL is required.";
-  }
-  if (!settings.backendSharedToken) {
-    return "Backend shared token is required.";
   }
 
   const seen = new Set();
@@ -141,6 +143,139 @@ function sendRuntimeMessage(payload) {
       resolve(response);
     });
   });
+}
+
+function normalizeGemUsers(users) {
+  if (!Array.isArray(users)) {
+    return [];
+  }
+  const seen = new Set();
+  const normalized = [];
+  for (const user of users) {
+    const id = String(user?.id || "").trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    const firstName = String(user?.first_name || user?.firstName || "").trim();
+    const lastName = String(user?.last_name || user?.lastName || "").trim();
+    const name = String(user?.name || `${firstName} ${lastName}`.trim()).trim();
+    const email = String(user?.email || "").trim();
+    normalized.push({ id, name, email });
+  }
+  normalized.sort((a, b) => {
+    const left = `${a.name || ""} ${a.email || ""} ${a.id}`.toLowerCase();
+    const right = `${b.name || ""} ${b.email || ""} ${b.id}`.toLowerCase();
+    if (left < right) {
+      return -1;
+    }
+    if (left > right) {
+      return 1;
+    }
+    return 0;
+  });
+  return normalized;
+}
+
+function buildGemUserLabel(user) {
+  const name = String(user?.name || "").trim();
+  const email = String(user?.email || "").trim();
+  const id = String(user?.id || "").trim();
+  if (name && email) {
+    return `${name} (${email})`;
+  }
+  if (email) {
+    return `${email}`;
+  }
+  if (name) {
+    return name;
+  }
+  return id;
+}
+
+function repopulateGemUserPicker(users = []) {
+  const currentUserId = String(createdByUserIdInput.value || "").trim();
+  const normalized = normalizeGemUsers(users);
+  gemUserSelectEl.innerHTML = "";
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = normalized.length > 0 ? "Select user from Gem..." : "Load users from Gem...";
+  gemUserSelectEl.appendChild(placeholder);
+
+  let hasCurrent = false;
+  for (const user of normalized) {
+    const option = document.createElement("option");
+    option.value = user.id;
+    option.textContent = buildGemUserLabel(user);
+    gemUserSelectEl.appendChild(option);
+    if (user.id === currentUserId) {
+      hasCurrent = true;
+    }
+  }
+
+  if (currentUserId && !hasCurrent) {
+    const fallback = document.createElement("option");
+    fallback.value = currentUserId;
+    fallback.textContent = `Current ID: ${currentUserId}`;
+    gemUserSelectEl.appendChild(fallback);
+  }
+
+  if (currentUserId) {
+    gemUserSelectEl.value = currentUserId;
+  } else {
+    gemUserSelectEl.value = "";
+  }
+}
+
+function syncUserPickerFromCurrentId() {
+  if (!gemUsersLoaded) {
+    repopulateGemUserPicker([]);
+    return;
+  }
+  const options = Array.from(gemUserSelectEl.options || []);
+  const currentUserId = String(createdByUserIdInput.value || "").trim();
+  if (!currentUserId) {
+    gemUserSelectEl.value = "";
+    return;
+  }
+  const matched = options.find((option) => option.value === currentUserId);
+  if (matched) {
+    gemUserSelectEl.value = currentUserId;
+    return;
+  }
+  const fallback = document.createElement("option");
+  fallback.value = currentUserId;
+  fallback.textContent = `Current ID: ${currentUserId}`;
+  gemUserSelectEl.appendChild(fallback);
+  gemUserSelectEl.value = currentUserId;
+}
+
+async function loadGemUsers(options = {}) {
+  const quiet = Boolean(options.quiet);
+  const backendBaseUrl = String(document.getElementById("backendBaseUrl").value || "").trim();
+  if (!backendBaseUrl) {
+    if (!quiet) {
+      setStatus("Set Backend Base URL first.", true);
+    }
+    return;
+  }
+
+  loadGemUsersBtn.disabled = true;
+  try {
+    const response = await sendRuntimeMessage({ type: "LIST_GEM_USERS", pageSize: 250 });
+    if (!response?.ok) {
+      throw new Error(response?.message || "Could not load Gem users.");
+    }
+    const users = normalizeGemUsers(response.users);
+    gemUsersLoaded = true;
+    repopulateGemUserPicker(users);
+    if (!quiet) {
+      setStatus(`Loaded ${users.length} Gem users.`);
+    }
+  } finally {
+    loadGemUsersBtn.disabled = false;
+  }
 }
 
 function formatTimestamp(value) {
@@ -378,6 +513,22 @@ clearLocalLogsBtn.addEventListener("click", () => {
   clearLogs().catch((error) => setStatus(error.message, true));
 });
 
+loadGemUsersBtn.addEventListener("click", () => {
+  loadGemUsers().catch((error) => setStatus(error.message, true));
+});
+
+gemUserSelectEl.addEventListener("change", () => {
+  const value = String(gemUserSelectEl.value || "").trim();
+  if (value) {
+    createdByUserIdInput.value = value;
+    setStatus("Selected Gem user. Save to apply.");
+  }
+});
+
+createdByUserIdInput.addEventListener("input", () => {
+  syncUserPickerFromCurrentId();
+});
+
 document.addEventListener("keydown", handleShortcutRecord, true);
 
 form.addEventListener("submit", (event) => {
@@ -386,5 +537,5 @@ form.addEventListener("submit", (event) => {
 resetBtn.addEventListener("click", resetDefaults);
 
 Promise.all([loadSettings(), refreshLogs()])
-  .then(() => {})
+  .then(() => loadGemUsers({ quiet: true }))
   .catch((error) => setStatus(error.message, true));
