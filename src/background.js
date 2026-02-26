@@ -160,21 +160,25 @@ async function loadOrgDefaults() {
   return orgDefaultsPromise;
 }
 
-function mergeSettingsWithOrgDefaults(settings, orgDefaults) {
+function mergeSettingsWithOrgDefaults(settings, orgDefaults, storedSettings = {}) {
   const next = normalizeSettings(settings);
   if (!orgDefaults || typeof orgDefaults !== "object") {
     return { changed: false, settings: next };
   }
 
   let changed = false;
+  const hasStoredBackendBaseUrl =
+    Object.prototype.hasOwnProperty.call(storedSettings, "backendBaseUrl") &&
+    String(storedSettings.backendBaseUrl || "").trim() !== "";
   const orgBackendBaseUrl = String(orgDefaults.backendBaseUrl || "").trim();
-  if (orgBackendBaseUrl && isLocalhostBackendUrl(next.backendBaseUrl)) {
+  if (orgBackendBaseUrl && !hasStoredBackendBaseUrl && isLocalhostBackendUrl(next.backendBaseUrl)) {
     next.backendBaseUrl = orgBackendBaseUrl;
     changed = true;
   }
 
+  const hasStoredBackendToken = Object.prototype.hasOwnProperty.call(storedSettings, "backendSharedToken");
   const orgBackendToken = String(orgDefaults.backendSharedToken || "").trim();
-  if (orgBackendToken && !String(next.backendSharedToken || "").trim()) {
+  if (orgBackendToken && !hasStoredBackendToken && !String(next.backendSharedToken || "").trim()) {
     next.backendSharedToken = orgBackendToken;
     changed = true;
   }
@@ -224,8 +228,9 @@ async function bootstrapOrgDefaults(reason = "runtime") {
     return { applied: false, reason: "missing_or_invalid_defaults_file" };
   }
   const stored = await getStoredSyncSettings();
-  const current = normalizeSettings(deepMerge(DEFAULT_SETTINGS, stored || {}));
-  const merged = mergeSettingsWithOrgDefaults(current, orgDefaults);
+  const storedSettings = stored && typeof stored === "object" ? stored : {};
+  const current = normalizeSettings(deepMerge(DEFAULT_SETTINGS, storedSettings));
+  const merged = mergeSettingsWithOrgDefaults(current, orgDefaults, storedSettings);
   if (!merged.changed) {
     return { applied: false, reason: "already_configured" };
   }
