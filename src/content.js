@@ -5675,7 +5675,7 @@ async function showCandidateNotePicker(runId, context) {
 
     const subtitle = document.createElement("div");
     subtitle.id = "gem-candidate-note-picker-subtitle";
-    subtitle.textContent = "Type note, then press Enter to continue.";
+    subtitle.textContent = "Type note. Press Enter to continue, Shift+Enter for a new line.";
 
     const input = document.createElement("textarea");
     input.id = "gem-candidate-note-picker-input";
@@ -5690,7 +5690,7 @@ async function showCandidateNotePicker(runId, context) {
 
     const hint = document.createElement("div");
     hint.className = "gem-candidate-note-picker-hint";
-    hint.textContent = "Enter to continue. Esc to cancel.";
+    hint.textContent = "Enter to continue. Shift+Enter for new line. Esc to cancel.";
 
     const confirmMask = document.createElement("div");
     confirmMask.id = "gem-candidate-note-picker-confirm-mask";
@@ -5884,7 +5884,13 @@ async function showCandidateNotePicker(runId, context) {
           return;
         }
       }
-      if (event.key === "Enter") {
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey
+      ) {
         event.preventDefault();
         openConfirmation();
         return;
