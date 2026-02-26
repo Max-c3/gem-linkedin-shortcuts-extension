@@ -1278,6 +1278,17 @@ function buildGemSequenceEditUrl(settings, sequenceId) {
   }
 }
 
+function buildAdjacentTabOptions(url, meta = {}) {
+  const options = { url };
+  if (Number.isInteger(meta.sourceTabIndex)) {
+    options.index = meta.sourceTabIndex + 1;
+  }
+  if (Number.isInteger(meta.sourceWindowId)) {
+    options.windowId = meta.sourceWindowId;
+  }
+  return options;
+}
+
 async function callBackend(path, payload, settings, audit = {}) {
   const base = (settings.backendBaseUrl || "").replace(/\/$/, "");
   if (!base) {
@@ -1807,7 +1818,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId
       };
     }
-    await chrome.tabs.create({ url });
+    await chrome.tabs.create(buildAdjacentTabOptions(url, meta));
     const message = "Opened profile in Gem.";
     logEvent(settings, {
       event: "action.succeeded",
@@ -2047,7 +2058,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       return { ok: false, message, runId };
     }
 
-    await chrome.tabs.create({ url: openUrl });
+    await chrome.tabs.create(buildAdjacentTabOptions(openUrl, meta));
     const message = candidateProfileUrl
       ? "Opened candidate-specific sequence flow in Gem."
       : "Opened sequence in Gem. Complete send + activate in Gem UI.";
@@ -2465,7 +2476,7 @@ async function listActivityFeedForContext() {
   throw new Error("View Activity Feed is retired for now.");
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) {
     return false;
   }
@@ -2542,8 +2553,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "RUN_ACTION") {
     getSettings()
       .then(async (settings) => {
+        const tab = sender?.tab || null;
+        const sourceTabMeta =
+          tab && Number.isInteger(tab.index)
+            ? {
+                sourceTabIndex: tab.index,
+                sourceWindowId: Number.isInteger(tab.windowId) ? tab.windowId : undefined
+              }
+            : {};
         try {
-          return await runAction(message.actionId, message.context || {}, settings, message.meta || {});
+          return await runAction(message.actionId, message.context || {}, settings, {
+            ...(message.meta || {}),
+            ...sourceTabMeta
+          });
         } catch (error) {
           logEvent(settings, {
             level: "error",
