@@ -111,6 +111,9 @@ function validateSettings(settings) {
   if (!settings.backendBaseUrl) {
     return "Backend base URL is required.";
   }
+  if (!settings.backendSharedToken) {
+    return "Backend shared token is required.";
+  }
 
   const seen = new Set();
   for (const [action, shortcut] of Object.entries(settings.shortcuts)) {

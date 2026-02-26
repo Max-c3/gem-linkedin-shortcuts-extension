@@ -30,17 +30,17 @@ const DEFAULT_SETTINGS = {
   shortcuts: {
     addProspect: "Cmd+Option+1",
     addToProject: "Cmd+Option+2",
-    openActivity: "Cmd+Option+3",
-    setCustomField: "Cmd+Option+4",
-    sendSequence: "Cmd+Option+5",
-    addNoteToCandidate: "Cmd+Option+6",
-    manageEmails: "Cmd+Option+E",
+    uploadToAshby: "Cmd+Option+3",
+    openAshbyProfile: "Cmd+Option+4",
+    openActivity: "Cmd+Option+5",
+    setCustomField: "Cmd+Option+6",
+    addNoteToCandidate: "Cmd+Option+7",
+    manageEmails: "Cmd+Option+8",
     // Retired for now:
     // viewActivityFeed: "<unassigned>",
-    setReminder: "Cmd+Option+7",
-    uploadToAshby: "Cmd+Option+8",
-    editSequence: "Cmd+Option+9",
-    openAshbyProfile: "Cmd+Option+0"
+    setReminder: "Cmd+Option+9",
+    sendSequence: "Cmd+Option+0",
+    editSequence: "Cmd+Control+Option+1"
   }
 };
 

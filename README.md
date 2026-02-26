@@ -44,10 +44,10 @@ cat > .env <<'EOF'
 PORT=8787
 GEM_API_KEY=<your_gem_api_key>
 GEM_DEFAULT_USER_ID=<your_gem_user_id>
+BACKEND_SHARED_TOKEN=<random_long_token>
 # Optional:
 # GEM_DEFAULT_USER_EMAIL=<your_email@example.com>
 # ASHBY_API_KEY=<your_ashby_api_key>
-# BACKEND_SHARED_TOKEN=<random_long_token>
 EOF
 ```
 
@@ -91,7 +91,7 @@ Expected response:
 7. Open a Linkedin-profile (which is already stored in our gem)
 8. Activate the extension -> click "open options"
 9. ! The same **Backend Token** needs to be present in the field "Backend Shared Token" AND in the .env-file. It can be any combination of tokens, but it needs to be present in both. So:
-10. Add token to **Backend Shared Token (optional)** (it is NOT optional, need to fix this) — e.g.: 7a04ed5949f4fa047b3ed7db7c1e086538b9de070034d0e916b89421097778c5 -> then click "Save" at the bottom of the page.
+10. Add token to **Backend Shared Token** — e.g.: 7a04ed5949f4fa047b3ed7db7c1e086538b9de070034d0e916b89421097778c5 -> then click "Save" at the bottom of the page.
 11. Open the .env-file, and add the SAME token (e.g.: BACKEND_SHARED_TOKEN=7a04ed5949f4fa047b3ed7db7c1e086538b9de070034d0e916b89421097778c5)
 12. Refresh the extension again + Reload the Linkedin-profile
 13. GTG!
@@ -102,21 +102,20 @@ Expected response:
 
 - `Cmd+Option+1` Add Prospect
 - `Cmd+Option+2` Add to Project
-- `Cmd+Option+3` Open Profile in Gem
-- `Cmd+Option+4` Set Custom Field
-- `Cmd+Option+5` Open Sequence
-- `Cmd+Option+6` Add Note to Candidate
-- `Cmd+Option+E` Manage Emails
-- `Cmd+Option+7` Set Reminder
-- `Cmd+Option+8` Upload to Ashby
-- `Cmd+Option+9` Edit Sequence
-- `Cmd+Option+0` Open Profile in Ashby
+- `Cmd+Option+3` Upload to Ashby
+- `Cmd+Option+4` Open Profile in Ashby
+- `Cmd+Option+5` Open Profile in Gem
+- `Cmd+Option+6` Set Custom Field
+- `Cmd+Option+7` Add Note to Candidate
+- `Cmd+Option+8` Manage Emails
+- `Cmd+Option+9` Set Reminder
+- `Cmd+Option+0` Open Sequence
+- `Cmd+Control+Option+1` Edit Sequence
 
 ## Troubleshooting
 
 - If you see `Could not load projects: Unauthorized`, check whether `BACKEND_SHARED_TOKEN` is set in `backend/.env`.
 - If it is set, the same token must be entered in extension **Options** (`Backend Shared Token`).
-- If you do not want token auth locally, remove `BACKEND_SHARED_TOKEN` from `backend/.env` and restart the backend.
 
 ## Architecture and security model
 
