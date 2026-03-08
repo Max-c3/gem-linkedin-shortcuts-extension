@@ -1174,16 +1174,39 @@ async function listProjects(payload, audit) {
   let aggregated = [];
 
   for (let page = 1; page <= maxPages; page += 1) {
-    const pageData = await gemRequest(
-      "/v0/projects",
-      {
-        query: {
-          page_size: pageSize,
-          page
-        }
-      },
-      audit
-    );
+    let pageData = null;
+    try {
+      pageData = await gemRequest(
+        "/v0/projects",
+        {
+          query: {
+            page_size: pageSize,
+            page
+          }
+        },
+        audit
+      );
+    } catch (error) {
+      // Gem may return 404 for out-of-range pages instead of an empty page.
+      if (Number(error?.status) === 404 && page > 1) {
+        logEvent({
+          level: "warn",
+          source: "backend",
+          event: "projects.list.pagination_end_404",
+          message: "Stopping project pagination after receiving 404 on a later page.",
+          requestId: audit.requestId,
+          route: audit.route,
+          runId: audit.runId,
+          actionId: audit.actionId,
+          details: {
+            page,
+            pageSize
+          }
+        });
+        break;
+      }
+      throw error;
+    }
     const projects = Array.isArray(pageData) ? pageData : [];
     aggregated = aggregated.concat(projects);
     if (projects.length < pageSize || aggregated.length >= scanTarget) {

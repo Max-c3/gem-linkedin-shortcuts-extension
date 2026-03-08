@@ -3,7 +3,6 @@
 let cachedSettings = null;
 let toastContainer = null;
 let contextRecoveryTriggered = false;
-const PROJECT_PICKER_RENDER_LIMIT = 100;
 const ASHBY_JOB_PICKER_RENDER_LIMIT = 100;
 const CUSTOM_FIELD_KEYS_PER_PAGE = 26;
 const CUSTOM_FIELD_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
@@ -45,6 +44,8 @@ let profileIdentityCache = {
   resolvedAtMs: 0
 };
 
+window.__GLS_UNIFIED_CONTENT_ACTIVE__ = true;
+
 function isContextInvalidatedError(message) {
   return /Extension context invalidated|Receiving end does not exist|The message port closed before a response was received/i.test(
     String(message || "")
@@ -60,7 +61,7 @@ function triggerContextRecovery(message) {
     return;
   }
   contextRecoveryTriggered = true;
-  showToast("Extension was updated. Reloading this LinkedIn tab...", true);
+  showToast("Extension was updated. Reloading this tab...", true);
   setTimeout(() => {
     window.location.reload();
   }, 800);
@@ -85,7 +86,7 @@ function isLinkedInPublicProfilePath(pathname) {
 }
 
 function isLinkedInRecruiterProfilePath(pathname) {
-  return /^\/talent\/(?:search\/)?profile\/[^/]+(?:\/.*)?$/.test(String(pathname || ""));
+  return /^\/talent\/(?:.*\/)?profile\/[^/]+(?:\/.*)?$/i.test(String(pathname || ""));
 }
 
 function isLinkedInProfilePath(pathname) {
@@ -96,6 +97,22 @@ function isLinkedInHost(hostname) {
   return /(^|\.)linkedin\.com$/i.test(String(hostname || ""));
 }
 
+function isGemHost(hostname) {
+  return /(^|\.)gem\.com$/i.test(String(hostname || ""));
+}
+
+function isGmailHost(hostname) {
+  return /(^|\.)mail\.google\.com$/i.test(String(hostname || ""));
+}
+
+function isGitHubHost(hostname) {
+  return /(^|\.)github\.com$/i.test(String(hostname || ""));
+}
+
+function isGemCandidateProfilePath(pathname) {
+  return /^\/candidate\/[^/?#]+(?:\/.*)?$/i.test(String(pathname || ""));
+}
+
 function isLinkedInProfilePage() {
   try {
     const parsed = new URL(window.location.href);
@@ -104,9 +121,134 @@ function isLinkedInProfilePage() {
     }
     return isLinkedInProfilePath(parsed.pathname);
   } catch (_error) {
-    return /^https:\/\/www\.linkedin\.com\/(?:(?:in|pub)\/[^/]+|talent\/(?:search\/)?profile\/[^/]+)(?:\/.*)?$/.test(
+    return /^https:\/\/www\.linkedin\.com\/(?:(?:in|pub)\/[^/]+|talent\/(?:.*\/)?profile\/[^/]+)(?:\/.*)?$/i.test(
       window.location.href
     );
+  }
+}
+
+function isGemCandidateProfilePage() {
+  try {
+    const parsed = new URL(window.location.href);
+    return isGemHost(parsed.hostname) && isGemCandidateProfilePath(parsed.pathname);
+  } catch (_error) {
+    return /^https:\/\/(?:www|app)\.gem\.com\/candidate\/[^/?#]+/i.test(window.location.href);
+  }
+}
+
+const GITHUB_RESERVED_PROFILE_PATHS = new Set([
+  "about",
+  "account",
+  "apps",
+  "blog",
+  "codespaces",
+  "collections",
+  "contact",
+  "copilot",
+  "customer-stories",
+  "customers",
+  "enterprise",
+  "events",
+  "explore",
+  "features",
+  "gist",
+  "gists",
+  "issues",
+  "join",
+  "login",
+  "logout",
+  "marketplace",
+  "new",
+  "notifications",
+  "orgs",
+  "organizations",
+  "pricing",
+  "pulls",
+  "readme",
+  "search",
+  "security",
+  "session",
+  "site",
+  "sponsors",
+  "topics",
+  "trending"
+]);
+
+function isGitHubProfilePath(pathname) {
+  const segments = String(pathname || "")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (segments.length !== 1) {
+    return false;
+  }
+  const username = segments[0].toLowerCase();
+  if (!username || GITHUB_RESERVED_PROFILE_PATHS.has(username)) {
+    return false;
+  }
+  return true;
+}
+
+function isGitHubProfilePage() {
+  try {
+    const parsed = new URL(window.location.href);
+    return isGitHubHost(parsed.hostname) && isGitHubProfilePath(parsed.pathname);
+  } catch (_error) {
+    return /^https:\/\/github\.com\/[^/]+\/?$/i.test(window.location.href);
+  }
+}
+
+function isGmailPage() {
+  try {
+    const parsed = new URL(window.location.href);
+    return isGmailHost(parsed.hostname);
+  } catch (_error) {
+    return /^https:\/\/mail\.google\.com\//i.test(window.location.href);
+  }
+}
+
+function isSupportedActionPage() {
+  return isLinkedInProfilePage() || isGemCandidateProfilePage() || isGmailPage() || isGitHubProfilePage();
+}
+
+function normalizeUrlForContext(url, options = {}) {
+  const keepHash = Boolean(options.keepHash);
+  const keepSearch = Boolean(options.keepSearch);
+  const fallback = String(url || "").trim();
+  if (!fallback) {
+    return "";
+  }
+  try {
+    const parsed = new URL(fallback, window.location.origin);
+    if (!keepSearch) {
+      parsed.search = "";
+    }
+    if (!keepHash) {
+      parsed.hash = "";
+    }
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_error) {
+    let normalized = fallback;
+    if (!keepSearch) {
+      normalized = normalized.replace(/\?.*$/, "");
+    }
+    if (!keepHash) {
+      normalized = normalized.replace(/#.*$/, "");
+    }
+    return normalized.replace(/\/$/, "");
+  }
+}
+
+function normalizePageUrlForWatcher(url = window.location.href) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    parsed.search = "";
+    if (!isGmailHost(parsed.hostname)) {
+      parsed.hash = "";
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return String(url || "");
   }
 }
 
@@ -217,7 +359,17 @@ function findLinkedInPublicProfileUrlInDom() {
     }
   }
 
-  return normalizeLinkedInUrl(currentUrl);
+  try {
+    const parsed = new URL(currentUrl, window.location.origin);
+    if (isLinkedInHost(parsed.hostname) && isLinkedInProfilePath(parsed.pathname)) {
+      return normalizeLinkedInUrl(parsed.toString());
+    }
+  } catch (_error) {
+    if (/linkedin\.com/i.test(currentUrl)) {
+      return normalizeLinkedInUrl(currentUrl);
+    }
+  }
+  return "";
 }
 
 function getLinkedInHandle(url) {
@@ -257,11 +409,266 @@ function refreshProfileIdentityFromDom(options = {}) {
   };
 }
 
-function getProfileContext() {
+function getLinkedInProfileContext() {
   refreshProfileIdentityFromDom();
   return {
+    sourcePlatform: "linkedin",
+    pageUrl: normalizePageUrlForWatcher(window.location.href),
+    profileUrl: normalizeUrlForContext(window.location.href),
     linkedinUrl: profileIdentityCache.linkedinUrl || normalizeLinkedInUrl(window.location.href),
     linkedInHandle: profileIdentityCache.linkedInHandle || "",
+    profileName: getProfileName()
+  };
+}
+
+function readEmailsFromString(value, outputSet) {
+  if (!value) {
+    return;
+  }
+  const matches = String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  matches.forEach((match) => {
+    const normalized = normalizeEmailAddressForPicker(match).toLowerCase();
+    if (isValidEmailAddressForPicker(normalized)) {
+      outputSet.add(normalized);
+    }
+  });
+}
+
+function collectEmailAddressesFromDom(options = {}) {
+  const selectors =
+    options.selectors ||
+    [
+      "a[href^='mailto:']",
+      "span[email]",
+      "div[email]",
+      "[data-hovercard-id]",
+      "[data-email]",
+      "[aria-label*='@']"
+    ];
+  const maxNodes = Math.max(1, Number(options.maxNodes) || 300);
+  const emails = new Set();
+  const nodes = Array.from(document.querySelectorAll(selectors.join(","))).slice(0, maxNodes);
+  nodes.forEach((node) => {
+    const attrCandidates = [
+      node.getAttribute("email"),
+      node.getAttribute("data-email"),
+      node.getAttribute("data-hovercard-id"),
+      node.getAttribute("href"),
+      node.getAttribute("aria-label"),
+      node.textContent
+    ];
+    attrCandidates.forEach((value) => readEmailsFromString(value, emails));
+  });
+  return Array.from(emails);
+}
+
+function findLinkedInUrlInDocument() {
+  const fromDom = findLinkedInPublicProfileUrlInDom();
+  if (fromDom) {
+    return fromDom;
+  }
+  const anchors = Array.from(document.querySelectorAll("a[href*='linkedin.com/']")).slice(0, 300);
+  for (const anchor of anchors) {
+    const href = String(anchor.getAttribute("href") || anchor.href || "").trim();
+    const canonical = toCanonicalLinkedInPublicProfileUrl(href);
+    if (canonical) {
+      return canonical;
+    }
+  }
+  return "";
+}
+
+function decodeGemCandidateToken(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (/^\d+$/.test(raw)) {
+    return raw;
+  }
+  const base64Like = raw.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = `${base64Like}${"=".repeat((4 - (base64Like.length % 4 || 4)) % 4)}`;
+  try {
+    const decoded = atob(padded);
+    const personMatch = decoded.match(/(?:Person|Candidate):(\d+)/i);
+    if (personMatch?.[1]) {
+      return personMatch[1];
+    }
+    if (/^\d+$/.test(decoded.trim())) {
+      return decoded.trim();
+    }
+  } catch (_error) {
+    // Fall through.
+  }
+  return "";
+}
+
+function extractGemCandidateIdFromUrl(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) {
+    return "";
+  }
+  try {
+    const parsed = new URL(value, window.location.origin);
+    const match = parsed.pathname.match(/^\/candidate\/([^/?#]+)/i);
+    if (!match?.[1]) {
+      return "";
+    }
+    const slug = decodeURIComponent(match[1]);
+    return decodeGemCandidateToken(slug) || slug;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function getGemProfileContext() {
+  const pageUrl = normalizePageUrlForWatcher(window.location.href);
+  const profileUrl = normalizeUrlForContext(window.location.href);
+  const gemCandidateId = extractGemCandidateIdFromUrl(window.location.href);
+  const linkedinUrl = findLinkedInUrlInDocument();
+  const contactEmails = collectEmailAddressesFromDom({
+    selectors: ["a[href^='mailto:']", "[data-email]", "span[email]", "div[email]"],
+    maxNodes: 200
+  });
+  return {
+    sourcePlatform: "gem",
+    pageUrl,
+    profileUrl,
+    gemProfileUrl: profileUrl,
+    gemCandidateId,
+    linkedinUrl,
+    linkedInHandle: getLinkedInHandle(linkedinUrl),
+    contactEmails,
+    contactEmail: contactEmails[0] || "",
+    profileName: getProfileName()
+  };
+}
+
+function getGmailCurrentUserEmails() {
+  const emails = new Set();
+  readEmailsFromString(cachedSettings?.createdByUserEmail || "", emails);
+  const accountNodes = Array.from(
+    document.querySelectorAll("a[aria-label*='Google Account'], div[aria-label*='Google Account'], button[aria-label*='Google Account']")
+  ).slice(0, 20);
+  accountNodes.forEach((node) => {
+    readEmailsFromString(node.getAttribute("aria-label") || "", emails);
+  });
+  return emails;
+}
+
+function getGmailConversationEmails() {
+  const selectors = [
+    ".gD[email]",
+    ".go[email]",
+    ".g2[email]",
+    "span[email]",
+    "div[email]",
+    "a[href^='mailto:']",
+    "[data-hovercard-id]"
+  ];
+  return collectEmailAddressesFromDom({ selectors, maxNodes: 600 });
+}
+
+function getGmailThreadTitle() {
+  const titleNode = document.querySelector("h2.hP, h2[data-thread-perm-id], h2[role='heading']");
+  return String(titleNode?.textContent || "").trim();
+}
+
+function getGmailContext() {
+  const pageUrl = normalizePageUrlForWatcher(window.location.href);
+  const profileUrl = normalizeUrlForContext(window.location.href, { keepHash: true });
+  const allEmails = getGmailConversationEmails();
+  const selfEmails = getGmailCurrentUserEmails();
+  const nonSelfEmail = allEmails.find((email) => !selfEmails.has(String(email || "").toLowerCase())) || "";
+  const primaryEmail = nonSelfEmail || allEmails[0] || "";
+  const profileName = getGmailThreadTitle();
+  return {
+    sourcePlatform: "gmail",
+    pageUrl,
+    profileUrl,
+    gemProfileUrl: "",
+    linkedinUrl: "",
+    linkedInHandle: "",
+    contactEmails: allEmails,
+    contactEmail: primaryEmail,
+    profileName
+  };
+}
+
+function getGitHubProfileName() {
+  const selectors = [
+    "h1.vcard-names span.p-name",
+    "h1 .vcard-fullname",
+    ".vcard-fullname",
+    "[itemprop='name']"
+  ];
+  for (const selector of selectors) {
+    const value = String(document.querySelector(selector)?.textContent || "").trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function getGitHubUsernameFromPath() {
+  try {
+    const parsed = new URL(window.location.href);
+    const segment = String(parsed.pathname || "")
+      .split("/")
+      .map((part) => part.trim())
+      .filter(Boolean)[0];
+    return segment ? decodeURIComponent(segment) : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function getGitHubContext() {
+  const username = getGitHubUsernameFromPath();
+  const canonicalHref = String(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "").trim();
+  const githubUrl = normalizeUrlForContext(canonicalHref || `https://github.com/${username}`);
+  const linkedinUrl = findLinkedInUrlInDocument();
+  const contactEmails = collectEmailAddressesFromDom({
+    selectors: ["a[href^='mailto:']", "li[itemprop='email']", "[data-hovercard-id]"],
+    maxNodes: 160
+  });
+  return {
+    sourcePlatform: "github",
+    pageUrl: normalizePageUrlForWatcher(window.location.href),
+    profileUrl: githubUrl,
+    githubUrl,
+    githubUsername: username,
+    linkedinUrl,
+    linkedInHandle: getLinkedInHandle(linkedinUrl),
+    contactEmails,
+    contactEmail: contactEmails[0] || "",
+    profileName: getGitHubProfileName() || username
+  };
+}
+
+function getProfileContext() {
+  if (isLinkedInProfilePage()) {
+    return getLinkedInProfileContext();
+  }
+  if (isGemCandidateProfilePage()) {
+    return getGemProfileContext();
+  }
+  if (isGmailPage()) {
+    return getGmailContext();
+  }
+  if (isGitHubProfilePage()) {
+    return getGitHubContext();
+  }
+  return {
+    sourcePlatform: "unknown",
+    pageUrl: normalizePageUrlForWatcher(window.location.href),
+    profileUrl: normalizeUrlForContext(window.location.href),
+    linkedinUrl: "",
+    linkedInHandle: "",
+    gemCandidateId: "",
+    contactEmails: [],
+    contactEmail: "",
     profileName: getProfileName()
   };
 }
@@ -572,14 +979,17 @@ function runAction(actionId, context) {
   });
 }
 
-function listProjects(query, runId) {
+function listProjects(query, runId, options = {}) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
       {
         type: "LIST_PROJECTS",
         query: String(query || ""),
         limit: 0,
-        runId: runId || ""
+        runId: runId || "",
+        forceRefresh: Boolean(options.forceRefresh),
+        preferCache: Boolean(options.preferCache),
+        forceNewRefresh: Boolean(options.forceNewRefresh)
       },
       (response) => {
         if (chrome.runtime.lastError) {
@@ -788,22 +1198,85 @@ function setPrimaryCandidateEmailForContext(context, email, runId) {
 }
 
 function getCustomFieldContextKey(context) {
+  const gemCandidateId = String(context?.gemCandidateId || "").trim();
+  if (gemCandidateId) {
+    return `candidate:${gemCandidateId}`;
+  }
+
   const handle = String(context?.linkedInHandle || "").trim().toLowerCase();
   if (handle) {
     return `handle:${handle}`;
   }
+
   const rawUrl = String(context?.linkedinUrl || "").trim().toLowerCase();
-  if (!rawUrl) {
-    return "";
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      parsed.search = "";
+      parsed.hash = "";
+      return `url:${parsed.toString().replace(/\/$/, "")}`;
+    } catch (_error) {
+      return `url:${rawUrl.replace(/[?#].*$/, "").replace(/\/$/, "")}`;
+    }
   }
-  try {
-    const parsed = new URL(rawUrl);
-    parsed.search = "";
-    parsed.hash = "";
-    return `url:${parsed.toString().replace(/\/$/, "")}`;
-  } catch (_error) {
-    return `url:${rawUrl.replace(/[?#].*$/, "").replace(/\/$/, "")}`;
+
+  const contactEmail =
+    normalizeEmailAddressForPicker(context?.contactEmail || "").toLowerCase() ||
+    normalizeEmailAddressForPicker(Array.isArray(context?.contactEmails) ? context.contactEmails[0] : "").toLowerCase();
+  if (contactEmail && isValidEmailAddressForPicker(contactEmail)) {
+    return `email:${contactEmail}`;
   }
+
+  const profileUrl = String(context?.profileUrl || context?.gemProfileUrl || context?.pageUrl || "")
+    .trim()
+    .toLowerCase();
+  if (profileUrl) {
+    try {
+      const parsed = new URL(profileUrl);
+      parsed.search = "";
+      parsed.hash = "";
+      return `profile:${parsed.toString().replace(/\/$/, "")}`;
+    } catch (_error) {
+      return `profile:${profileUrl.replace(/[?#].*$/, "").replace(/\/$/, "")}`;
+    }
+  }
+
+  return "";
+}
+
+function getContextLink(context) {
+  return (
+    String(context?.linkedinUrl || "").trim() ||
+    String(context?.profileUrl || "").trim() ||
+    String(context?.gemProfileUrl || "").trim() ||
+    String(context?.pageUrl || "").trim() ||
+    window.location.href
+  );
+}
+
+function contextHasResolvableIdentity(context) {
+  if (!context || typeof context !== "object") {
+    return false;
+  }
+  if (String(context.gemCandidateId || "").trim()) {
+    return true;
+  }
+  if (String(context.linkedinUrl || "").trim()) {
+    return true;
+  }
+  if (String(context.linkedInHandle || "").trim()) {
+    return true;
+  }
+  if (String(context.profileUrl || "").trim()) {
+    return true;
+  }
+  if (isValidEmailAddressForPicker(String(context.contactEmail || "").trim())) {
+    return true;
+  }
+  if (Array.isArray(context.contactEmails)) {
+    return context.contactEmails.some((email) => isValidEmailAddressForPicker(email));
+  }
+  return false;
 }
 
 function normalizeCustomFieldsForPicker(data) {
@@ -974,16 +1447,19 @@ function warmCandidateEmailsForContext(context, runId, options = {}) {
 }
 
 function prefetchPickersForCurrentProfile() {
-  if (!cachedSettings?.enabled || !isLinkedInProfilePage()) {
+  if (!cachedSettings?.enabled || !isSupportedActionPage()) {
     return;
   }
   const profileContext = getProfileContext();
+  if (!contextHasResolvableIdentity(profileContext)) {
+    return;
+  }
   const contextKey = getCustomFieldContextKey(profileContext);
   if (!contextKey || contextKey === lastPrefetchedProfileContextKey) {
     return;
   }
   lastPrefetchedProfileContextKey = contextKey;
-  prefetchProjects(generateRunId()).catch(() => {});
+  prefetchProjects(generateRunId(), { forceRefresh: true }).catch(() => {});
   prefetchSequences(generateRunId()).catch(() => {});
   warmCustomFieldsForContext(profileContext, generateRunId(), {
     preferCache: true,
@@ -1001,14 +1477,14 @@ function startProfileUrlPrefetchWatcher() {
   if (profileUrlPollTimerId) {
     return;
   }
-  profileUrlPollLastUrl = normalizeLinkedInUrl(window.location.href);
+  profileUrlPollLastUrl = normalizePageUrlForWatcher(window.location.href);
   profileUrlPollTimerId = window.setInterval(() => {
-    const currentUrl = normalizeLinkedInUrl(window.location.href);
+    const currentUrl = normalizePageUrlForWatcher(window.location.href);
     if (currentUrl === profileUrlPollLastUrl) {
       return;
     }
     profileUrlPollLastUrl = currentUrl;
-    if (!isLinkedInProfilePage()) {
+    if (!isSupportedActionPage()) {
       lastPrefetchedProfileContextKey = "";
       return;
     }
@@ -1087,20 +1563,20 @@ function filterProjectsByQuery(projects, query) {
   const normalized = Array.isArray(projects) ? projects : [];
   const normalizedQuery = String(query || "").trim().toLowerCase();
   if (!normalizedQuery) {
-    return normalized.slice(0, PROJECT_PICKER_RENDER_LIMIT);
+    return normalized;
   }
-  return normalized
-    .filter((project) => String(project?.name || "").toLowerCase().includes(normalizedQuery))
-    .slice(0, PROJECT_PICKER_RENDER_LIMIT);
+  return normalized.filter((project) => String(project?.name || "").toLowerCase().includes(normalizedQuery));
 }
 
-function prefetchProjects(runId) {
+function prefetchProjects(runId, options = {}) {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(
       {
         type: "PREFETCH_PROJECTS",
         runId: runId || "",
-        limit: 0
+        limit: 0,
+        forceRefresh: Boolean(options.forceRefresh),
+        forceNewRefresh: Boolean(options.forceNewRefresh)
       },
       () => {
         if (chrome.runtime.lastError) {
@@ -4927,8 +5403,24 @@ async function showProjectPicker(runId, linkedinUrl) {
     let loading = true;
     let loadError = "";
     const startedAt = Date.now();
+    let active = true;
+    let cachedSignature = "";
+    let hasAppliedForceRefresh = false;
+
+    function getProjectSignature(projects) {
+      const normalized = Array.isArray(projects) ? projects : [];
+      if (normalized.length === 0) {
+        return "0";
+      }
+      const ids = normalized
+        .map((project) => String(project?.id || ""))
+        .filter(Boolean)
+        .sort();
+      return `${normalized.length}:${ids.join("|")}`;
+    }
 
     function cleanup() {
+      active = false;
       overlay.remove();
     }
 
@@ -5081,42 +5573,108 @@ async function showProjectPicker(runId, linkedinUrl) {
       link: linkedinUrl
     });
 
-    listProjects("", runId)
+    listProjects("", runId, { preferCache: true })
       .then(async (projects) => {
-        allProjects = projects.filter((project) => !project.archived);
-        loading = false;
-        loadError = "";
-        renderList();
+        if (!active) {
+          return;
+        }
+        const cachedProjects = projects.filter((project) => !project.archived);
+        cachedSignature = getProjectSignature(cachedProjects);
+        if (cachedProjects.length > 0 && !hasAppliedForceRefresh) {
+          allProjects = cachedProjects;
+          loading = false;
+          loadError = "";
+          renderList();
+        }
         await logEvent({
           source: "extension.content",
-          event: "project_picker.loaded",
+          event: "project_picker.cache_loaded",
           actionId: ACTIONS.ADD_TO_PROJECT,
           runId,
-          message: `Project picker loaded ${allProjects.length} projects.`,
-          link: linkedinUrl,
-          details: {
-            durationMs: Date.now() - startedAt
-          }
+          message: `Loaded ${cachedProjects.length} cached projects for picker.`,
+          link: linkedinUrl
         });
       })
-      .catch(async (error) => {
-        loading = false;
-        loadError = error.message || "Failed to load project list.";
-        renderList();
-        showToast(loadError, true);
+      .catch(async (_error) => {
+        if (!active) {
+          return;
+        }
         await logEvent({
           source: "extension.content",
-          level: "error",
-          event: "project_picker.load_failed",
+          level: "warn",
+          event: "project_picker.cache_load_failed",
           actionId: ACTIONS.ADD_TO_PROJECT,
           runId,
-          message: loadError,
-          link: linkedinUrl,
-          details: {
-            durationMs: Date.now() - startedAt
-          }
+          message: "Could not load cached projects for picker.",
+          link: linkedinUrl
         });
       });
+
+    function runForceRefresh(isRetry = false) {
+      return listProjects("", runId, { forceRefresh: true, forceNewRefresh: true })
+        .then(async (projects) => {
+          if (!active) {
+            return;
+          }
+          const refreshedProjects = projects.filter((project) => !project.archived);
+          const refreshedSignature = getProjectSignature(refreshedProjects);
+          hasAppliedForceRefresh = true;
+          allProjects = refreshedProjects;
+          loading = false;
+          loadError = "";
+          renderList();
+          await logEvent({
+            source: "extension.content",
+            event: isRetry ? "project_picker.retry_loaded" : "project_picker.loaded",
+            actionId: ACTIONS.ADD_TO_PROJECT,
+            runId,
+            message: `Project picker ${isRetry ? "retry " : ""}loaded ${allProjects.length} projects.`,
+            link: linkedinUrl,
+            details: {
+              durationMs: Date.now() - startedAt
+            }
+          });
+
+          // If refresh result equals cache exactly, retry once with a forced new refresh
+          // to avoid stale in-flight refresh races after recent project creation.
+          if (!isRetry && active && cachedSignature && refreshedSignature === cachedSignature) {
+            setTimeout(() => {
+              if (!active) {
+                return;
+              }
+              runForceRefresh(true).catch(() => {});
+            }, 900);
+          }
+        })
+        .catch(async (error) => {
+          if (!active) {
+            return;
+          }
+          const message = error.message || "Failed to refresh project list.";
+          const usedCachedProjects = allProjects.length > 0;
+          if (!usedCachedProjects) {
+            loading = false;
+            loadError = message;
+            renderList();
+            showToast(message, true);
+          }
+          await logEvent({
+            source: "extension.content",
+            level: usedCachedProjects ? "warn" : "error",
+            event: isRetry ? "project_picker.retry_failed" : "project_picker.load_failed",
+            actionId: ACTIONS.ADD_TO_PROJECT,
+            runId,
+            message,
+            link: linkedinUrl,
+            details: {
+              durationMs: Date.now() - startedAt,
+              usedCachedProjects
+            }
+          });
+        });
+    }
+
+    runForceRefresh(false).catch(() => {});
   });
 }
 
@@ -5930,9 +6488,10 @@ async function showCandidateNotePicker(runId, context) {
 
 async function getRuntimeContext(actionId, settings, runId) {
   const context = getProfileContext();
+  const contextLink = getContextLink(context);
 
   if (actionId === ACTIONS.ADD_TO_PROJECT) {
-    const project = await showProjectPicker(runId, context.linkedinUrl);
+    const project = await showProjectPicker(runId, contextLink);
     if (!project) {
       return null;
     }
@@ -5949,7 +6508,7 @@ async function getRuntimeContext(actionId, settings, runId) {
   }
 
   if (actionId === ACTIONS.UPLOAD_TO_ASHBY) {
-    const job = await showAshbyJobPicker(runId, context.linkedinUrl);
+    const job = await showAshbyJobPicker(runId, contextLink);
     if (!job) {
       return null;
     }
@@ -5984,7 +6543,7 @@ async function getRuntimeContext(actionId, settings, runId) {
   }
 
   if (actionId === ACTIONS.SEND_SEQUENCE && !settings.defaultSequenceId) {
-    const sequence = await showSequencePicker(runId, context.linkedinUrl, {
+    const sequence = await showSequencePicker(runId, contextLink, {
       actionId: ACTIONS.SEND_SEQUENCE,
       title: "Open Sequence",
       subtitle: "Press a letter to pick a sequence. Use Enter to open it in Gem."
@@ -5997,7 +6556,7 @@ async function getRuntimeContext(actionId, settings, runId) {
   }
 
   if (actionId === ACTIONS.EDIT_SEQUENCE) {
-    const sequence = await showSequencePicker(runId, context.linkedinUrl, {
+    const sequence = await showSequencePicker(runId, contextLink, {
       actionId: ACTIONS.EDIT_SEQUENCE,
       title: "Edit Sequence",
       subtitle: "Press a letter to pick a sequence. Use Enter to open edit stages in Gem."
@@ -6015,6 +6574,7 @@ async function getRuntimeContext(actionId, settings, runId) {
 async function handleAction(actionId, source = "keyboard", runId = "") {
   const effectiveRunId = runId || generateRunId();
   const initialContext = getProfileContext();
+  const initialLink = getContextLink(initialContext);
   try {
     const settings = cachedSettings || (await refreshSettings());
     if (!settings.enabled) {
@@ -6026,20 +6586,33 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         actionId,
         runId: effectiveRunId,
         message: "Action blocked because extension is disabled.",
-        link: initialContext.linkedinUrl
+        link: initialLink
       });
       return;
     }
-    if (!isLinkedInProfilePage()) {
-      showToast("Open a LinkedIn profile page to run this action.", true);
+    if (!isSupportedActionPage()) {
+      showToast("Open LinkedIn, Gem candidate, Gmail, or GitHub profile to run this action.", true);
       logEvent({
         source: "extension.content",
         level: "warn",
         event: "action.blocked",
         actionId,
         runId: effectiveRunId,
-        message: "Action blocked because current page is not a LinkedIn profile.",
+        message: "Action blocked because current page is not supported.",
         link: window.location.href
+      });
+      return;
+    }
+    if (!contextHasResolvableIdentity(initialContext)) {
+      showToast("Could not detect a candidate identity on this page.", true);
+      logEvent({
+        source: "extension.content",
+        level: "warn",
+        event: "action.blocked",
+        actionId,
+        runId: effectiveRunId,
+        message: "Action blocked because candidate identity could not be detected.",
+        link: initialLink
       });
       return;
     }
@@ -6054,7 +6627,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         actionId,
         runId: effectiveRunId,
         message,
-        link: initialContext.linkedinUrl
+        link: initialLink
       });
       // Retired branch kept for future restore:
       // if (actionId === ACTIONS.VIEW_ACTIVITY_FEED) {
@@ -6082,22 +6655,27 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         actionId,
         runId: effectiveRunId,
         message: "Action cancelled by user input.",
-        link: initialContext.linkedinUrl
+        link: initialLink
       });
       return;
     }
     context.source = source;
     context.runId = effectiveRunId;
+    const contextLink = getContextLink(context);
     await logEvent({
       source: "extension.content",
       event: "action.dispatched",
       actionId,
       runId: effectiveRunId,
       message: `Dispatching action from ${source}.`,
-      link: context.linkedinUrl,
+      link: contextLink,
       details: {
+        sourcePlatform: context.sourcePlatform || "",
         linkedInHandle: context.linkedInHandle,
-        profileName: context.profileName
+        profileName: context.profileName,
+        gemCandidateId: context.gemCandidateId || "",
+        contactEmail: context.contactEmail || "",
+        profileUrl: context.profileUrl || ""
       }
     });
     const result = await runAction(actionId, context);
@@ -6123,7 +6701,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         actionId,
         runId: result.runId || effectiveRunId,
         message: result.message || "Action completed.",
-        link: result.link || context.linkedinUrl
+        link: result.link || contextLink
       });
       return;
     }
@@ -6135,7 +6713,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       actionId,
       runId: result?.runId || effectiveRunId,
       message: result?.message || "Action failed.",
-      link: context.linkedinUrl
+      link: contextLink
     });
   } catch (error) {
     showToast(error.message || "Action failed.", true);
@@ -6146,7 +6724,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       actionId,
       runId: effectiveRunId,
       message: error.message || "Action failed.",
-      link: initialContext.linkedinUrl
+      link: initialLink
     });
   }
 }
@@ -6721,19 +7299,20 @@ async function triggerConnectShortcut(runId) {
 }
 
 function onKeyDown(event) {
-  if (!isLinkedInProfilePage()) {
+  if (!isSupportedActionPage()) {
     return;
   }
+  const isLinkedInContext = isLinkedInProfilePage();
   const isModifierBasedShortcut = Boolean(event.metaKey || event.ctrlKey || event.altKey);
   if (isEditableElement(event.target) && !isModifierBasedShortcut) {
     return;
   }
 
-  if (handleInviteDecisionShortcut(event)) {
+  if (isLinkedInContext && handleInviteDecisionShortcut(event)) {
     return;
   }
 
-  if (isConnectShortcut(event)) {
+  if (isLinkedInContext && isConnectShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
     const runId = generateRunId();
@@ -6790,7 +7369,7 @@ async function init() {
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === "sync" && changes.settings) {
       cachedSettings = deepMerge(DEFAULT_SETTINGS, changes.settings.newValue || {});
-      if (cachedSettings?.enabled && isLinkedInProfilePage()) {
+      if (cachedSettings?.enabled && isSupportedActionPage()) {
         lastPrefetchedProfileContextKey = "";
         prefetchPickersForCurrentProfile();
       } else {
@@ -6814,7 +7393,7 @@ async function init() {
     }, 1000);
   }
 
-  if (cachedSettings?.enabled && isLinkedInProfilePage()) {
+  if (cachedSettings?.enabled && isSupportedActionPage()) {
     lastPrefetchedProfileContextKey = "";
     prefetchPickersForCurrentProfile();
   }
@@ -6823,7 +7402,7 @@ async function init() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "SETTINGS_UPDATED") {
     cachedSettings = deepMerge(DEFAULT_SETTINGS, message.settings || {});
-    if (cachedSettings?.enabled && isLinkedInProfilePage()) {
+    if (cachedSettings?.enabled && isSupportedActionPage()) {
       lastPrefetchedProfileContextKey = "";
       prefetchPickersForCurrentProfile();
     } else {

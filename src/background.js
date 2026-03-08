@@ -311,12 +311,22 @@ function validateShortcutMap(shortcuts) {
 
 function broadcastSettingsToLinkedInTabs(settings) {
   return new Promise((resolve) => {
-    chrome.tabs.query({ url: ["https://www.linkedin.com/*", "https://www.gem.com/*", "https://app.gem.com/*"] }, (tabs) => {
-      if (chrome.runtime.lastError || !Array.isArray(tabs) || tabs.length === 0) {
-        resolve();
-        return;
-      }
-      let remaining = tabs.length;
+    chrome.tabs.query(
+      {
+        url: [
+          "https://www.linkedin.com/*",
+          "https://www.gem.com/*",
+          "https://app.gem.com/*",
+          "https://mail.google.com/*",
+          "https://github.com/*"
+        ]
+      },
+      (tabs) => {
+        if (chrome.runtime.lastError || !Array.isArray(tabs) || tabs.length === 0) {
+          resolve();
+          return;
+        }
+        let remaining = tabs.length;
       for (const tab of tabs) {
         chrome.tabs.sendMessage(tab.id, { type: "SETTINGS_UPDATED", settings }, () => {
           remaining -= 1;
@@ -325,7 +335,8 @@ function broadcastSettingsToLinkedInTabs(settings) {
           }
         });
       }
-    });
+      }
+    );
   });
 }
 
@@ -996,8 +1007,9 @@ async function refreshProjectsFromBackend(settings, runId, limit = PROJECT_CACHE
   return projects;
 }
 
-function ensureProjectRefresh(settings, runId, limit = PROJECT_CACHE_LIMIT) {
-  if (!projectRefreshPromise) {
+function ensureProjectRefresh(settings, runId, limit = PROJECT_CACHE_LIMIT, options = {}) {
+  const forceNew = Boolean(options.forceNew);
+  if (forceNew || !projectRefreshPromise) {
     projectRefreshPromise = refreshProjectsFromBackend(settings, runId, limit).finally(() => {
       projectRefreshPromise = null;
     });
@@ -1011,6 +1023,195 @@ function getCreatedByIdentity(settings = {}, context = {}) {
     .trim()
     .toLowerCase();
   return { userId, userEmail };
+}
+
+function normalizeContextEmail(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function collectContextEmails(context = {}) {
+  const emails = [];
+  const seen = new Set();
+  const add = (value) => {
+    const email = normalizeContextEmail(value);
+    if (!email || seen.has(email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return;
+    }
+    seen.add(email);
+    emails.push(email);
+  };
+  add(context.contactEmail);
+  add(context.email);
+  if (Array.isArray(context.contactEmails)) {
+    context.contactEmails.forEach((email) => add(email));
+  }
+  return emails;
+}
+
+function normalizeProfileUrlForLookup(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) {
+    return "";
+  }
+  try {
+    const parsed = new URL(value);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_error) {
+    return value.replace(/[?#].*$/, "").replace(/\/$/, "");
+  }
+}
+
+function collectContextProfileUrls(context = {}) {
+  const urls = [];
+  const seen = new Set();
+  const add = (value) => {
+    const normalized = normalizeProfileUrlForLookup(value);
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    urls.push(normalized);
+  };
+  add(context.profileUrl);
+  add(context.githubUrl);
+  add(context.gemProfileUrl);
+  add(context.linkedinUrl);
+  if (Array.isArray(context.profileUrls)) {
+    context.profileUrls.forEach((value) => add(value));
+  }
+  return urls;
+}
+
+function getContextLink(context = {}) {
+  return (
+    String(context.linkedinUrl || "").trim() ||
+    String(context.profileUrl || "").trim() ||
+    String(context.githubUrl || "").trim() ||
+    String(context.gemProfileUrl || "").trim() ||
+    ""
+  );
+}
+
+function contextHasCandidateIdentity(context = {}) {
+  return Boolean(
+    String(context.gemCandidateId || "").trim() ||
+      String(context.linkedinUrl || "").trim() ||
+      String(context.linkedInHandle || "").trim() ||
+      collectContextEmails(context).length > 0 ||
+      collectContextProfileUrls(context).length > 0
+  );
+}
+
+function buildLinkedInUrlFromHandle(handle) {
+  const clean = String(handle || "")
+    .trim()
+    .replace(/^@/, "");
+  if (!clean) {
+    return "";
+  }
+  return `https://www.linkedin.com/in/${encodeURIComponent(clean)}`;
+}
+
+function extractLinkedInIdentityFromCandidate(candidate) {
+  const linkedInHandle = String(candidate?.linked_in_handle || candidate?.linkedInHandle || "").trim();
+  const urls = [];
+  const profileUrls = Array.isArray(candidate?.profile_urls) ? candidate.profile_urls : [];
+  profileUrls.forEach((url) => urls.push(String(url || "").trim()));
+  const profiles = Array.isArray(candidate?.profiles) ? candidate.profiles : [];
+  profiles.forEach((profile) => {
+    if (!profile || typeof profile !== "object") {
+      return;
+    }
+    urls.push(
+      String(profile.url || profile.link || profile.href || profile.value || "").trim()
+    );
+  });
+  let linkedInUrl = "";
+  for (const value of urls) {
+    const normalized = normalizeProfileUrlForLookup(value).toLowerCase();
+    if (!normalized || !normalized.includes("linkedin.com/")) {
+      continue;
+    }
+    linkedInUrl = normalizeProfileUrlForLookup(value);
+    if (/linkedin\.com\/(?:in|pub)\//i.test(normalized)) {
+      break;
+    }
+  }
+  if (!linkedInUrl && linkedInHandle) {
+    linkedInUrl = buildLinkedInUrlFromHandle(linkedInHandle);
+  }
+  return {
+    linkedInHandle,
+    linkedInUrl
+  };
+}
+
+async function findCandidateByContext(settings, context, audit) {
+  const gemCandidateId = String(context?.gemCandidateId || "").trim();
+  if (gemCandidateId) {
+    try {
+      const byId = await callBackend(
+        "/api/candidates/get",
+        { candidateId: gemCandidateId },
+        settings,
+        { ...audit, step: "findCandidateById" }
+      );
+      if (byId?.candidate?.id) {
+        return byId.candidate;
+      }
+    } catch (_error) {
+      // Continue with other lookup strategies.
+    }
+  }
+
+  const linkedInHandle = String(context?.linkedInHandle || "").trim();
+  const linkedInUrl = String(context?.linkedinUrl || "").trim();
+  if (linkedInHandle || linkedInUrl) {
+    const byLinkedIn = await callBackend(
+      "/api/candidates/find-by-linkedin",
+      {
+        linkedInHandle,
+        linkedInUrl
+      },
+      settings,
+      { ...audit, step: "findCandidateByLinkedIn" }
+    );
+    if (byLinkedIn?.candidate?.id) {
+      return byLinkedIn.candidate;
+    }
+  }
+
+  const emails = collectContextEmails(context);
+  for (const email of emails) {
+    const byEmail = await callBackend(
+      "/api/candidates/find-by-email",
+      { email },
+      settings,
+      { ...audit, step: "findCandidateByEmail" }
+    );
+    if (byEmail?.candidate?.id) {
+      return byEmail.candidate;
+    }
+  }
+
+  const profileUrls = collectContextProfileUrls(context);
+  for (const profileUrl of profileUrls) {
+    const byProfileUrl = await callBackend(
+      "/api/candidates/find-by-profile-url",
+      { profileUrl },
+      settings,
+      { ...audit, step: "findCandidateByProfileUrl" }
+    );
+    if (byProfileUrl?.candidate?.id) {
+      return byProfileUrl.candidate;
+    }
+  }
+
+  return null;
 }
 
 async function refreshSequencesFromBackend(settings, runId, limit = SEQUENCE_CACHE_LIMIT, actionId = ACTIONS.SEND_SEQUENCE) {
@@ -1435,54 +1636,72 @@ function formatDateForHumans(rawDate) {
   });
 }
 
-async function ensureCandidate(settings, context, audit) {
+async function ensureCandidate(settings, context, audit, options = {}) {
+  const allowCreate = options.allowCreate !== false;
   const linkedInHandle = String(context.linkedInHandle || "").trim();
   const linkedInUrl = String(context.linkedinUrl || "").trim();
-  if (!linkedInHandle && !linkedInUrl) {
-    throw new Error("Could not determine LinkedIn profile identity from current page.");
-  }
+  const gemCandidateId = String(context.gemCandidateId || "").trim();
+  const contextLink = getContextLink(context);
 
-  const found = await callBackend(
-    "/api/candidates/find-by-linkedin",
-    {
-      linkedInHandle,
-      linkedInUrl
-    },
-    settings,
-    { ...audit, step: "findCandidate" }
-  );
-  if (found?.candidate?.id) {
+  const foundCandidate = await findCandidateByContext(settings, context, audit);
+  if (foundCandidate?.id) {
     logEvent(settings, {
       event: "candidate.found",
       actionId: audit.actionId,
       runId: audit.runId,
-      message: `Candidate already exists: ${found.candidate.id}`,
-      link: linkedInUrl || context.linkedinUrl,
+      message: `Candidate already exists: ${foundCandidate.id}`,
+      link: contextLink || linkedInUrl || context.gemProfileUrl || "",
       details: {
-        candidateId: found.candidate.id,
+        candidateId: foundCandidate.id,
         linkedInHandle,
-        linkedInUrl
+        linkedInUrl,
+        gemCandidateId
       }
     });
-    return found.candidate;
+    return foundCandidate;
+  }
+
+  if (!allowCreate) {
+    throw new Error("Could not find an existing Gem candidate for this context.");
   }
 
   const names = splitProfileName(context.profileName);
   const { userId: createdByUserId, userEmail: createdByUserEmail } = getCreatedByIdentity(settings, context);
-  const created = await callBackend(
-    "/api/candidates/create-from-linkedin",
-    {
-      linkedInHandle,
-      linkedInUrl,
-      profileUrl: linkedInUrl || context.linkedinUrl,
-      firstName: names.firstName,
-      lastName: names.lastName,
-      createdByUserId,
-      createdByUserEmail
-    },
-    settings,
-    { ...audit, step: "createCandidate" }
-  );
+  let created = null;
+  if (linkedInHandle || linkedInUrl) {
+    created = await callBackend(
+      "/api/candidates/create-from-linkedin",
+      {
+        linkedInHandle,
+        linkedInUrl,
+        profileUrl: linkedInUrl || context.profileUrl || context.githubUrl || context.gemProfileUrl || "",
+        firstName: names.firstName,
+        lastName: names.lastName,
+        createdByUserId,
+        createdByUserEmail
+      },
+      settings,
+      { ...audit, step: "createCandidateFromLinkedIn" }
+    );
+  } else {
+    const emails = collectContextEmails(context);
+    const profileUrls = collectContextProfileUrls(context);
+    created = await callBackend(
+      "/api/candidates/create-from-context",
+      {
+        firstName: names.firstName,
+        lastName: names.lastName,
+        email: emails[0] || "",
+        contactEmails: emails,
+        profileUrl: profileUrls[0] || "",
+        profileUrls,
+        createdByUserId,
+        createdByUserEmail
+      },
+      settings,
+      { ...audit, step: "createCandidateFromContext" }
+    );
+  }
 
   if (!created?.candidate?.id) {
     throw new Error("Gem did not return a candidate id.");
@@ -1493,11 +1712,14 @@ async function ensureCandidate(settings, context, audit) {
     actionId: audit.actionId,
     runId: audit.runId,
     message: `Created candidate ${created.candidate.id}`,
-    link: linkedInUrl || context.linkedinUrl,
+    link: contextLink || linkedInUrl || context.gemProfileUrl || "",
     details: {
       candidateId: created.candidate.id,
       linkedInHandle,
-      linkedInUrl
+      linkedInUrl,
+      gemCandidateId,
+      contactEmail: collectContextEmails(context)[0] || "",
+      profileUrl: collectContextProfileUrls(context)[0] || ""
     }
   });
   return created.candidate;
@@ -1507,6 +1729,7 @@ async function runAction(actionId, context, settings, meta = {}) {
   const runId = meta.runId || generateId();
   const source = meta.source || "unknown";
   const audit = { actionId, runId };
+  const contextLink = getContextLink(context);
 
   logEvent(settings, {
     event: "action.requested",
@@ -1514,12 +1737,15 @@ async function runAction(actionId, context, settings, meta = {}) {
     runId,
     source: `extension.${source}`,
     message: `Action requested: ${actionId}`,
-    link: context.linkedinUrl || context.gemProfileUrl || "",
+    link: contextLink,
     details: {
       source,
+      sourcePlatform: context.sourcePlatform || "",
       linkedInHandle: context.linkedInHandle || "",
       profileName: context.profileName || "",
       gemCandidateId: context.gemCandidateId || "",
+      contactEmail: context.contactEmail || "",
+      profileUrl: context.profileUrl || "",
       ashbyJobId: context.ashbyJobId || "",
       candidateNoteLength: String(context.candidateNote || "").trim().length || 0
     }
@@ -1534,7 +1760,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: context.linkedinUrl || ""
+      link: contextLink
     });
     return { ok: false, message, runId };
   }
@@ -1547,11 +1773,11 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: context.linkedinUrl || ""
+      link: contextLink
     });
     return { ok: false, message, runId };
   }
-  if (!context.linkedinUrl && !context.gemCandidateId) {
+  if (!contextHasCandidateIdentity(context)) {
     const message = "No supported profile context detected for this action.";
     logEvent(settings, {
       level: "warn",
@@ -1560,16 +1786,26 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: context.linkedinUrl || context.gemProfileUrl || ""
+      link: contextLink
     });
     return { ok: false, message, runId };
   }
 
   if (actionId === ACTIONS.OPEN_ASHBY_PROFILE) {
-    const linkedInUrl = String(context.linkedinUrl || "").trim();
-    const linkedInHandle = String(context.linkedInHandle || "").trim();
+    let linkedInUrl = String(context.linkedinUrl || "").trim();
+    let linkedInHandle = String(context.linkedInHandle || "").trim();
     if (!linkedInUrl && !linkedInHandle) {
-      const message = "Could not determine LinkedIn profile URL.";
+      try {
+        const existingCandidate = await ensureCandidate(settings, context, audit, { allowCreate: false });
+        const identity = extractLinkedInIdentityFromCandidate(existingCandidate);
+        linkedInUrl = String(identity.linkedInUrl || "").trim();
+        linkedInHandle = String(identity.linkedInHandle || "").trim();
+      } catch (_error) {
+        // Continue to rejection path below.
+      }
+    }
+    if (!linkedInUrl && !linkedInHandle) {
+      const message = "Could not determine LinkedIn identity for Ashby profile lookup.";
       logEvent(settings, {
         level: "warn",
         event: "action.rejected",
@@ -1577,7 +1813,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl || ""
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1603,7 +1839,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl || "",
+        link: contextLink,
         details: {
           linkedInHandle,
           linkedInUrl
@@ -1641,7 +1877,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: candidate.weblink || context.linkedinUrl,
+      link: candidate.weblink || contextLink,
       details: { candidateId: candidate.id }
     });
     return { ok: true, message, runId, link: candidate.weblink || "" };
@@ -1658,7 +1894,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl || context.gemProfileUrl || ""
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1693,7 +1929,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: link || context.linkedinUrl || context.gemProfileUrl || "",
+      link: link || contextLink,
       details: {
         gemCandidateId,
         ashbyJobId: jobId,
@@ -1717,7 +1953,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl || context.gemProfileUrl || ""
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1772,7 +2008,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1795,7 +2031,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: candidate.weblink || context.linkedinUrl,
+      link: candidate.weblink || contextLink,
       details: {
         candidateId: candidate.id,
         projectId,
@@ -1868,7 +2104,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1893,7 +2129,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: candidate.weblink || context.linkedinUrl,
+      link: candidate.weblink || contextLink,
       details: {
         candidateId: candidate.id,
         customFieldId,
@@ -1915,7 +2151,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1938,7 +2174,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: candidate.weblink || context.linkedinUrl,
+      link: candidate.weblink || contextLink,
       details: {
         candidateId: candidate.id,
         userId,
@@ -1964,7 +2200,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -1977,7 +2213,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl,
+        link: contextLink,
         details: { reminderDueDate }
       });
       return { ok: false, message, runId };
@@ -2003,7 +2239,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: candidate.weblink || context.linkedinUrl,
+      link: candidate.weblink || contextLink,
       details: {
         candidateId: candidate.id,
         dueDate: reminderDueDate,
@@ -2026,7 +2262,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId,
         source: `extension.${source}`,
         message,
-        link: context.linkedinUrl
+        link: contextLink
       });
       return { ok: false, message, runId };
     }
@@ -2112,7 +2348,7 @@ async function runAction(actionId, context, settings, meta = {}) {
     runId,
     source: `extension.${source}`,
     message,
-    link: context.linkedinUrl || ""
+    link: contextLink
   });
   return { ok: false, message, runId };
 }
@@ -2268,21 +2504,12 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
 }
 
 async function findExistingCandidateIdForContext(settings, context, runId, actionId) {
-  const linkedInHandle = String(context?.linkedInHandle || "").trim();
-  const linkedinUrl = String(context?.linkedinUrl || "").trim();
-  if (!linkedInHandle && !linkedinUrl) {
-    return "";
-  }
-  const data = await callBackend(
-    "/api/candidates/find-by-linkedin",
-    {
-      linkedInHandle,
-      linkedInUrl: linkedinUrl
-    },
-    settings,
-    { actionId, runId, step: "findCandidateForEmailPrefetch" }
-  );
-  return String(data?.candidate?.id || "").trim();
+  const existing = await findCandidateByContext(settings, context, {
+    actionId,
+    runId,
+    step: "findExistingCandidateForContext"
+  });
+  return String(existing?.id || "").trim();
 }
 
 async function refreshCandidateEmailsForContext(settings, context, runId, options = {}) {
@@ -2616,6 +2843,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const limit = normalizeProjectLimit(message.limit);
         const forceRefresh = Boolean(message.forceRefresh);
         const preferCache = Boolean(message.preferCache);
+        const forceNewRefresh = Boolean(message.forceNewRefresh);
         const cache = await getProjectCache();
         let projects = Array.isArray(cache.projects) ? cache.projects : [];
         const hadCache = projects.length > 0;
@@ -2623,7 +2851,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const cacheFresh = isProjectCacheFresh(cache);
 
         if (forceRefresh) {
-          projects = await ensureProjectRefresh(settings, runId, limit);
+          projects = await ensureProjectRefresh(settings, runId, limit, { forceNew: forceNewRefresh });
         } else if (projects.length === 0) {
           if (preferCache) {
             ensureProjectRefresh(settings, runId, limit).catch(() => {});
@@ -2655,7 +2883,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             cacheFresh,
             cacheComplete,
             forceRefresh,
-            preferCache
+            preferCache,
+            forceNewRefresh
           }
         });
         sendResponse({ ok: true, projects: trimmed, runId });
@@ -2921,13 +3150,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const runId = message.runId || generateId();
         const limit = normalizeProjectLimit(message.limit);
         const forceRefresh = Boolean(message.forceRefresh);
+        const forceNewRefresh = Boolean(message.forceNewRefresh);
         const cache = await getProjectCache();
         if (!forceRefresh && cache.projects.length > 0 && isProjectCacheFresh(cache) && cache.isComplete) {
           sendResponse({ ok: true, skipped: true, reason: "cache_fresh" });
           return;
         }
-        await ensureProjectRefresh(settings, runId, limit);
-        sendResponse({ ok: true, skipped: false, forced: forceRefresh });
+        await ensureProjectRefresh(settings, runId, limit, { forceNew: forceNewRefresh });
+        sendResponse({ ok: true, skipped: false, forced: forceRefresh, forceNewRefresh });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));
     return true;
