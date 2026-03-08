@@ -3,7 +3,6 @@
 let cachedSettings = null;
 let toastContainer = null;
 let contextRecoveryTriggered = false;
-const PROJECT_PICKER_RENDER_LIMIT = 100;
 const ASHBY_JOB_PICKER_RENDER_LIMIT = 100;
 const CUSTOM_FIELD_KEYS_PER_PAGE = 26;
 const CUSTOM_FIELD_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
@@ -572,14 +571,16 @@ function runAction(actionId, context) {
   });
 }
 
-function listProjects(query, runId) {
+function listProjects(query, runId, options = {}) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
       {
         type: "LIST_PROJECTS",
         query: String(query || ""),
         limit: 0,
-        runId: runId || ""
+        runId: runId || "",
+        forceRefresh: Boolean(options.forceRefresh),
+        preferCache: Boolean(options.preferCache)
       },
       (response) => {
         if (chrome.runtime.lastError) {
@@ -983,7 +984,7 @@ function prefetchPickersForCurrentProfile() {
     return;
   }
   lastPrefetchedProfileContextKey = contextKey;
-  prefetchProjects(generateRunId()).catch(() => {});
+  prefetchProjects(generateRunId(), { forceRefresh: true }).catch(() => {});
   prefetchSequences(generateRunId()).catch(() => {});
   warmCustomFieldsForContext(profileContext, generateRunId(), {
     preferCache: true,
@@ -1087,20 +1088,19 @@ function filterProjectsByQuery(projects, query) {
   const normalized = Array.isArray(projects) ? projects : [];
   const normalizedQuery = String(query || "").trim().toLowerCase();
   if (!normalizedQuery) {
-    return normalized.slice(0, PROJECT_PICKER_RENDER_LIMIT);
+    return normalized;
   }
-  return normalized
-    .filter((project) => String(project?.name || "").toLowerCase().includes(normalizedQuery))
-    .slice(0, PROJECT_PICKER_RENDER_LIMIT);
+  return normalized.filter((project) => String(project?.name || "").toLowerCase().includes(normalizedQuery));
 }
 
-function prefetchProjects(runId) {
+function prefetchProjects(runId, options = {}) {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(
       {
         type: "PREFETCH_PROJECTS",
         runId: runId || "",
-        limit: 0
+        limit: 0,
+        forceRefresh: Boolean(options.forceRefresh)
       },
       () => {
         if (chrome.runtime.lastError) {
@@ -4927,8 +4927,10 @@ async function showProjectPicker(runId, linkedinUrl) {
     let loading = true;
     let loadError = "";
     const startedAt = Date.now();
+    let active = true;
 
     function cleanup() {
+      active = false;
       overlay.remove();
     }
 
@@ -5081,8 +5083,47 @@ async function showProjectPicker(runId, linkedinUrl) {
       link: linkedinUrl
     });
 
-    listProjects("", runId)
+    listProjects("", runId, { preferCache: true })
       .then(async (projects) => {
+        if (!active) {
+          return;
+        }
+        const cachedProjects = projects.filter((project) => !project.archived);
+        if (cachedProjects.length > 0) {
+          allProjects = cachedProjects;
+          loading = false;
+          loadError = "";
+          renderList();
+        }
+        await logEvent({
+          source: "extension.content",
+          event: "project_picker.cache_loaded",
+          actionId: ACTIONS.ADD_TO_PROJECT,
+          runId,
+          message: `Loaded ${cachedProjects.length} cached projects for picker.`,
+          link: linkedinUrl
+        });
+      })
+      .catch(async (_error) => {
+        if (!active) {
+          return;
+        }
+        await logEvent({
+          source: "extension.content",
+          level: "warn",
+          event: "project_picker.cache_load_failed",
+          actionId: ACTIONS.ADD_TO_PROJECT,
+          runId,
+          message: "Could not load cached projects for picker.",
+          link: linkedinUrl
+        });
+      });
+
+    listProjects("", runId, { forceRefresh: true })
+      .then(async (projects) => {
+        if (!active) {
+          return;
+        }
         allProjects = projects.filter((project) => !project.archived);
         loading = false;
         loadError = "";
@@ -5100,20 +5141,28 @@ async function showProjectPicker(runId, linkedinUrl) {
         });
       })
       .catch(async (error) => {
-        loading = false;
-        loadError = error.message || "Failed to load project list.";
-        renderList();
-        showToast(loadError, true);
+        if (!active) {
+          return;
+        }
+        const message = error.message || "Failed to refresh project list.";
+        const usedCachedProjects = allProjects.length > 0;
+        if (!usedCachedProjects) {
+          loading = false;
+          loadError = message;
+          renderList();
+          showToast(message, true);
+        }
         await logEvent({
           source: "extension.content",
-          level: "error",
+          level: usedCachedProjects ? "warn" : "error",
           event: "project_picker.load_failed",
           actionId: ACTIONS.ADD_TO_PROJECT,
           runId,
-          message: loadError,
+          message,
           link: linkedinUrl,
           details: {
-            durationMs: Date.now() - startedAt
+            durationMs: Date.now() - startedAt,
+            usedCachedProjects
           }
         });
       });
