@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = {
   backendBaseUrl: "http://localhost:8787",
   backendSharedToken: "",
   createdByUserId: "",
+  createdByUserEmail: "",
   defaultProjectId: "",
   defaultSequenceId: "",
   customFieldId: "",

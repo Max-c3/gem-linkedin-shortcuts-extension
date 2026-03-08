@@ -30,6 +30,7 @@ const ORG_DEFAULT_SETTINGS_KEYS = [
   "backendBaseUrl",
   "backendSharedToken",
   "createdByUserId",
+  "createdByUserEmail",
   "defaultProjectId",
   "defaultSequenceId",
   "customFieldId",
@@ -1004,15 +1005,24 @@ function ensureProjectRefresh(settings, runId, limit = PROJECT_CACHE_LIMIT) {
   return projectRefreshPromise;
 }
 
+function getCreatedByIdentity(settings = {}, context = {}) {
+  const userId = String(context?.createdByUserId || settings?.createdByUserId || "").trim();
+  const userEmail = String(context?.createdByUserEmail || settings?.createdByUserEmail || "")
+    .trim()
+    .toLowerCase();
+  return { userId, userEmail };
+}
+
 async function refreshSequencesFromBackend(settings, runId, limit = SEQUENCE_CACHE_LIMIT, actionId = ACTIONS.SEND_SEQUENCE) {
   const normalizedLimit = normalizeSequenceLimit(limit);
-  const userId = String(settings.createdByUserId || "").trim();
+  const { userId, userEmail } = getCreatedByIdentity(settings);
   const data = await callBackend(
     "/api/sequences/list",
     {
       query: "",
       limit: normalizedLimit,
-      userId
+      userId,
+      userEmail
     },
     settings,
     { actionId, runId, step: "listSequences" }
@@ -1028,6 +1038,7 @@ async function refreshSequencesFromBackend(settings, runId, limit = SEQUENCE_CAC
     details: {
       limit: normalizedLimit,
       userId,
+      userEmail,
       rawCount: rawSequences.length,
       dedupedCount: sequences.length
     }
@@ -1359,12 +1370,13 @@ async function callBackend(path, payload, settings, audit = {}) {
       response.status === 401 && /unauthorized/i.test(String(backendMessage))
         ? "Unauthorized. Check BACKEND_SHARED_TOKEN in backend/.env and extension Options."
         : backendMessage;
+    const surfacedError = `${errorMessage} (Backend: ${base})`;
     logEvent(settings, {
       level: "error",
       event: "backend.call.error",
       actionId: audit.actionId,
       runId: audit.runId,
-      message: errorMessage,
+      message: surfacedError,
       link: `${base}${path}`,
       durationMs,
       details: {
@@ -1373,7 +1385,7 @@ async function callBackend(path, payload, settings, audit = {}) {
         response: parsed
       }
     });
-    throw new Error(errorMessage);
+    throw new Error(surfacedError);
   }
 
   logEvent(settings, {
@@ -1456,6 +1468,7 @@ async function ensureCandidate(settings, context, audit) {
   }
 
   const names = splitProfileName(context.profileName);
+  const { userId: createdByUserId, userEmail: createdByUserEmail } = getCreatedByIdentity(settings, context);
   const created = await callBackend(
     "/api/candidates/create-from-linkedin",
     {
@@ -1464,7 +1477,8 @@ async function ensureCandidate(settings, context, audit) {
       profileUrl: linkedInUrl || context.linkedinUrl,
       firstName: names.firstName,
       lastName: names.lastName,
-      createdByUserId: context.createdByUserId || settings.createdByUserId
+      createdByUserId,
+      createdByUserEmail
     },
     settings,
     { ...audit, step: "createCandidate" }
@@ -1748,7 +1762,7 @@ async function runAction(actionId, context, settings, meta = {}) {
 
   if (actionId === ACTIONS.ADD_TO_PROJECT) {
     const projectId = context.projectId || settings.defaultProjectId;
-    const userId = context.createdByUserId || settings.createdByUserId || "";
+    const { userId, userEmail } = getCreatedByIdentity(settings, context);
     if (!projectId) {
       const message = "Missing project ID. Set a default or enter one at runtime.";
       logEvent(settings, {
@@ -1767,7 +1781,8 @@ async function runAction(actionId, context, settings, meta = {}) {
       {
         projectId,
         candidateId: candidate.id,
-        userId
+        userId,
+        userEmail
       },
       settings,
       { ...audit, step: "addToProject" }
@@ -1784,7 +1799,8 @@ async function runAction(actionId, context, settings, meta = {}) {
       details: {
         candidateId: candidate.id,
         projectId,
-        userId
+        userId,
+        userEmail
       }
     });
     return { ok: true, message, runId, link: candidate.weblink || "" };
@@ -1889,7 +1905,7 @@ async function runAction(actionId, context, settings, meta = {}) {
 
   if (actionId === ACTIONS.ADD_NOTE_TO_CANDIDATE) {
     const note = String(context.candidateNote || "").trim();
-    const userId = context.createdByUserId || settings.createdByUserId || "";
+    const { userId, userEmail } = getCreatedByIdentity(settings, context);
     if (!note) {
       const message = "Note is required.";
       logEvent(settings, {
@@ -1909,7 +1925,8 @@ async function runAction(actionId, context, settings, meta = {}) {
       {
         candidateId: candidate.id,
         note,
-        userId
+        userId,
+        userEmail
       },
       settings,
       { ...audit, step: "addCandidateNote" }
@@ -1925,6 +1942,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       details: {
         candidateId: candidate.id,
         userId,
+        userEmail,
         noteLength: note.length,
         noteId: String(data?.note?.id || "")
       }
@@ -1935,7 +1953,7 @@ async function runAction(actionId, context, settings, meta = {}) {
   if (actionId === ACTIONS.SET_REMINDER) {
     const reminderDueDate = String(context.reminderDueDate || "").trim();
     const reminderNote = String(context.reminderNote || "").trim();
-    const userId = context.createdByUserId || settings.createdByUserId || "";
+    const { userId, userEmail } = getCreatedByIdentity(settings, context);
 
     if (!reminderDueDate) {
       const message = "Missing reminder due date.";
@@ -1971,7 +1989,8 @@ async function runAction(actionId, context, settings, meta = {}) {
         candidateId: candidate.id,
         date: reminderDueDate,
         note: reminderNote,
-        userId
+        userId,
+        userEmail
       },
       settings,
       { ...audit, step: "setReminder" }
@@ -1989,6 +2008,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         candidateId: candidate.id,
         dueDate: reminderDueDate,
         userId,
+        userEmail,
         hasNote: Boolean(reminderNote)
       }
     });
@@ -2594,14 +2614,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const actionId = ACTIONS.ADD_TO_PROJECT;
         const query = String(message.query || "").trim();
         const limit = normalizeProjectLimit(message.limit);
+        const forceRefresh = Boolean(message.forceRefresh);
+        const preferCache = Boolean(message.preferCache);
         const cache = await getProjectCache();
         let projects = Array.isArray(cache.projects) ? cache.projects : [];
         const hadCache = projects.length > 0;
         const cacheComplete = Boolean(cache.isComplete);
         const cacheFresh = isProjectCacheFresh(cache);
 
-        if (projects.length === 0) {
+        if (forceRefresh) {
           projects = await ensureProjectRefresh(settings, runId, limit);
+        } else if (projects.length === 0) {
+          if (preferCache) {
+            ensureProjectRefresh(settings, runId, limit).catch(() => {});
+          } else {
+            projects = await ensureProjectRefresh(settings, runId, limit);
+          }
         } else if (!cacheFresh || !cacheComplete) {
           ensureProjectRefresh(settings, runId, limit).catch(() => {});
         }
@@ -2609,7 +2637,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const usageMap = await getProjectRecentUsage();
         let sorted = sortProjectsForPicker(projects, usageMap, query);
 
-        if (query && (sorted.length === 0 || !cacheComplete)) {
+        if (!forceRefresh && query && (sorted.length === 0 || !cacheComplete)) {
           const refreshed = await ensureProjectRefresh(settings, runId, limit);
           sorted = sortProjectsForPicker(refreshed, usageMap, query);
         }
@@ -2625,7 +2653,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             cacheCount: projects.length,
             fromCache: hadCache,
             cacheFresh,
-            cacheComplete
+            cacheComplete,
+            forceRefresh,
+            preferCache
           }
         });
         sendResponse({ ok: true, projects: trimmed, runId });
@@ -2727,8 +2757,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const pageSizeRaw = Number(message.pageSize);
         const pageSize =
           Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
-            ? Math.max(1, Math.min(Math.trunc(pageSizeRaw), 250))
-            : 250;
+            ? Math.max(1, Math.min(Math.trunc(pageSizeRaw), 100))
+            : 100;
         const email = String(message.email || "").trim();
         const data = await callBackend(
           "/api/users/list",
@@ -2890,13 +2920,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(async (settings) => {
         const runId = message.runId || generateId();
         const limit = normalizeProjectLimit(message.limit);
+        const forceRefresh = Boolean(message.forceRefresh);
         const cache = await getProjectCache();
-        if (cache.projects.length > 0 && isProjectCacheFresh(cache) && cache.isComplete) {
+        if (!forceRefresh && cache.projects.length > 0 && isProjectCacheFresh(cache) && cache.isComplete) {
           sendResponse({ ok: true, skipped: true, reason: "cache_fresh" });
           return;
         }
         await ensureProjectRefresh(settings, runId, limit);
-        sendResponse({ ok: true, skipped: false });
+        sendResponse({ ok: true, skipped: false, forced: forceRefresh });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));
     return true;

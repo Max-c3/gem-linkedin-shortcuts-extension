@@ -48,8 +48,8 @@ const GEM_API_BASE_URL = (process.env.GEM_API_BASE_URL || "https://api.gem.com")
 const ASHBY_API_KEY = process.env.ASHBY_API_KEY || "";
 const ASHBY_API_BASE_URL = (process.env.ASHBY_API_BASE_URL || "https://api.ashbyhq.com").replace(/\/$/, "");
 const BACKEND_SHARED_TOKEN = process.env.BACKEND_SHARED_TOKEN || "";
-const GEM_DEFAULT_USER_ID = process.env.GEM_DEFAULT_USER_ID || "";
-const GEM_DEFAULT_USER_EMAIL = process.env.GEM_DEFAULT_USER_EMAIL || "";
+const GEM_DEFAULT_USER_ID = String(process.env.GEM_DEFAULT_USER_ID || "").trim();
+const GEM_DEFAULT_USER_EMAIL = String(process.env.GEM_DEFAULT_USER_EMAIL || "").trim();
 const ASHBY_CREDITED_TO_USER_ID = String(process.env.ASHBY_CREDITED_TO_USER_ID || "").trim();
 const ASHBY_CREDITED_TO_USER_EMAIL = String(
   process.env.ASHBY_CREDITED_TO_USER_EMAIL || GEM_DEFAULT_USER_EMAIL || ""
@@ -905,25 +905,119 @@ async function findCandidateByLinkedIn(payload, audit) {
   return { candidate: null };
 }
 
-async function resolveCreatedByUserId(explicitUserId, audit) {
-  if (explicitUserId) {
-    return explicitUserId;
-  }
-  if (GEM_DEFAULT_USER_ID) {
-    return GEM_DEFAULT_USER_ID;
-  }
-  if (!GEM_DEFAULT_USER_EMAIL) {
+function normalizeUserEmail(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+async function resolveUserIdFromGemEmail(email, audit) {
+  const normalizedEmail = normalizeUserEmail(email);
+  if (!normalizedEmail) {
     return "";
   }
   const users = await gemRequest(
     "/v0/users",
     {
-      query: { email: GEM_DEFAULT_USER_EMAIL, page_size: 1 }
+      query: { email: normalizedEmail, page_size: 20 }
     },
     audit
   );
-  const user = Array.isArray(users) ? users[0] : null;
-  return user?.id || "";
+  if (!Array.isArray(users) || users.length === 0) {
+    return "";
+  }
+
+  const matched = users.find(
+    (user) => normalizeUserEmail(user?.email) === normalizedEmail && String(user?.id || "").trim()
+  );
+  if (matched?.id) {
+    return String(matched.id).trim();
+  }
+  return String(users[0]?.id || "").trim();
+}
+
+async function resolveCreatedByUserId(explicitUserId, explicitUserEmail, audit) {
+  const directUserId = String(explicitUserId || "").trim();
+  if (directUserId) {
+    return directUserId;
+  }
+  const directUserEmail = normalizeUserEmail(explicitUserEmail);
+  if (directUserEmail) {
+    const resolvedFromEmail = await resolveUserIdFromGemEmail(directUserEmail, audit);
+    if (resolvedFromEmail) {
+      return resolvedFromEmail;
+    }
+  }
+  if (GEM_DEFAULT_USER_ID) {
+    return GEM_DEFAULT_USER_ID;
+  }
+  const defaultEmail = normalizeUserEmail(GEM_DEFAULT_USER_EMAIL);
+  if (!defaultEmail) {
+    return "";
+  }
+  return resolveUserIdFromGemEmail(defaultEmail, audit);
+}
+
+function extractCandidateOwnerUserId(candidate) {
+  return String(
+    candidate?.created_by ||
+      candidate?.createdBy ||
+      candidate?.user_id ||
+      candidate?.userId ||
+      candidate?.owner_id ||
+      candidate?.ownerId ||
+      ""
+  ).trim();
+}
+
+async function resolveUserIdWithCandidateFallback({ explicitUserId, explicitUserEmail, candidateId, audit, purpose }) {
+  const resolved = await resolveCreatedByUserId(explicitUserId, explicitUserEmail, audit);
+  if (resolved) {
+    return resolved;
+  }
+
+  const normalizedCandidateId = String(candidateId || "").trim();
+  if (!normalizedCandidateId) {
+    return "";
+  }
+
+  try {
+    const candidate = await gemRequest(`/v0/candidates/${normalizedCandidateId}`, {}, audit);
+    const ownerUserId = extractCandidateOwnerUserId(candidate);
+    if (ownerUserId) {
+      logEvent({
+        source: "backend",
+        event: "user_id.fallback.candidate_owner",
+        message: `Resolved ${purpose} from candidate owner.`,
+        requestId: audit.requestId,
+        route: audit.route,
+        runId: audit.runId,
+        actionId: audit.actionId,
+        details: {
+          candidateId: normalizedCandidateId,
+          userId: ownerUserId
+        }
+      });
+      return ownerUserId;
+    }
+  } catch (error) {
+    logEvent({
+      level: "warn",
+      source: "backend",
+      event: "user_id.fallback.candidate_owner_failed",
+      message: `Could not resolve ${purpose} from candidate owner.`,
+      requestId: audit.requestId,
+      route: audit.route,
+      runId: audit.runId,
+      actionId: audit.actionId,
+      details: {
+        candidateId: normalizedCandidateId,
+        error: error?.message || "unknown_error"
+      }
+    });
+  }
+
+  return "";
 }
 
 function normalizeIsoDate(raw) {
@@ -956,10 +1050,10 @@ async function createCandidateFromLinkedIn(payload, audit) {
     throw new Error("linkedInHandle or linkedInUrl is required.");
   }
 
-  const createdBy = await resolveCreatedByUserId(payload.createdByUserId, audit);
+  const createdBy = await resolveCreatedByUserId(payload.createdByUserId, payload.createdByUserEmail, audit);
   if (!createdBy) {
     throw new Error(
-      "Gem requires created_by. Set createdByUserId in extension options or GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env."
+      "Gem requires created_by. Set createdByUserEmail or createdByUserId in extension options, or set GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env. Also verify the extension backend URL points to the backend where these env vars are configured."
     );
   }
 
@@ -1003,7 +1097,7 @@ async function addCandidateToProject(payload, audit) {
   if (!projectId || !candidateId) {
     throw new Error("projectId and candidateId are required.");
   }
-  const userId = String(payload.userId || "").trim();
+  const userId = await resolveCreatedByUserId(payload.userId, payload.userEmail, audit);
 
   const baseBody = { candidate_ids: [candidateId] };
 
@@ -1317,10 +1411,16 @@ async function addCandidateNote(payload, audit) {
     throw new Error("Candidate note must be 10000 characters or less.");
   }
 
-  const userId = await resolveCreatedByUserId(payload.userId, audit);
+  const userId = await resolveUserIdWithCandidateFallback({
+    explicitUserId: payload.userId,
+    explicitUserEmail: payload.userEmail,
+    candidateId,
+    audit,
+    purpose: "note.user_id"
+  });
   if (!userId) {
     throw new Error(
-      "Gem requires note.user_id. Set createdByUserId in extension options or GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env."
+      "Gem requires note.user_id. Set createdByUserEmail or createdByUserId in extension options, or set GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env. Also verify the extension backend URL points to the backend where these env vars are configured."
     );
   }
 
@@ -1355,10 +1455,16 @@ async function setCandidateDueDate(payload, audit) {
     throw new Error("date is required in YYYY-MM-DD format.");
   }
 
-  const userId = await resolveCreatedByUserId(payload.userId, audit);
+  const userId = await resolveUserIdWithCandidateFallback({
+    explicitUserId: payload.userId,
+    explicitUserEmail: payload.userEmail,
+    candidateId,
+    audit,
+    purpose: "due_date.user_id"
+  });
   if (!userId) {
     throw new Error(
-      "Gem requires due_date.user_id. Set createdByUserId in extension options or GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env."
+      "Gem requires due_date.user_id. Set createdByUserEmail or createdByUserId in extension options, or set GEM_DEFAULT_USER_ID/GEM_DEFAULT_USER_EMAIL in backend env. Also verify the extension backend URL points to the backend where these env vars are configured."
     );
   }
 
@@ -1609,7 +1715,7 @@ async function listSequences(payload, audit) {
       : 0;
   const scanTarget = requestedLimit || SEQUENCES_SCAN_MAX;
   const query = String(payload.query || "").trim();
-  const sequenceOwnerUserId = await resolveCreatedByUserId(payload.userId, audit);
+  const sequenceOwnerUserId = await resolveCreatedByUserId(payload.userId, payload.userEmail, audit);
   const pageSize = 100;
   const maxPages = Math.max(1, Math.ceil(scanTarget / pageSize));
   let aggregated = [];
@@ -1662,9 +1768,14 @@ async function listSequences(payload, audit) {
 }
 
 async function listUsers(payload, audit) {
+  const pageSizeRaw = Number(payload.pageSize);
+  const pageSize =
+    Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
+      ? Math.max(1, Math.min(Math.trunc(pageSizeRaw), 100))
+      : 20;
   const query = omitUndefined({
     email: payload.email,
-    page_size: payload.pageSize || 20
+    page_size: pageSize
   });
   const users = await gemRequest("/v0/users", { query }, audit);
   return { users };

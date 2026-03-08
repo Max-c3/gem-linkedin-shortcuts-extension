@@ -10,6 +10,7 @@ const clearLocalLogsBtn = document.getElementById("clear-local-logs");
 const logsMetaEl = document.getElementById("logs-meta");
 const logsListEl = document.getElementById("logs-list");
 const createdByUserIdInput = document.getElementById("createdByUserId");
+const createdByUserEmailInput = document.getElementById("createdByUserEmail");
 const gemUserSelectEl = document.getElementById("gemUserSelect");
 const loadGemUsersBtn = document.getElementById("load-gem-users");
 
@@ -60,6 +61,7 @@ function readInputs() {
     backendBaseUrl: document.getElementById("backendBaseUrl").value.trim(),
     backendSharedToken: document.getElementById("backendSharedToken").value.trim(),
     createdByUserId: document.getElementById("createdByUserId").value.trim(),
+    createdByUserEmail: document.getElementById("createdByUserEmail").value.trim(),
     defaultProjectId: document.getElementById("defaultProjectId").value.trim(),
     defaultSequenceId: document.getElementById("defaultSequenceId").value.trim(),
     customFieldId: document.getElementById("customFieldId").value.trim(),
@@ -89,6 +91,7 @@ function writeInputs(settings) {
   document.getElementById("backendBaseUrl").value = settings.backendBaseUrl || "";
   document.getElementById("backendSharedToken").value = settings.backendSharedToken || "";
   document.getElementById("createdByUserId").value = settings.createdByUserId || "";
+  document.getElementById("createdByUserEmail").value = settings.createdByUserEmail || "";
   document.getElementById("defaultProjectId").value = settings.defaultProjectId || "";
   document.getElementById("defaultSequenceId").value = settings.defaultSequenceId || "";
   document.getElementById("customFieldId").value = settings.customFieldId || "";
@@ -109,7 +112,7 @@ function writeInputs(settings) {
   setShortcutValue("editSequence", settings.shortcuts.editSequence || "");
   // Retired for now:
   // setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
-  syncUserPickerFromCurrentId();
+  syncUserPickerFromCurrentIdentity();
 }
 
 function validateSettings(settings) {
@@ -195,6 +198,9 @@ function buildGemUserLabel(user) {
 
 function repopulateGemUserPicker(users = []) {
   const currentUserId = String(createdByUserIdInput.value || "").trim();
+  const currentUserEmail = String(createdByUserEmailInput.value || "")
+    .trim()
+    .toLowerCase();
   const normalized = normalizeGemUsers(users);
   gemUserSelectEl.innerHTML = "";
 
@@ -204,13 +210,21 @@ function repopulateGemUserPicker(users = []) {
   gemUserSelectEl.appendChild(placeholder);
 
   let hasCurrent = false;
+  let emailMatchedUserId = "";
   for (const user of normalized) {
     const option = document.createElement("option");
     option.value = user.id;
     option.textContent = buildGemUserLabel(user);
+    option.dataset.email = String(user.email || "").trim();
     gemUserSelectEl.appendChild(option);
-    if (user.id === currentUserId) {
+    const userEmailLower = String(user.email || "").trim().toLowerCase();
+    const matchesById = Boolean(currentUserId) && user.id === currentUserId;
+    const matchesByEmail = Boolean(currentUserEmail) && userEmailLower === currentUserEmail;
+    if (matchesById || matchesByEmail) {
       hasCurrent = true;
+      if (!emailMatchedUserId && matchesByEmail) {
+        emailMatchedUserId = user.id;
+      }
     }
   }
 
@@ -223,25 +237,42 @@ function repopulateGemUserPicker(users = []) {
 
   if (currentUserId) {
     gemUserSelectEl.value = currentUserId;
+  } else if (emailMatchedUserId) {
+    gemUserSelectEl.value = emailMatchedUserId;
   } else {
     gemUserSelectEl.value = "";
   }
 }
 
-function syncUserPickerFromCurrentId() {
+function syncUserPickerFromCurrentIdentity() {
   if (!gemUsersLoaded) {
     repopulateGemUserPicker([]);
     return;
   }
   const options = Array.from(gemUserSelectEl.options || []);
   const currentUserId = String(createdByUserIdInput.value || "").trim();
+  const currentUserEmail = String(createdByUserEmailInput.value || "")
+    .trim()
+    .toLowerCase();
   if (!currentUserId) {
+    if (currentUserEmail) {
+      const matchedByEmail = options.find(
+        (option) => String(option.dataset?.email || "").trim().toLowerCase() === currentUserEmail
+      );
+      if (matchedByEmail) {
+        gemUserSelectEl.value = matchedByEmail.value;
+        return;
+      }
+    }
     gemUserSelectEl.value = "";
     return;
   }
   const matched = options.find((option) => option.value === currentUserId);
   if (matched) {
     gemUserSelectEl.value = currentUserId;
+    if (!currentUserEmail && String(matched.dataset?.email || "").trim()) {
+      createdByUserEmailInput.value = String(matched.dataset.email).trim();
+    }
     return;
   }
   const fallback = document.createElement("option");
@@ -263,7 +294,7 @@ async function loadGemUsers(options = {}) {
 
   loadGemUsersBtn.disabled = true;
   try {
-    const response = await sendRuntimeMessage({ type: "LIST_GEM_USERS", pageSize: 250 });
+    const response = await sendRuntimeMessage({ type: "LIST_GEM_USERS", pageSize: 100 });
     if (!response?.ok) {
       throw new Error(response?.message || "Could not load Gem users.");
     }
@@ -521,12 +552,21 @@ gemUserSelectEl.addEventListener("change", () => {
   const value = String(gemUserSelectEl.value || "").trim();
   if (value) {
     createdByUserIdInput.value = value;
+    const selectedOption = gemUserSelectEl.options[gemUserSelectEl.selectedIndex];
+    const selectedEmail = String(selectedOption?.dataset?.email || "").trim();
+    if (selectedEmail) {
+      createdByUserEmailInput.value = selectedEmail;
+    }
     setStatus("Selected Gem user. Save to apply.");
   }
 });
 
 createdByUserIdInput.addEventListener("input", () => {
-  syncUserPickerFromCurrentId();
+  syncUserPickerFromCurrentIdentity();
+});
+
+createdByUserEmailInput.addEventListener("input", () => {
+  syncUserPickerFromCurrentIdentity();
 });
 
 document.addEventListener("keydown", handleShortcutRecord, true);

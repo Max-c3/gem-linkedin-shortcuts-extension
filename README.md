@@ -29,7 +29,7 @@ This is the easiest path if you want users to click a link, install once, and us
 3. Set extension defaults in `src/org-defaults.json`:
    - `backendBaseUrl`: your hosted backend URL
    - `backendSharedToken`: optional (only if backend enforces `BACKEND_SHARED_TOKEN`)
-   - leave `createdByUserId` empty so users can pick their own Gem account
+   - leave `createdByUserId`/`createdByUserEmail` empty so users can pick their own Gem account
    - optional defaults for project/sequence/custom field IDs
 4. Ensure `manifest.json` includes your backend origin in `host_permissions`.
 5. Publish in Chrome Web Store as unlisted/private and share the install link.
@@ -86,7 +86,7 @@ To get it to work, set at least:
 - `GEM_API_KEY`
 - `ASHBY_API_KEY`
 - `BACKEND_SHARED_TOKEN` only if you want token-gated backend routes
-- If no `GEM_DEFAULT_USER_ID`/`GEM_DEFAULT_USER_EMAIL` is set, each user must pick themselves in extension Options (`Load Users` -> select user -> Save).
+- If no `GEM_DEFAULT_USER_ID`/`GEM_DEFAULT_USER_EMAIL` is set, each user must pick themselves in extension Options (`Load Users` -> select user -> Save). This fills both user ID and email; email alone is sufficient.
 
 ### 3. Start backend
 

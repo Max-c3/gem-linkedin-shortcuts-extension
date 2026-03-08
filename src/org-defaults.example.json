@@ -2,6 +2,7 @@
   "backendBaseUrl": "",
   "backendSharedToken": "",
   "createdByUserId": "",
+  "createdByUserEmail": "",
   "defaultProjectId": "",
   "defaultSequenceId": "",
   "customFieldId": "",

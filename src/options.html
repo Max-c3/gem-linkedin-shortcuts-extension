@@ -33,11 +33,15 @@
         <section>
           <h2>Defaults</h2>
           <p class="hint">
-            `Created By User ID` is used for Gem candidate creation, project attribution, and reminder assignee defaults unless backend env provides a default.
+            `Created By User Email` is sufficient for Gem candidate creation, project attribution, notes, and reminders. User ID is optional.
           </p>
           <label class="row">
             <span>Created By User ID</span>
             <input id="createdByUserId" type="text" />
+          </label>
+          <label class="row">
+            <span>Created By User Email</span>
+            <input id="createdByUserEmail" type="email" autocomplete="off" />
           </label>
           <label class="row">
             <span>Gem User (recommended)</span>
@@ -48,7 +52,7 @@
               <button id="load-gem-users" type="button" class="secondary">Load Users</button>
             </div>
           </label>
-          <p class="hint">Loads Gem users from backend. Selecting a user fills `Created By User ID`.</p>
+          <p class="hint">Loads Gem users from backend. Selecting a user fills both `Created By User ID` and `Created By User Email`.</p>
           <label class="row">
             <span>Project ID</span>
             <input id="defaultProjectId" type="text" />
