@@ -1,6 +1,7 @@
 "use strict";
 
 const ACTIONS = {
+  GEM_ACTIONS: "gemActions",
   ADD_PROSPECT: "addProspect",
   ADD_TO_PROJECT: "addToProject",
   ADD_NOTE_TO_CANDIDATE: "addNoteToCandidate",
@@ -16,6 +17,18 @@ const ACTIONS = {
   // VIEW_ACTIVITY_FEED: "viewActivityFeed"
 };
 
+const LINKEDIN_NATIVE_SHORTCUT_IDS = [
+  "linkedinConnect",
+  "linkedinInviteSendWithoutNote",
+  "linkedinInviteAddNote",
+  "linkedinViewInRecruiter",
+  "linkedinMessageProfile",
+  "linkedinContactInfo",
+  "linkedinExpandSeeMore",
+  "linkedinRecruiterTemplate",
+  "linkedinRecruiterSend"
+];
+
 const DEFAULT_SETTINGS = {
   enabled: true,
   backendBaseUrl: "http://localhost:8787",
@@ -29,6 +42,7 @@ const DEFAULT_SETTINGS = {
   activityUrlTemplate: "",
   sequenceComposeUrlTemplate: "https://www.gem.com/sequence/{{sequenceId}}/edit/stages",
   shortcuts: {
+    gemActions: "Cmd+K",
     addProspect: "Cmd+Option+1",
     addToProject: "Cmd+Option+2",
     uploadToAshby: "Cmd+Option+3",
@@ -41,9 +55,22 @@ const DEFAULT_SETTINGS = {
     // viewActivityFeed: "<unassigned>",
     setReminder: "Cmd+Option+9",
     sendSequence: "Cmd+Option+0",
-    editSequence: "Cmd+Control+Option+1"
+    editSequence: "Cmd+Control+Option+1",
+    linkedinConnect: "Cmd+Option+Z",
+    linkedinInviteSendWithoutNote: "W",
+    linkedinInviteAddNote: "N",
+    linkedinViewInRecruiter: "R",
+    linkedinMessageProfile: "M",
+    linkedinContactInfo: "C",
+    linkedinExpandSeeMore: "Option+A",
+    linkedinRecruiterTemplate: "T",
+    linkedinRecruiterSend: "Option+S"
   }
 };
+
+function shortcutCanOmitModifier(shortcutId) {
+  return LINKEDIN_NATIVE_SHORTCUT_IDS.includes(String(shortcutId || "").trim());
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);

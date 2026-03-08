@@ -299,7 +299,7 @@ function validateShortcutMap(shortcuts) {
     if (!shortcut) {
       throw new Error(`Shortcut missing for ${actionId}.`);
     }
-    if (!shortcutHasModifier(shortcut)) {
+    if (!shortcutCanOmitModifier(actionId) && !shortcutHasModifier(shortcut)) {
       throw new Error(`Shortcut for ${actionId} must include a modifier key.`);
     }
     if (seen.has(shortcut)) {
@@ -311,31 +311,21 @@ function validateShortcutMap(shortcuts) {
 
 function broadcastSettingsToLinkedInTabs(settings) {
   return new Promise((resolve) => {
-    chrome.tabs.query(
-      {
-        url: [
-          "https://www.linkedin.com/*",
-          "https://www.gem.com/*",
-          "https://app.gem.com/*",
-          "https://github.com/*"
-        ]
-      },
-      (tabs) => {
-        if (chrome.runtime.lastError || !Array.isArray(tabs) || tabs.length === 0) {
-          resolve();
-          return;
-        }
-        let remaining = tabs.length;
-        for (const tab of tabs) {
-          chrome.tabs.sendMessage(tab.id, { type: "SETTINGS_UPDATED", settings }, () => {
-            remaining -= 1;
-            if (remaining <= 0) {
-              resolve();
-            }
-          });
-        }
+    chrome.tabs.query({}, (tabs) => {
+      if (chrome.runtime.lastError || !Array.isArray(tabs) || tabs.length === 0) {
+        resolve();
+        return;
       }
-    );
+      let remaining = tabs.length;
+      for (const tab of tabs) {
+        chrome.tabs.sendMessage(tab.id, { type: "SETTINGS_UPDATED", settings }, () => {
+          remaining -= 1;
+          if (remaining <= 0) {
+            resolve();
+          }
+        });
+      }
+    });
   });
 }
 
@@ -1538,6 +1528,92 @@ function buildAdjacentTabOptions(url, meta = {}, overrides = {}) {
     options.active = overrides.active;
   }
   return options;
+}
+
+function isWwwGemTabUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) {
+    return false;
+  }
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" && parsed.hostname === "www.gem.com";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function slugifyGemProjectName(name) {
+  return String(name || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
+function buildGemProjectUrl(projectId, projectName = "") {
+  const id = String(projectId || "").trim();
+  if (!id) {
+    return "";
+  }
+  const slug = slugifyGemProjectName(projectName);
+  const segment = slug ? `${slug}--${id}` : id;
+  return `https://www.gem.com/projects/${segment}`;
+}
+
+function normalizeSourceTabMeta(sender, meta = {}) {
+  const tab = sender?.tab || null;
+  const normalized = { ...(meta || {}) };
+  if (!tab) {
+    return normalized;
+  }
+  if (Number.isInteger(tab.id)) {
+    normalized.sourceTabId = tab.id;
+  }
+  if (Number.isInteger(tab.index)) {
+    normalized.sourceTabIndex = tab.index;
+  }
+  if (Number.isInteger(tab.windowId)) {
+    normalized.sourceWindowId = tab.windowId;
+  }
+  if (typeof tab.url === "string" && tab.url) {
+    normalized.sourceTabUrl = tab.url;
+  }
+  return normalized;
+}
+
+async function openGemNavigationTarget(url, meta = {}, options = {}) {
+  const rawUrl = String(url || "").trim();
+  if (!rawUrl) {
+    throw new Error("Missing Gem navigation URL.");
+  }
+
+  const openInBackground = Boolean(options.openInBackground);
+  const shouldReuseSourceTab = !openInBackground && isWwwGemTabUrl(meta.sourceTabUrl) && Number.isInteger(meta.sourceTabId);
+  if (shouldReuseSourceTab) {
+    const updated = await chrome.tabs.update(meta.sourceTabId, {
+      url: rawUrl,
+      active: true
+    });
+    return {
+      mode: "same_tab",
+      tabId: Number.isInteger(updated?.id) ? updated.id : meta.sourceTabId,
+      url: rawUrl
+    };
+  }
+
+  const created = await chrome.tabs.create(
+    buildAdjacentTabOptions(rawUrl, meta, {
+      active: !openInBackground
+    })
+  );
+  return {
+    mode: openInBackground ? "background_tab" : "new_tab",
+    tabId: Number.isInteger(created?.id) ? created.id : 0,
+    url: rawUrl
+  };
 }
 
 async function callBackend(path, payload, settings, audit = {}) {
@@ -2799,7 +2875,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!shortcut) {
           throw new Error("Shortcut is required.");
         }
-        if (!shortcutHasModifier(shortcut)) {
+        if (!shortcutCanOmitModifier(shortcutId) && !shortcutHasModifier(shortcut)) {
           throw new Error("Shortcut must include a modifier key.");
         }
 
@@ -2831,17 +2907,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "RUN_ACTION") {
     getSettings()
       .then(async (settings) => {
-        const tab = sender?.tab || null;
-        const sourceTabMeta =
-          tab && Number.isInteger(tab.index)
-            ? {
-                sourceTabIndex: tab.index,
-                sourceWindowId: Number.isInteger(tab.windowId) ? tab.windowId : undefined
-              }
-            : {};
+        const sourceTabMeta = normalizeSourceTabMeta(sender, message.meta || {});
         try {
           return await runAction(message.actionId, message.context || {}, settings, {
-            ...(message.meta || {}),
             ...sourceTabMeta
           });
         } catch (error) {
@@ -2862,6 +2930,120 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "CREATE_GEM_PROJECT") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const actionId = ACTIONS.GEM_ACTIONS;
+        const payload = {
+          name: String(message.name || "").trim(),
+          description: String(message.description || "").trim(),
+          privacyType: String(message.privacyType || "").trim(),
+          userId: String(message.userId || settings.createdByUserId || "").trim(),
+          userEmail: String(message.userEmail || settings.createdByUserEmail || "").trim()
+        };
+        const data = await callBackend("/api/projects/create", payload, settings, {
+          actionId,
+          runId,
+          step: "createProject"
+        });
+        const project = data?.project || {};
+        sendResponse({
+          ok: true,
+          runId,
+          message: data?.message || "Created project.",
+          project: {
+            id: String(project.id || ""),
+            name: String(project.name || ""),
+            privacyType: String(project.privacyType || ""),
+            description: String(project.description || ""),
+            url: String(project.url || buildGemProjectUrl(project.id, project.name) || "")
+          }
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "SEARCH_GEM_PEOPLE") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const actionId = ACTIONS.GEM_ACTIONS;
+        const query = String(message.query || "").trim();
+        const limitRaw = Number(message.limit);
+        const limit =
+          Number.isFinite(limitRaw) && limitRaw > 0 ? Math.max(1, Math.min(Math.trunc(limitRaw), 200)) : 25;
+        const data = await callBackend(
+          "/api/candidates/search",
+          {
+            query,
+            limit
+          },
+          settings,
+          {
+            actionId,
+            runId,
+            step: "searchPeople"
+          }
+        );
+        sendResponse({
+          ok: true,
+          runId,
+          candidates: Array.isArray(data?.candidates) ? data.candidates : []
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "OPEN_GEM_NAVIGATION") {
+    const meta = normalizeSourceTabMeta(sender, message.meta || {});
+    const runId = String(message.runId || meta.runId || "").trim() || generateId();
+    const actionId = String(message.actionId || ACTIONS.GEM_ACTIONS).trim();
+    getSettings()
+      .then(async (settings) => {
+        const url = String(message.url || "").trim();
+        if (!url) {
+          throw new Error("Missing URL to open.");
+        }
+        const result = await openGemNavigationTarget(url, meta, {
+          openInBackground: Boolean(message.openInBackground)
+        });
+        logEvent(settings, {
+          source: "extension.background",
+          event: "gem.navigation.opened",
+          actionId,
+          runId,
+          message:
+            result.mode === "same_tab"
+              ? "Opened Gem navigation in current tab."
+              : result.mode === "background_tab"
+                ? "Opened Gem navigation in background tab."
+                : "Opened Gem navigation in adjacent tab.",
+          link: result.url,
+          details: {
+            mode: result.mode,
+            tabId: result.tabId || 0,
+            sourceTabUrl: String(meta.sourceTabUrl || "")
+          }
+        });
+        sendResponse({
+          ok: true,
+          runId,
+          link: result.url,
+          message:
+            result.mode === "same_tab"
+              ? "Opened in current tab."
+              : result.mode === "background_tab"
+                ? "Opened in background tab."
+                : "Opened in new tab."
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message, runId }));
     return true;
   }
 

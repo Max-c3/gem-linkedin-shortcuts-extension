@@ -9,9 +9,19 @@ const CUSTOM_FIELD_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
 const SEQUENCE_PICKER_KEYS_PER_PAGE = 26;
 const SEQUENCE_PICKER_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
 const ACTIVITY_FEED_LIMIT = 150;
-const CONNECT_SHORTCUT = "Cmd+Option+Z";
-const INVITE_SEND_WITHOUT_NOTE_KEY = "w";
-const INVITE_ADD_NOTE_KEY = "n";
+const LINKEDIN_SHORTCUT_IDS = {
+  CONNECT: "linkedinConnect",
+  INVITE_SEND_WITHOUT_NOTE: "linkedinInviteSendWithoutNote",
+  INVITE_ADD_NOTE: "linkedinInviteAddNote",
+  VIEW_IN_RECRUITER: "linkedinViewInRecruiter",
+  MESSAGE_PROFILE: "linkedinMessageProfile",
+  CONTACT_INFO: "linkedinContactInfo",
+  EXPAND_SEE_MORE: "linkedinExpandSeeMore",
+  RECRUITER_TEMPLATE: "linkedinRecruiterTemplate",
+  RECRUITER_SEND: "linkedinRecruiterSend"
+};
+const LINKEDIN_EXPAND_MORE_MAX_PASSES = 6;
+const LINKEDIN_EXPAND_MORE_PASS_DELAY_MS = 110;
 const CANDIDATE_NOTE_MAX_LENGTH = 10000;
 const REMINDER_PRESET_SHORTCUTS = [
   { key: "a", label: "1 week", kind: "days", amount: 7 },
@@ -30,6 +40,19 @@ const CANDIDATE_EMAIL_MEMORY_CACHE_LIMIT = 80;
 const CANDIDATE_EMAIL_MEMORY_TTL_MS = 30 * 60 * 1000;
 const PROFILE_URL_POLL_INTERVAL_MS = 300;
 const PROFILE_IDENTITY_RETRY_INTERVAL_MS = 1200;
+const GEM_ACTION_ACCESS_OPTIONS = [
+  { key: "a", value: "shared", label: "Shared project", description: "Everyone on your team can add or remove candidates." },
+  { key: "s", value: "personal", label: "Personal project", description: "Only you can see and manage this project." },
+  { key: "d", value: "confidential", label: "Confidential project", description: "Only select collaborators can access this project." }
+];
+const GEM_ACTION_MENU_OPTIONS = [
+  { key: "c", id: "createProject", title: "Create project", subtitle: "Create a new Gem project." },
+  { key: "p", id: "openProject", title: "Search project + open", subtitle: "Open an existing project or create one if missing." },
+  { key: "s", id: "createSequence", title: "Create sequence", subtitle: "Open Gem sequence creation with name input focused." },
+  { key: "k", id: "searchPerson", title: "Search someone in Gem", subtitle: "Search candidates and open Gem or LinkedIn profile." }
+];
+const GEM_ACTION_PEOPLE_SEARCH_DEBOUNCE_MS = 140;
+const GEM_ACTION_PEOPLE_SEARCH_LIMIT = 50;
 const customFieldMemoryCache = new Map();
 const customFieldWarmPromises = new Map();
 const candidateEmailMemoryCache = new Map();
@@ -120,6 +143,24 @@ function isLinkedInProfilePage() {
     return /^https:\/\/www\.linkedin\.com\/(?:(?:in|pub)\/[^/]+|talent\/(?:.*\/)?profile\/[^/]+)(?:\/.*)?$/i.test(
       window.location.href
     );
+  }
+}
+
+function isLinkedInPublicProfilePage() {
+  try {
+    const parsed = new URL(window.location.href);
+    return isLinkedInHost(parsed.hostname) && isLinkedInPublicProfilePath(parsed.pathname);
+  } catch (_error) {
+    return /^https:\/\/www\.linkedin\.com\/(?:in|pub)\/[^/]+(?:\/.*)?$/i.test(window.location.href);
+  }
+}
+
+function isLinkedInRecruiterProfilePage() {
+  try {
+    const parsed = new URL(window.location.href);
+    return isLinkedInHost(parsed.hostname) && isLinkedInRecruiterProfilePath(parsed.pathname);
+  } catch (_error) {
+    return /^https:\/\/www\.linkedin\.com\/talent\/(?:.*\/)?profile\/[^/]+(?:\/.*)?$/i.test(window.location.href);
   }
 }
 
@@ -985,6 +1026,101 @@ function listAshbyJobs(query, runId) {
   });
 }
 
+function createGemProject(name, description, privacyType, runId) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "CREATE_GEM_PROJECT",
+        name: String(name || "").trim(),
+        description: String(description || "").trim(),
+        privacyType: String(privacyType || "").trim(),
+        runId: runId || ""
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not create project"));
+          return;
+        }
+        resolve({
+          message: String(response.message || ""),
+          project: response.project && typeof response.project === "object" ? response.project : {}
+        });
+      }
+    );
+  });
+}
+
+function searchGemPeople(query, runId, limit = GEM_ACTION_PEOPLE_SEARCH_LIMIT) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "SEARCH_GEM_PEOPLE",
+        query: String(query || ""),
+        runId: runId || "",
+        limit
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not search candidates"));
+          return;
+        }
+        resolve(Array.isArray(response.candidates) ? response.candidates : []);
+      }
+    );
+  });
+}
+
+function openGemNavigation(url, runId, options = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "OPEN_GEM_NAVIGATION",
+        url: String(url || "").trim(),
+        runId: runId || "",
+        actionId: options.actionId || ACTIONS.GEM_ACTIONS,
+        openInBackground: Boolean(options.openInBackground)
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+          if (isContextInvalidatedError(msg)) {
+            triggerContextRecovery(msg);
+            reject(new Error("Extension updated. Reloading page."));
+            return;
+          }
+          reject(new Error(msg));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.message || "Could not open Gem link"));
+          return;
+        }
+        resolve(response);
+      }
+    );
+  });
+}
+
 function listCustomFieldsForContext(context, runId, options = {}) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
@@ -1649,6 +1785,293 @@ function createProjectPickerStyles() {
       padding: 12px;
       font-size: 13px;
       color: #5b6168;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function createGemActionsStyles() {
+  if (document.getElementById("gem-actions-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gem-actions-style";
+  style.textContent = `
+    #gem-actions-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #gem-actions-modal {
+      width: min(780px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #1f2328;
+      position: relative;
+      max-height: min(86vh, 920px);
+      overflow: auto;
+    }
+    #gem-actions-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    #gem-actions-subtitle {
+      font-size: 13px;
+      color: #4f5358;
+      margin-bottom: 12px;
+    }
+    #gem-actions-list {
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      overflow: auto;
+      background: #fff;
+      max-height: 420px;
+    }
+    .gem-actions-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid #eff2f7;
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    .gem-actions-item:last-child {
+      border-bottom: none;
+    }
+    .gem-actions-item.active {
+      background: #eaf2fe;
+    }
+    .gem-actions-item.selected {
+      background: #eef6ec;
+    }
+    .gem-actions-item.active.selected {
+      background: #dcebd8;
+    }
+    .gem-actions-hotkey {
+      min-width: 28px;
+      height: 24px;
+      border: 1px solid #b9c3d3;
+      border-radius: 6px;
+      text-align: center;
+      line-height: 22px;
+      font-weight: 600;
+      color: #2f3a4b;
+      background: #f5f8fc;
+      font-size: 12px;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .gem-actions-main {
+      color: #1f2328;
+      font-weight: 500;
+      min-width: 0;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gem-actions-meta {
+      font-size: 12px;
+      color: #5b6168;
+      margin-left: auto;
+      flex-shrink: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 55%;
+    }
+    .gem-actions-hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #5b6168;
+    }
+    .gem-actions-empty {
+      padding: 12px;
+      font-size: 13px;
+      color: #5b6168;
+    }
+    #gem-actions-input, #gem-actions-project-name, #gem-actions-project-description {
+      width: 100%;
+      border: 1px solid #b6beca;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+      color: #1f2328;
+      margin-bottom: 10px;
+      font-family: inherit;
+    }
+    #gem-actions-project-description {
+      min-height: 96px;
+      resize: vertical;
+    }
+    .gem-actions-access-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      margin: 2px 0 8px;
+      color: #2a3442;
+    }
+    #gem-actions-access-list {
+      border: 1px solid #d4dae3;
+      border-radius: 8px;
+      overflow: auto;
+      background: #fff;
+      margin-bottom: 8px;
+    }
+    .gem-actions-access-item {
+      padding: 10px 12px;
+      border-bottom: 1px solid #eff2f7;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .gem-actions-access-item:last-child {
+      border-bottom: none;
+    }
+    .gem-actions-access-item.selected {
+      background: #eef6ec;
+    }
+    .gem-actions-access-item.active {
+      outline: 1px solid #8db4f4;
+      outline-offset: -1px;
+    }
+    .gem-actions-access-dot {
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      border: 1px solid #bcc6d6;
+      background: #fff;
+      flex-shrink: 0;
+      position: relative;
+    }
+    .gem-actions-access-item.selected .gem-actions-access-dot {
+      border-color: #1e69d2;
+    }
+    .gem-actions-access-item.selected .gem-actions-access-dot::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      border-radius: 999px;
+      background: #1e69d2;
+    }
+    .gem-actions-access-content {
+      min-width: 0;
+      flex: 1;
+    }
+    .gem-actions-access-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1f2328;
+    }
+    .gem-actions-access-description {
+      font-size: 12px;
+      color: #5b6168;
+      margin-top: 2px;
+    }
+    .gem-actions-access-key {
+      border: 1px solid #b9c3d3;
+      border-radius: 6px;
+      background: #f5f8fc;
+      color: #2f3a4b;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 6px;
+      text-transform: uppercase;
+    }
+    #gem-actions-confirm-mask {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 6;
+    }
+    #gem-actions-confirm-mask.visible {
+      display: flex;
+    }
+    #gem-actions-confirm-card {
+      width: min(460px, 100%);
+      border: 1px solid #d4dae3;
+      border-radius: 10px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+    }
+    #gem-actions-confirm-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+    }
+    #gem-actions-confirm-body {
+      font-size: 14px;
+      color: #32363c;
+      margin-bottom: 14px;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    #gem-actions-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-actions-confirm-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    #gem-actions-confirm-cancel {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    #gem-actions-confirm-ok {
+      border-color: #1e69d2;
+      background: #1e69d2;
+      color: #fff;
+    }
+    .gem-actions-status {
+      min-height: 18px;
+      font-size: 12px;
+      color: #5b6168;
+      margin: 4px 0 8px;
+    }
+    .gem-actions-status.error {
+      color: #a61d24;
+    }
+    .gem-actions-search-input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .gem-actions-tag {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #d4dae3;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      color: #2f3a4b;
+      background: #f8fafe;
+      margin-left: 6px;
     }
   `;
   document.documentElement.appendChild(style);
@@ -5042,6 +5465,1389 @@ async function showSequencePicker(runId, linkedinUrl, options = {}) {
   });
 }
 
+function getBackgroundOpenFromEvent(event) {
+  if (!event) {
+    return false;
+  }
+  return Boolean(event.metaKey || event.ctrlKey);
+}
+
+function slugifyGemProjectName(name) {
+  return String(name || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
+function buildGemProjectUrl(projectId, projectName = "") {
+  const id = String(projectId || "").trim();
+  if (!id) {
+    return "";
+  }
+  const slug = slugifyGemProjectName(projectName);
+  const segment = slug ? `${slug}--${id}` : id;
+  return `https://www.gem.com/projects/${segment}`;
+}
+
+function buildGemSequenceCreateUrl(runId = "") {
+  const parsed = new URL("https://www.gem.com/sequences/new");
+  parsed.searchParams.set("glsAction", "focusSequenceName");
+  if (runId) {
+    parsed.searchParams.set("glsRunId", runId);
+  }
+  return parsed.toString();
+}
+
+function normalizeGemProjectPrivacyType(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "confidential" || normalized === "personal" || normalized === "shared") {
+    return normalized;
+  }
+  return "shared";
+}
+
+async function showGemActionsMenu(runId) {
+  createGemActionsStyles();
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-actions-overlay";
+    const modal = document.createElement("div");
+    modal.id = "gem-actions-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-actions-title";
+    title.textContent = "Gem actions";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-actions-subtitle";
+    subtitle.textContent = "Press C, P, S, or K to choose the next action.";
+
+    const list = document.createElement("div");
+    list.id = "gem-actions-list";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-actions-hint";
+    hint.textContent = "Esc to cancel. Arrow keys + Enter also work.";
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(list);
+    modal.appendChild(hint);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let selectedIndex = 0;
+
+    function cleanup() {
+      overlay.remove();
+    }
+
+    function finish(value) {
+      cleanup();
+      resolve(value || "");
+    }
+
+    function selectByOption(option) {
+      if (!option) {
+        return;
+      }
+      finish(option.id);
+    }
+
+    function render() {
+      list.innerHTML = "";
+      GEM_ACTION_MENU_OPTIONS.forEach((option, index) => {
+        const item = document.createElement("div");
+        item.className = `gem-actions-item${selectedIndex === index ? " active" : ""}`;
+
+        const hotkey = document.createElement("div");
+        hotkey.className = "gem-actions-hotkey";
+        hotkey.textContent = option.key;
+
+        const main = document.createElement("div");
+        main.className = "gem-actions-main";
+        main.textContent = option.title;
+
+        const meta = document.createElement("div");
+        meta.className = "gem-actions-meta";
+        meta.textContent = option.subtitle;
+
+        item.appendChild(hotkey);
+        item.appendChild(main);
+        item.appendChild(meta);
+        item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
+          selectedIndex = index;
+          render();
+        });
+        item.addEventListener("click", () => selectByOption(option));
+        list.appendChild(item);
+      });
+    }
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish("");
+          return;
+        }
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          selectedIndex = (selectedIndex + 1) % GEM_ACTION_MENU_OPTIONS.length;
+          render();
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          selectedIndex = (selectedIndex - 1 + GEM_ACTION_MENU_OPTIONS.length) % GEM_ACTION_MENU_OPTIONS.length;
+          render();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          selectByOption(GEM_ACTION_MENU_OPTIONS[selectedIndex] || null);
+          return;
+        }
+        if (event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        const key = String(event.key || "").trim().toLowerCase();
+        const matchIndex = GEM_ACTION_MENU_OPTIONS.findIndex((option) => option.key === key);
+        if (matchIndex >= 0) {
+          event.preventDefault();
+          selectedIndex = matchIndex;
+          render();
+          selectByOption(GEM_ACTION_MENU_OPTIONS[matchIndex]);
+        }
+      },
+      true
+    );
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish("");
+      }
+    });
+
+    render();
+    modal.tabIndex = -1;
+    modal.focus();
+
+    logEvent({
+      source: "extension.content",
+      event: "gem_actions.menu.opened",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId,
+      message: "Gem actions menu opened.",
+      link: window.location.href
+    });
+  });
+}
+
+async function showGemActionConfirmationDialog(titleText, bodyText) {
+  createGemActionsStyles();
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-actions-overlay";
+    const modal = document.createElement("div");
+    modal.id = "gem-actions-modal";
+    const title = document.createElement("div");
+    title.id = "gem-actions-title";
+    title.textContent = titleText;
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-actions-subtitle";
+    subtitle.textContent = "Press Enter to confirm or Esc to cancel.";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-actions-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-actions-confirm-title";
+    confirmTitle.textContent = titleText;
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-actions-confirm-body";
+    confirmBody.textContent = bodyText;
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-actions-confirm-actions";
+    const cancelButton = document.createElement("button");
+    cancelButton.id = "gem-actions-confirm-cancel";
+    cancelButton.className = "gem-actions-confirm-btn";
+    cancelButton.type = "button";
+    cancelButton.textContent = "Cancel";
+    const confirmButton = document.createElement("button");
+    confirmButton.id = "gem-actions-confirm-ok";
+    confirmButton.className = "gem-actions-confirm-btn";
+    confirmButton.type = "button";
+    confirmButton.textContent = "Confirm";
+
+    confirmActions.appendChild(cancelButton);
+    confirmActions.appendChild(confirmButton);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(confirmCard);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    function cleanup() {
+      overlay.remove();
+    }
+
+    function finish(confirmed) {
+      cleanup();
+      resolve(Boolean(confirmed));
+    }
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finish(true);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish(false);
+        }
+      },
+      true
+    );
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(false);
+      }
+    });
+    confirmButton.addEventListener("click", () => finish(true));
+    cancelButton.addEventListener("click", () => finish(false));
+    confirmButton.focus();
+  });
+}
+
+async function showGemProjectCreateForm(runId, options = {}) {
+  createGemActionsStyles();
+  const initialName = String(options.initialName || "").trim();
+  const initialDescription = String(options.initialDescription || "").trim();
+  const initialPrivacyType = normalizeGemProjectPrivacyType(options.initialPrivacyType || "shared");
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-actions-overlay";
+    const modal = document.createElement("div");
+    modal.id = "gem-actions-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-actions-title";
+    title.textContent = "Create project";
+
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-actions-subtitle";
+    subtitle.textContent = "Enter project details, then press Enter to confirm creation.";
+
+    const nameLabel = document.createElement("label");
+    nameLabel.className = "gem-actions-access-label";
+    nameLabel.setAttribute("for", "gem-actions-project-name");
+    nameLabel.textContent = "Project name *";
+
+    const nameInput = document.createElement("input");
+    nameInput.id = "gem-actions-project-name";
+    nameInput.type = "text";
+    nameInput.placeholder = "Project name";
+    nameInput.autocomplete = "off";
+    nameInput.value = initialName;
+
+    const descriptionLabel = document.createElement("label");
+    descriptionLabel.className = "gem-actions-access-label";
+    descriptionLabel.setAttribute("for", "gem-actions-project-description");
+    descriptionLabel.textContent = "Description";
+
+    const descriptionInput = document.createElement("textarea");
+    descriptionInput.id = "gem-actions-project-description";
+    descriptionInput.placeholder = "Description";
+    descriptionInput.value = initialDescription;
+
+    const accessLabel = document.createElement("div");
+    accessLabel.className = "gem-actions-access-label";
+    accessLabel.textContent = "Access";
+
+    const accessList = document.createElement("div");
+    accessList.id = "gem-actions-access-list";
+
+    const status = document.createElement("div");
+    status.className = "gem-actions-status";
+
+    const hint = document.createElement("div");
+    hint.className = "gem-actions-hint";
+    hint.textContent = "Tab through fields. A/S/D switches access. Enter opens confirmation. Esc cancels.";
+
+    const confirmMask = document.createElement("div");
+    confirmMask.id = "gem-actions-confirm-mask";
+    const confirmCard = document.createElement("div");
+    confirmCard.id = "gem-actions-confirm-card";
+    const confirmTitle = document.createElement("div");
+    confirmTitle.id = "gem-actions-confirm-title";
+    confirmTitle.textContent = "Confirm project creation";
+    const confirmBody = document.createElement("div");
+    confirmBody.id = "gem-actions-confirm-body";
+    const confirmActions = document.createElement("div");
+    confirmActions.id = "gem-actions-confirm-actions";
+    const confirmCancel = document.createElement("button");
+    confirmCancel.id = "gem-actions-confirm-cancel";
+    confirmCancel.className = "gem-actions-confirm-btn";
+    confirmCancel.type = "button";
+    confirmCancel.textContent = "Cancel";
+    const confirmOk = document.createElement("button");
+    confirmOk.id = "gem-actions-confirm-ok";
+    confirmOk.className = "gem-actions-confirm-btn";
+    confirmOk.type = "button";
+    confirmOk.textContent = "Create project";
+    confirmActions.appendChild(confirmCancel);
+    confirmActions.appendChild(confirmOk);
+    confirmCard.appendChild(confirmTitle);
+    confirmCard.appendChild(confirmBody);
+    confirmCard.appendChild(confirmActions);
+    confirmMask.appendChild(confirmCard);
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(nameLabel);
+    modal.appendChild(nameInput);
+    modal.appendChild(descriptionLabel);
+    modal.appendChild(descriptionInput);
+    modal.appendChild(accessLabel);
+    modal.appendChild(accessList);
+    modal.appendChild(status);
+    modal.appendChild(hint);
+    modal.appendChild(confirmMask);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let disposed = false;
+    let selectedAccessIndex = Math.max(
+      0,
+      GEM_ACTION_ACCESS_OPTIONS.findIndex((option) => option.value === initialPrivacyType)
+    );
+    let confirmVisible = false;
+    let creating = false;
+
+    function setStatus(text, isError = false) {
+      status.textContent = String(text || "");
+      status.className = `gem-actions-status${isError ? " error" : ""}`;
+    }
+
+    function getSelectedAccess() {
+      return GEM_ACTION_ACCESS_OPTIONS[selectedAccessIndex] || GEM_ACTION_ACCESS_OPTIONS[0];
+    }
+
+    function cleanup() {
+      disposed = true;
+      overlay.remove();
+    }
+
+    function finish(result) {
+      cleanup();
+      resolve(result || null);
+    }
+
+    function renderAccessList() {
+      accessList.innerHTML = "";
+      GEM_ACTION_ACCESS_OPTIONS.forEach((option, index) => {
+        const item = document.createElement("div");
+        const selected = selectedAccessIndex === index;
+        item.className = `gem-actions-access-item${selected ? " selected active" : ""}`;
+        item.tabIndex = 0;
+        item.setAttribute("role", "radio");
+        item.setAttribute("aria-checked", selected ? "true" : "false");
+
+        const dot = document.createElement("div");
+        dot.className = "gem-actions-access-dot";
+        const content = document.createElement("div");
+        content.className = "gem-actions-access-content";
+        const optionName = document.createElement("div");
+        optionName.className = "gem-actions-access-name";
+        optionName.textContent = option.label;
+        const optionDescription = document.createElement("div");
+        optionDescription.className = "gem-actions-access-description";
+        optionDescription.textContent = option.description;
+        content.appendChild(optionName);
+        content.appendChild(optionDescription);
+        const hotkey = document.createElement("div");
+        hotkey.className = "gem-actions-access-key";
+        hotkey.textContent = option.key;
+
+        item.appendChild(dot);
+        item.appendChild(content);
+        item.appendChild(hotkey);
+        item.addEventListener("click", () => {
+          selectedAccessIndex = index;
+          renderAccessList();
+        });
+        item.addEventListener("focus", () => {
+          selectedAccessIndex = index;
+          renderAccessList();
+        });
+        item.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            selectedAccessIndex = (selectedAccessIndex + 1) % GEM_ACTION_ACCESS_OPTIONS.length;
+            renderAccessList();
+            const next = accessList.querySelectorAll(".gem-actions-access-item")[selectedAccessIndex];
+            next?.focus();
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            selectedAccessIndex =
+              (selectedAccessIndex - 1 + GEM_ACTION_ACCESS_OPTIONS.length) % GEM_ACTION_ACCESS_OPTIONS.length;
+            renderAccessList();
+            const next = accessList.querySelectorAll(".gem-actions-access-item")[selectedAccessIndex];
+            next?.focus();
+          }
+        });
+        accessList.appendChild(item);
+      });
+    }
+
+    function updateConfirmation() {
+      if (!confirmVisible) {
+        confirmMask.classList.remove("visible");
+        return;
+      }
+      const projectName = String(nameInput.value || "").trim();
+      const projectDescription = String(descriptionInput.value || "").trim();
+      const access = getSelectedAccess();
+      confirmBody.textContent =
+        `Create project "${projectName}"?\n` +
+        `Access: ${access.label}\n` +
+        `Description: ${projectDescription || "(none)"}`;
+      confirmMask.classList.add("visible");
+      confirmOk.focus();
+    }
+
+    function openConfirmation() {
+      if (creating) {
+        return;
+      }
+      const projectName = String(nameInput.value || "").trim();
+      if (!projectName) {
+        setStatus("Project name is required.", true);
+        nameInput.focus();
+        return;
+      }
+      setStatus("");
+      confirmVisible = true;
+      updateConfirmation();
+    }
+
+    function closeConfirmation() {
+      if (!confirmVisible || creating) {
+        return;
+      }
+      confirmVisible = false;
+      updateConfirmation();
+      nameInput.focus();
+    }
+
+    async function confirmCreation() {
+      if (creating) {
+        return;
+      }
+      const projectName = String(nameInput.value || "").trim();
+      if (!projectName) {
+        setStatus("Project name is required.", true);
+        confirmVisible = false;
+        updateConfirmation();
+        nameInput.focus();
+        return;
+      }
+      creating = true;
+      setStatus("Creating project...");
+      confirmOk.disabled = true;
+      confirmCancel.disabled = true;
+      try {
+        const access = getSelectedAccess();
+        const createResult = await createGemProject(projectName, descriptionInput.value || "", access.value, runId);
+        const project = createResult?.project || {};
+        const projectUrl = String(project.url || buildGemProjectUrl(project.id, project.name || projectName) || "").trim();
+        if (!projectUrl) {
+          throw new Error("Gem did not return a project URL.");
+        }
+        await openGemNavigation(projectUrl, runId, {
+          actionId: ACTIONS.GEM_ACTIONS,
+          openInBackground: false
+        });
+        showToast(createResult?.message || "Created project.");
+        await logEvent({
+          source: "extension.content",
+          event: "gem_actions.project.created",
+          actionId: ACTIONS.GEM_ACTIONS,
+          runId,
+          message: createResult?.message || "Created Gem project.",
+          link: projectUrl,
+          details: {
+            projectId: String(project.id || ""),
+            projectName: String(project.name || projectName),
+            privacyType: access.value
+          }
+        });
+        finish({
+          project
+        });
+      } catch (error) {
+        setStatus(error.message || "Could not create project.", true);
+        showToast(error.message || "Could not create project.", true);
+        creating = false;
+        confirmOk.disabled = false;
+        confirmCancel.disabled = false;
+        confirmVisible = false;
+        updateConfirmation();
+      }
+    }
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (confirmVisible) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            confirmCreation();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closeConfirmation();
+            return;
+          }
+        }
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+          return;
+        }
+        if (event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        const targetTag = String(event.target?.tagName || "").toLowerCase();
+        const isTextEntryTarget =
+          Boolean(event.target?.isContentEditable) || targetTag === "input" || targetTag === "textarea";
+        const key = String(event.key || "").trim().toLowerCase();
+        const accessIndex = GEM_ACTION_ACCESS_OPTIONS.findIndex((option) => option.key === key);
+        if (accessIndex >= 0) {
+          if (isTextEntryTarget) {
+            return;
+          }
+          event.preventDefault();
+          selectedAccessIndex = accessIndex;
+          renderAccessList();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          openConfirmation();
+        }
+      },
+      true
+    );
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay && !confirmVisible && !creating) {
+        finish(null);
+      }
+    });
+    confirmOk.addEventListener("click", () => {
+      confirmCreation();
+    });
+    confirmCancel.addEventListener("click", () => {
+      closeConfirmation();
+    });
+    confirmMask.addEventListener("click", (event) => {
+      if (event.target === confirmMask) {
+        closeConfirmation();
+      }
+    });
+
+    renderAccessList();
+    nameInput.focus();
+    if (nameInput.value) {
+      nameInput.select();
+    }
+
+    logEvent({
+      source: "extension.content",
+      event: "gem_actions.project_create.opened",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId,
+      message: "Gem project creation form opened.",
+      link: window.location.href
+    });
+  });
+}
+
+async function showGemProjectNavigator(runId) {
+  createGemActionsStyles();
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-actions-overlay";
+    const modal = document.createElement("div");
+    modal.id = "gem-actions-modal";
+
+    const title = document.createElement("div");
+    title.id = "gem-actions-title";
+    title.textContent = "Search project + open";
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-actions-subtitle";
+    subtitle.textContent = "Type project name, use arrows to choose, press Enter to open.";
+
+    const input = document.createElement("input");
+    input.id = "gem-actions-input";
+    input.type = "text";
+    input.placeholder = "Search projects by name...";
+    input.autocomplete = "off";
+
+    const list = document.createElement("div");
+    list.id = "gem-actions-list";
+    const hint = document.createElement("div");
+    hint.className = "gem-actions-hint";
+    hint.textContent = "Esc to cancel. Cmd+Enter / Cmd+click opens in background tab.";
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(input);
+    modal.appendChild(list);
+    modal.appendChild(hint);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let loading = true;
+    let loadError = "";
+    let allProjects = [];
+    let selectedIndex = 0;
+    let visibleRows = [];
+    let active = true;
+    const startedAt = Date.now();
+    let cachedSignature = "";
+    let hasAppliedForceRefresh = false;
+
+    function getProjectSignature(projects) {
+      const normalized = Array.isArray(projects) ? projects : [];
+      if (normalized.length === 0) {
+        return "0";
+      }
+      const ids = normalized
+        .map((project) => String(project?.id || ""))
+        .filter(Boolean)
+        .sort();
+      return `${normalized.length}:${ids.join("|")}`;
+    }
+
+    function cleanup() {
+      active = false;
+      overlay.remove();
+    }
+
+    function finish(result) {
+      cleanup();
+      resolve(result || null);
+    }
+
+    function buildVisibleRows() {
+      const filteredProjects = filterProjectsByQuery(allProjects, input.value || "");
+      if (filteredProjects.length > 0) {
+        return filteredProjects.map((project) => ({
+          kind: "project",
+          project,
+          id: String(project.id || ""),
+          title: String(project.name || project.id || ""),
+          subtitle: "Open project in Gem"
+        }));
+      }
+      const query = String(input.value || "").trim();
+      if (!query) {
+        return [];
+      }
+      return [
+        {
+          kind: "create",
+          id: "__create__",
+          title: `Create a new project: ${query}`,
+          subtitle: "Open create project form with this name prefilled",
+          createName: query
+        }
+      ];
+    }
+
+    function renderList() {
+      visibleRows = buildVisibleRows();
+      if (selectedIndex >= visibleRows.length) {
+        selectedIndex = Math.max(0, visibleRows.length - 1);
+      }
+      if (selectedIndex < 0) {
+        selectedIndex = 0;
+      }
+
+      list.innerHTML = "";
+      if (loading) {
+        const loadingNode = document.createElement("div");
+        loadingNode.className = "gem-actions-empty";
+        loadingNode.textContent = "Loading projects...";
+        list.appendChild(loadingNode);
+        return;
+      }
+      if (loadError) {
+        const errorNode = document.createElement("div");
+        errorNode.className = "gem-actions-empty";
+        errorNode.textContent = `Could not load projects: ${loadError}`;
+        list.appendChild(errorNode);
+        return;
+      }
+      if (visibleRows.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "gem-actions-empty";
+        empty.textContent = "No matching projects.";
+        list.appendChild(empty);
+        return;
+      }
+
+      visibleRows.forEach((row, index) => {
+        const item = document.createElement("div");
+        item.className = `gem-actions-item${index === selectedIndex ? " active" : ""}`;
+        const main = document.createElement("div");
+        main.className = "gem-actions-main";
+        main.textContent = row.title || "";
+        const meta = document.createElement("div");
+        meta.className = "gem-actions-meta";
+        meta.textContent = row.subtitle || "";
+        item.appendChild(main);
+        item.appendChild(meta);
+        item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
+          selectedIndex = index;
+          renderList();
+        });
+        item.addEventListener("click", (event) => {
+          const openInBackground = row.kind === "project" ? getBackgroundOpenFromEvent(event) : false;
+          finish({
+            ...row,
+            openInBackground
+          });
+        });
+        list.appendChild(item);
+      });
+    }
+
+    input.addEventListener("input", () => {
+      selectedIndex = 0;
+      renderList();
+    });
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+          return;
+        }
+        if (loading) {
+          return;
+        }
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          if (visibleRows.length > 0) {
+            selectedIndex = (selectedIndex + 1) % visibleRows.length;
+            renderList();
+          }
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          if (visibleRows.length > 0) {
+            selectedIndex = (selectedIndex - 1 + visibleRows.length) % visibleRows.length;
+            renderList();
+          }
+          return;
+        }
+        if (event.key === "Enter") {
+          if (visibleRows.length === 0) {
+            return;
+          }
+          event.preventDefault();
+          const row = visibleRows[selectedIndex] || null;
+          if (!row) {
+            return;
+          }
+          finish({
+            ...row,
+            openInBackground: row.kind === "project" ? getBackgroundOpenFromEvent(event) : false
+          });
+          return;
+        }
+      },
+      true
+    );
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(null);
+      }
+    });
+
+    renderList();
+    input.focus();
+
+    logEvent({
+      source: "extension.content",
+      event: "gem_actions.project_search.opened",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId,
+      message: "Gem project search opened.",
+      link: window.location.href
+    });
+
+    listProjects("", runId, { preferCache: true })
+      .then(async (projects) => {
+        if (!active) {
+          return;
+        }
+        const cached = projects.filter((project) => !project.archived);
+        cachedSignature = getProjectSignature(cached);
+        if (cached.length > 0 && !hasAppliedForceRefresh) {
+          allProjects = cached;
+          loading = false;
+          loadError = "";
+          renderList();
+        }
+        await logEvent({
+          source: "extension.content",
+          event: "gem_actions.project_search.cache_loaded",
+          actionId: ACTIONS.GEM_ACTIONS,
+          runId,
+          message: `Loaded ${cached.length} cached projects for navigation.`,
+          link: window.location.href
+        });
+      })
+      .catch(() => {});
+
+    function runForceRefresh(isRetry = false) {
+      return listProjects("", runId, { forceRefresh: true, forceNewRefresh: true })
+        .then(async (projects) => {
+          if (!active) {
+            return;
+          }
+          const refreshed = projects.filter((project) => !project.archived);
+          const refreshedSignature = getProjectSignature(refreshed);
+          hasAppliedForceRefresh = true;
+          allProjects = refreshed;
+          loading = false;
+          loadError = "";
+          renderList();
+          await logEvent({
+            source: "extension.content",
+            event: isRetry ? "gem_actions.project_search.retry_loaded" : "gem_actions.project_search.loaded",
+            actionId: ACTIONS.GEM_ACTIONS,
+            runId,
+            message: `Loaded ${allProjects.length} projects for navigation.`,
+            link: window.location.href,
+            details: {
+              durationMs: Date.now() - startedAt
+            }
+          });
+
+          // Retry once if fresh result looks identical to cache to avoid stale in-flight cache races.
+          if (!isRetry && active && cachedSignature && refreshedSignature === cachedSignature) {
+            setTimeout(() => {
+              if (!active) {
+                return;
+              }
+              runForceRefresh(true).catch(() => {});
+            }, 900);
+          }
+        })
+        .catch(async (error) => {
+          if (!active) {
+            return;
+          }
+          const message = error.message || "Failed to load projects.";
+          const usedCachedProjects = allProjects.length > 0;
+          if (!usedCachedProjects) {
+            loading = false;
+            loadError = message;
+            renderList();
+            showToast(message, true);
+          }
+          await logEvent({
+            source: "extension.content",
+            level: usedCachedProjects ? "warn" : "error",
+            event: isRetry ? "gem_actions.project_search.retry_failed" : "gem_actions.project_search.load_failed",
+            actionId: ACTIONS.GEM_ACTIONS,
+            runId,
+            message,
+            link: window.location.href
+          });
+        });
+    }
+
+    runForceRefresh().catch(() => {});
+  });
+}
+
+function formatGemPeopleMeta(candidate) {
+  const parts = [];
+  const primaryEmail = String(candidate?.primaryEmail || "").trim();
+  const title = String(candidate?.title || "").trim();
+  const company = String(candidate?.company || "").trim();
+  const school = String(candidate?.school || "").trim();
+  if (primaryEmail) {
+    parts.push(primaryEmail);
+  }
+  if (title && company) {
+    parts.push(`${title} at ${company}`);
+  } else if (title) {
+    parts.push(title);
+  } else if (company) {
+    parts.push(company);
+  }
+  if (school) {
+    parts.push(school);
+  }
+  return parts.join(" • ");
+}
+
+async function showGemPeopleSearch(runId) {
+  createGemActionsStyles();
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "gem-actions-overlay";
+    const modal = document.createElement("div");
+    modal.id = "gem-actions-modal";
+    const title = document.createElement("div");
+    title.id = "gem-actions-title";
+    title.textContent = "Search someone in Gem";
+    const subtitle = document.createElement("div");
+    subtitle.id = "gem-actions-subtitle";
+    subtitle.textContent = "Type to search candidates. Enter opens Gem profile, L opens LinkedIn.";
+
+    const input = document.createElement("input");
+    input.id = "gem-actions-input";
+    input.type = "text";
+    input.placeholder = "Search people...";
+    input.autocomplete = "off";
+
+    const status = document.createElement("div");
+    status.className = "gem-actions-status";
+
+    const list = document.createElement("div");
+    list.id = "gem-actions-list";
+    const hint = document.createElement("div");
+    hint.className = "gem-actions-hint";
+    hint.textContent = "Press number keys to select result. Esc to cancel.";
+
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(input);
+    modal.appendChild(status);
+    modal.appendChild(list);
+    modal.appendChild(hint);
+    overlay.appendChild(modal);
+    document.documentElement.appendChild(overlay);
+
+    let disposed = false;
+    let loading = true;
+    let loadError = "";
+    let candidates = [];
+    let selectedIndex = 0;
+    let pendingDebounce = 0;
+    let requestCounter = 0;
+    let selectionArmed = false;
+
+    function cleanup() {
+      disposed = true;
+      if (pendingDebounce) {
+        clearTimeout(pendingDebounce);
+      }
+      overlay.remove();
+    }
+
+    function finish(result) {
+      cleanup();
+      resolve(result || null);
+    }
+
+    function setStatus(text, isError = false) {
+      status.textContent = String(text || "");
+      status.className = `gem-actions-status${isError ? " error" : ""}`;
+    }
+
+    function getSelectedCandidate() {
+      if (candidates.length === 0) {
+        return null;
+      }
+      const boundedIndex = Math.max(0, Math.min(selectedIndex, candidates.length - 1));
+      return candidates[boundedIndex] || null;
+    }
+
+    function getQuickSelectIndex(event) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return -1;
+      }
+      const code = String(event?.code || "");
+      let rawDigit = "";
+      if (/^Digit[0-9]$/.test(code)) {
+        rawDigit = code.slice(5);
+      } else if (/^Numpad[0-9]$/.test(code)) {
+        rawDigit = code.slice(6);
+      } else if (/^[0-9]$/.test(String(event?.key || ""))) {
+        rawDigit = String(event.key);
+      } else {
+        return -1;
+      }
+      const value = rawDigit === "0" ? 10 : Number(rawDigit);
+      if (!Number.isFinite(value) || value <= 0) {
+        return -1;
+      }
+      return value - 1;
+    }
+
+    function renderList() {
+      list.innerHTML = "";
+      if (loading) {
+        const loadingNode = document.createElement("div");
+        loadingNode.className = "gem-actions-empty";
+        loadingNode.textContent = "Searching people...";
+        list.appendChild(loadingNode);
+        return;
+      }
+      if (loadError) {
+        const errorNode = document.createElement("div");
+        errorNode.className = "gem-actions-empty";
+        errorNode.textContent = `Could not search candidates: ${loadError}`;
+        list.appendChild(errorNode);
+        return;
+      }
+      if (candidates.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "gem-actions-empty";
+        empty.textContent = "No people found.";
+        list.appendChild(empty);
+        return;
+      }
+      if (selectedIndex >= candidates.length) {
+        selectedIndex = Math.max(0, candidates.length - 1);
+      }
+      if (selectedIndex < 0) {
+        selectedIndex = 0;
+      }
+
+      candidates.forEach((candidate, index) => {
+        const item = document.createElement("div");
+        const isActive = index === selectedIndex;
+        item.className = `gem-actions-item${isActive ? " active selected" : ""}`;
+        const hotkey = document.createElement("div");
+        hotkey.className = "gem-actions-hotkey";
+        hotkey.textContent = index < 10 ? String(index + 1).replace("10", "0") : "";
+        const main = document.createElement("div");
+        main.className = "gem-actions-main";
+        main.textContent = String(candidate.fullName || candidate.primaryEmail || candidate.id || "Candidate");
+        const meta = document.createElement("div");
+        meta.className = "gem-actions-meta";
+        meta.textContent = formatGemPeopleMeta(candidate);
+        item.appendChild(hotkey);
+        item.appendChild(main);
+        item.appendChild(meta);
+        if (candidate.linkedInUrl) {
+          const linkedInTag = document.createElement("span");
+          linkedInTag.className = "gem-actions-tag";
+          linkedInTag.textContent = "L LinkedIn";
+          main.appendChild(linkedInTag);
+        }
+        item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
+          selectedIndex = index;
+          renderList();
+        });
+        item.addEventListener("click", () => {
+          selectedIndex = index;
+          selectionArmed = true;
+          renderList();
+        });
+        item.addEventListener("dblclick", () => {
+          selectedIndex = index;
+          selectionArmed = true;
+          renderList();
+          const selected = getSelectedCandidate();
+          if (selected) {
+            finish({ candidate: selected, target: "gem" });
+          }
+        });
+        list.appendChild(item);
+      });
+    }
+
+    function scheduleSearch() {
+      if (pendingDebounce) {
+        clearTimeout(pendingDebounce);
+      }
+      pendingDebounce = setTimeout(async () => {
+        pendingDebounce = 0;
+        const token = ++requestCounter;
+        loading = true;
+        loadError = "";
+        selectionArmed = false;
+        setStatus("");
+        renderList();
+        try {
+          const results = await searchGemPeople(input.value || "", runId, GEM_ACTION_PEOPLE_SEARCH_LIMIT);
+          if (disposed || token !== requestCounter) {
+            return;
+          }
+          candidates = results;
+          loading = false;
+          loadError = "";
+          selectedIndex = 0;
+          selectionArmed = false;
+          setStatus(results.length > 0 ? `${results.length} result${results.length === 1 ? "" : "s"} loaded.` : "");
+          renderList();
+        } catch (error) {
+          if (disposed || token !== requestCounter) {
+            return;
+          }
+          candidates = [];
+          loading = false;
+          loadError = error.message || "Failed to search people.";
+          selectionArmed = false;
+          setStatus(loadError, true);
+          renderList();
+        }
+      }, GEM_ACTION_PEOPLE_SEARCH_DEBOUNCE_MS);
+    }
+
+    overlay.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+          return;
+        }
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          if (candidates.length > 0) {
+            selectedIndex = (selectedIndex + 1) % candidates.length;
+            selectionArmed = true;
+            renderList();
+          }
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          if (candidates.length > 0) {
+            selectedIndex = (selectedIndex - 1 + candidates.length) % candidates.length;
+            selectionArmed = true;
+            renderList();
+          }
+          return;
+        }
+        const quickIndex = getQuickSelectIndex(event);
+        if (quickIndex >= 0) {
+          event.preventDefault();
+          if (quickIndex < candidates.length) {
+            selectedIndex = quickIndex;
+            selectionArmed = true;
+            renderList();
+          }
+          return;
+        }
+        if (event.key === "Enter") {
+          const selected = getSelectedCandidate();
+          if (!selected) {
+            return;
+          }
+          event.preventDefault();
+          finish({ candidate: selected, target: "gem" });
+          return;
+        }
+        if (event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        const key = String(event.key || "").trim().toLowerCase();
+        if (key === "l") {
+          if (document.activeElement === input && !selectionArmed) {
+            return;
+          }
+          const selected = getSelectedCandidate();
+          if (!selected) {
+            return;
+          }
+          event.preventDefault();
+          finish({ candidate: selected, target: "linkedin" });
+        }
+      },
+      true
+    );
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(null);
+      }
+    });
+    input.addEventListener("input", () => {
+      scheduleSearch();
+    });
+
+    renderList();
+    input.focus();
+    scheduleSearch();
+  });
+}
+
+async function handleGemActionsShortcut(source = "keyboard", runId = "") {
+  const effectiveRunId = runId || generateRunId();
+  const selectedAction = await showGemActionsMenu(effectiveRunId);
+  if (!selectedAction) {
+    showToast("Action cancelled.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "gem_actions.cancelled",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId: effectiveRunId,
+      message: "Gem actions menu cancelled.",
+      link: window.location.href
+    });
+    return;
+  }
+
+  if (selectedAction === "createProject") {
+    const created = await showGemProjectCreateForm(effectiveRunId, {});
+    if (!created) {
+      showToast("Action cancelled.", true);
+    }
+    return;
+  }
+
+  if (selectedAction === "openProject") {
+    const projectSelection = await showGemProjectNavigator(effectiveRunId);
+    if (!projectSelection) {
+      showToast("Action cancelled.", true);
+      return;
+    }
+    if (projectSelection.kind === "create") {
+      const created = await showGemProjectCreateForm(effectiveRunId, {
+        initialName: projectSelection.createName || ""
+      });
+      if (!created) {
+        showToast("Action cancelled.", true);
+      }
+      return;
+    }
+
+    const selectedProject = projectSelection.project || null;
+    const projectUrl = buildGemProjectUrl(selectedProject?.id || "", selectedProject?.name || "");
+    if (!projectUrl) {
+      showToast("Missing project URL.", true);
+      return;
+    }
+    await openGemNavigation(projectUrl, effectiveRunId, {
+      actionId: ACTIONS.GEM_ACTIONS,
+      openInBackground: Boolean(projectSelection.openInBackground)
+    });
+    showToast(projectSelection.openInBackground ? "Opened project in background tab." : "Opened project in Gem.");
+    await logEvent({
+      source: "extension.content",
+      event: "gem_actions.project.opened",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId: effectiveRunId,
+      message: projectSelection.openInBackground ? "Opened project in background tab." : "Opened project in Gem.",
+      link: projectUrl,
+      details: {
+        source,
+        projectId: String(selectedProject?.id || ""),
+        projectName: String(selectedProject?.name || ""),
+        openInBackground: Boolean(projectSelection.openInBackground)
+      }
+    });
+    return;
+  }
+
+  if (selectedAction === "createSequence") {
+    const confirmed = await showGemActionConfirmationDialog("Create sequence", "Create a new sequence in Gem?");
+    if (!confirmed) {
+      showToast("Action cancelled.", true);
+      return;
+    }
+    const url = buildGemSequenceCreateUrl(effectiveRunId);
+    await openGemNavigation(url, effectiveRunId, {
+      actionId: ACTIONS.GEM_ACTIONS,
+      openInBackground: false
+    });
+    showToast("Opened sequence creation in Gem.");
+    await logEvent({
+      source: "extension.content",
+      event: "gem_actions.sequence_create.opened",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId: effectiveRunId,
+      message: "Opened sequence creation in Gem.",
+      link: url,
+      details: {
+        source
+      }
+    });
+    return;
+  }
+
+  if (selectedAction === "searchPerson") {
+    const peopleSelection = await showGemPeopleSearch(effectiveRunId);
+    if (!peopleSelection) {
+      showToast("Action cancelled.", true);
+      return;
+    }
+    const candidate = peopleSelection.candidate || {};
+    const target = peopleSelection.target === "linkedin" ? "linkedin" : "gem";
+    const url =
+      target === "linkedin"
+        ? String(candidate.linkedInUrl || "").trim()
+        : String(candidate.gemProfileUrl || "").trim();
+    if (!url) {
+      showToast(target === "linkedin" ? "No LinkedIn URL available for this candidate." : "No Gem profile URL available.", true);
+      return;
+    }
+    await openGemNavigation(url, effectiveRunId, {
+      actionId: ACTIONS.GEM_ACTIONS,
+      openInBackground: false
+    });
+    showToast(target === "linkedin" ? "Opened LinkedIn profile." : "Opened candidate in Gem.");
+    await logEvent({
+      source: "extension.content",
+      event: "gem_actions.person.opened",
+      actionId: ACTIONS.GEM_ACTIONS,
+      runId: effectiveRunId,
+      message: target === "linkedin" ? "Opened LinkedIn profile from people search." : "Opened Gem profile from people search.",
+      link: url,
+      details: {
+        source,
+        target,
+        candidateId: String(candidate.id || ""),
+        fullName: String(candidate.fullName || "")
+      }
+    });
+    return;
+  }
+}
+
 function formatActivityTimestamp(value) {
   if (!value) {
     return "";
@@ -6523,8 +8329,22 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       });
       return;
     }
+
+    if (actionId === ACTIONS.GEM_ACTIONS) {
+      await logEvent({
+        source: "extension.content",
+        event: "gem_actions.triggered",
+        actionId,
+        runId: effectiveRunId,
+        message: `Gem actions triggered from ${source}.`,
+        link: window.location.href
+      });
+      await handleGemActionsShortcut(source, effectiveRunId);
+      return;
+    }
+
     if (!isSupportedActionPage()) {
-      showToast("Open LinkedIn, Gem candidate, or GitHub profile to run this action.", true);
+      showToast("Open LinkedIn, Gem candidate, Gmail, or GitHub profile to run this action.", true);
       logEvent({
         source: "extension.content",
         level: "warn",
@@ -6662,28 +8482,36 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
   }
 }
 
-function isConnectShortcut(event) {
-  if (!event || event.repeat) {
-    return false;
+function getConfiguredLinkedInShortcut(shortcutId) {
+  const configured = normalizeShortcut(cachedSettings?.shortcuts?.[shortcutId] || "");
+  if (configured) {
+    return configured;
   }
-  if (!(event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey)) {
-    return false;
-  }
-  if (String(event.code || "").toUpperCase() === "KEYZ") {
-    return true;
-  }
-  const key = String(event.key || "").trim().toLowerCase();
-  return key === "z" || key === "ω";
+  return normalizeShortcut(DEFAULT_SETTINGS?.shortcuts?.[shortcutId] || "");
 }
 
-function isPlainLetterShortcut(event, letter) {
+function getConfiguredLinkedInShortcutLabel(shortcutId) {
+  const shortcut = getConfiguredLinkedInShortcut(shortcutId);
+  return formatShortcutForMac(shortcut) || shortcut;
+}
+
+function isConfiguredLinkedInShortcut(event, shortcutId) {
   if (!event || event.repeat) {
     return false;
   }
-  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+  const expectedShortcut = getConfiguredLinkedInShortcut(shortcutId);
+  if (!expectedShortcut) {
     return false;
   }
-  return String(event.key || "").trim().toLowerCase() === String(letter || "").toLowerCase();
+  const actualShortcut = normalizeShortcut(keyboardEventToShortcut(event));
+  if (!actualShortcut) {
+    return false;
+  }
+  return actualShortcut === expectedShortcut;
+}
+
+function isConnectShortcut(event) {
+  return isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.CONNECT);
 }
 
 function isElementVisible(element) {
@@ -6760,7 +8588,8 @@ function handleInviteDecisionShortcut(event) {
 
   let targetButton = null;
   let action = "";
-  if (isPlainLetterShortcut(event, INVITE_SEND_WITHOUT_NOTE_KEY)) {
+  let shortcutLabel = "";
+  if (isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.INVITE_SEND_WITHOUT_NOTE)) {
     targetButton = findInviteDialogButton(
       dialog,
       (label) =>
@@ -6768,12 +8597,14 @@ function handleInviteDecisionShortcut(event) {
         (label.includes("send") && label.includes("without") && label.includes("note"))
     );
     action = "send-without-note";
-  } else if (isPlainLetterShortcut(event, INVITE_ADD_NOTE_KEY)) {
+    shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.INVITE_SEND_WITHOUT_NOTE);
+  } else if (isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.INVITE_ADD_NOTE)) {
     targetButton = findInviteDialogButton(
       dialog,
       (label) => label === "add a note" || label.includes("add a note")
     );
     action = "add-note";
+    shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.INVITE_ADD_NOTE);
   } else {
     return false;
   }
@@ -6792,7 +8623,8 @@ function handleInviteDecisionShortcut(event) {
       link: window.location.href,
       details: {
         key: String(event.key || ""),
-        action
+        action,
+        shortcut: shortcutLabel
       }
     }).catch(() => {});
     return true;
@@ -6808,7 +8640,8 @@ function handleInviteDecisionShortcut(event) {
     link: window.location.href,
     details: {
       key: String(event.key || ""),
-      action
+      action,
+      shortcut: shortcutLabel
     }
   }).catch(() => {});
   return true;
@@ -6826,6 +8659,59 @@ function isConnectLabel(label) {
     return true;
   }
   return normalized.includes("invite") && normalized.includes("connect");
+}
+
+function normalizeProfileActionLabel(label) {
+  return String(label || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function isViewInRecruiterLabel(label) {
+  const normalized = normalizeProfileActionLabel(label);
+  if (!normalized) {
+    return false;
+  }
+  if (normalized === "view in recruiter" || normalized.startsWith("view in recruiter ")) {
+    return true;
+  }
+  // LinkedIn variants can include extra lead-in words while still representing the same CTA.
+  return (
+    normalized.includes("recruiter") &&
+    (normalized.startsWith("view ") || normalized.includes(" view ") || normalized.startsWith("open "))
+  );
+}
+
+function isMessageActionLabel(label) {
+  const normalized = normalizeProfileActionLabel(label);
+  if (!normalized) {
+    return false;
+  }
+  return normalized === "message" || normalized.startsWith("message ") || normalized.startsWith("send message");
+}
+
+function isContactInfoLabel(label) {
+  const normalized = normalizeProfileActionLabel(label);
+  if (!normalized) {
+    return false;
+  }
+  return normalized === "contact info" || normalized === "contact information" || normalized.includes("contact info");
+}
+
+function isExactEllipsisSeeMoreLabel(label) {
+  const normalized = normalizeProfileActionLabel(label);
+  return (
+    normalized === "... see more" ||
+    normalized === "...see more" ||
+    normalized === "… see more" ||
+    normalized === "…see more"
+  );
+}
+
+function isSendLabel(label) {
+  const normalized = normalizeProfileActionLabel(label);
+  return normalized === "send" || normalized.startsWith("send ");
 }
 
 function isMoreLabel(label) {
@@ -6944,18 +8830,20 @@ function isInsideRecommendationModule(element) {
   return false;
 }
 
-function findVisibleConnectControl(root = document, options = {}) {
+function findVisibleProfileActionControl(root = document, options = {}) {
+  if (!root || typeof root.querySelectorAll !== "function") {
+    return null;
+  }
   const headingRect = options.headingRect || null;
   const skipHeadingBand = Boolean(options.skipHeadingBand);
-  const selectors = [
-    "button",
-    "a[role='button']",
-    "[role='button']",
-    "[role='menuitem']",
-    "li[role='menuitem']",
-    ".artdeco-dropdown__item",
-    ".artdeco-dropdown__item-content"
-  ];
+  const matcher = typeof options.matcher === "function" ? options.matcher : null;
+  if (!matcher) {
+    return null;
+  }
+  const selectors = Array.isArray(options.selectors) && options.selectors.length > 0
+    ? options.selectors
+    : ["button", "a[role='button']", "[role='button']"];
+  const matches = [];
   const candidates = root.querySelectorAll(selectors.join(","));
   for (const candidate of candidates) {
     if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
@@ -6967,11 +8855,39 @@ function findVisibleConnectControl(root = document, options = {}) {
     if (!skipHeadingBand && !isElementInProfileActionBand(candidate, headingRect)) {
       continue;
     }
-    if (isConnectLabel(getElementLabel(candidate))) {
-      return candidate;
+    if (!matcher(getElementLabel(candidate), candidate)) {
+      continue;
     }
+    matches.push(candidate);
   }
-  return null;
+  if (matches.length === 0) {
+    return null;
+  }
+  if (!headingRect || matches.length === 1) {
+    return matches[0];
+  }
+  const headingCenter = {
+    x: headingRect.left + headingRect.width / 2,
+    y: headingRect.top + headingRect.height / 2
+  };
+  matches.sort((left, right) => getDistance(getNodeCenter(left), headingCenter) - getDistance(getNodeCenter(right), headingCenter));
+  return matches[0];
+}
+
+function findVisibleConnectControl(root = document, options = {}) {
+  return findVisibleProfileActionControl(root, {
+    ...options,
+    matcher: (label) => isConnectLabel(label),
+    selectors: [
+      "button",
+      "a[role='button']",
+      "[role='button']",
+      "[role='menuitem']",
+      "li[role='menuitem']",
+      ".artdeco-dropdown__item",
+      ".artdeco-dropdown__item-content"
+    ]
+  });
 }
 
 function findVisibleMoreControl(root = document, options = {}) {
@@ -7105,13 +9021,31 @@ function waitFor(milliseconds) {
 }
 
 async function waitForConnectInMenuForControl(moreControl, timeoutMs = 1600) {
+  return waitForProfileActionInMenuForControl(moreControl, {
+    matcher: (label) => isConnectLabel(label),
+    selectors: [
+      "button",
+      "a[role='button']",
+      "[role='button']",
+      "[role='menuitem']",
+      "li[role='menuitem']",
+      ".artdeco-dropdown__item",
+      ".artdeco-dropdown__item-content"
+    ]
+  }, timeoutMs);
+}
+
+async function waitForProfileActionInMenuForControl(moreControl, findOptions = {}, timeoutMs = 1600) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const menuScopes = getMenuScopesForMoreControl(moreControl);
     for (const scope of menuScopes) {
-      const menuConnect = findVisibleConnectControl(scope, { skipHeadingBand: true });
-      if (menuConnect) {
-        return menuConnect;
+      const menuAction = findVisibleProfileActionControl(scope, {
+        ...findOptions,
+        skipHeadingBand: true
+      });
+      if (menuAction) {
+        return menuAction;
       }
     }
     await waitFor(50);
@@ -7119,7 +9053,7 @@ async function waitForConnectInMenuForControl(moreControl, timeoutMs = 1600) {
   return null;
 }
 
-async function triggerConnectShortcut(runId) {
+async function triggerConnectShortcut(runId, shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.CONNECT)) {
   const headingElement = getProfileHeadingElement();
   const headingRect = getProfileHeadingRect(headingElement);
   if (!headingElement || !headingRect) {
@@ -7132,7 +9066,7 @@ async function triggerConnectShortcut(runId) {
       message: "Could not locate profile heading for current profile.",
       link: window.location.href,
       details: {
-        shortcut: CONNECT_SHORTCUT
+        shortcut: shortcutLabel
       }
     });
     return;
@@ -7149,7 +9083,7 @@ async function triggerConnectShortcut(runId) {
       message: "Could not resolve top-card action root for current profile.",
       link: window.location.href,
       details: {
-        shortcut: CONNECT_SHORTCUT,
+        shortcut: shortcutLabel,
         headingTop: Math.round(headingRect.top),
         headingBottom: Math.round(headingRect.bottom)
       }
@@ -7166,10 +9100,10 @@ async function triggerConnectShortcut(runId) {
       source: "extension.content",
       event: "connect-shortcut.triggered",
       runId,
-      message: `Triggered profile connect action via ${CONNECT_SHORTCUT}.`,
+      message: `Triggered profile connect action via ${shortcutLabel}.`,
       link: window.location.href,
       details: {
-        shortcut: CONNECT_SHORTCUT,
+        shortcut: shortcutLabel,
         method: "direct",
         clicked
       }
@@ -7188,7 +9122,7 @@ async function triggerConnectShortcut(runId) {
       message: "Could not find direct Connect button or More actions menu.",
       link: window.location.href,
       details: {
-        shortcut: CONNECT_SHORTCUT,
+        shortcut: shortcutLabel,
         headingTop: Math.round(headingRect.top),
         headingBottom: Math.round(headingRect.bottom)
       }
@@ -7206,10 +9140,10 @@ async function triggerConnectShortcut(runId) {
       source: "extension.content",
       event: "connect-shortcut.triggered",
       runId,
-      message: `Triggered profile connect action via ${CONNECT_SHORTCUT}.`,
+      message: `Triggered profile connect action via ${shortcutLabel}.`,
       link: window.location.href,
       details: {
-        shortcut: CONNECT_SHORTCUT,
+        shortcut: shortcutLabel,
         method: "more-menu",
         clicked
       }
@@ -7226,30 +9160,660 @@ async function triggerConnectShortcut(runId) {
     message: "Opened More actions menu but did not find Connect entry.",
     link: window.location.href,
     details: {
-      shortcut: CONNECT_SHORTCUT
+      shortcut: shortcutLabel
+    }
+  });
+}
+
+async function triggerLinkedInPublicProfileActionShortcut(runId, actionConfig) {
+  const action = String(actionConfig?.action || "").trim();
+  const shortcut = String(actionConfig?.shortcut || "").trim();
+  const matcher = typeof actionConfig?.matcher === "function" ? actionConfig.matcher : null;
+  const successToast = String(actionConfig?.successToast || "Action triggered.").trim();
+  const notFoundToast = String(actionConfig?.notFoundToast || "Couldn't find that action on this profile.").trim();
+  if (!action || !shortcut || !matcher) {
+    return;
+  }
+
+  const selectors = [
+    "button",
+    "a",
+    "a[role='button']",
+    "[role='button']",
+    "[role='menuitem']",
+    "li[role='menuitem']",
+    ".artdeco-dropdown__item",
+    ".artdeco-dropdown__item-content"
+  ];
+  const headingElement = getProfileHeadingElement();
+  const headingRect = getProfileHeadingRect(headingElement);
+  if (!headingElement || !headingRect) {
+    showToast("Couldn't find profile actions for this person.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-profile-shortcut.not-found",
+      runId,
+      message: `Could not locate profile heading while handling ${action}.`,
+      link: window.location.href,
+      details: {
+        action,
+        shortcut
+      }
+    });
+    return;
+  }
+
+  const topCardRoot = getProfileTopCardRoot(headingElement, headingRect);
+  if (!topCardRoot) {
+    showToast("Couldn't find profile actions for this person.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-profile-shortcut.not-found",
+      runId,
+      message: `Could not resolve top-card action root while handling ${action}.`,
+      link: window.location.href,
+      details: {
+        action,
+        shortcut,
+        headingTop: Math.round(headingRect.top),
+        headingBottom: Math.round(headingRect.bottom)
+      }
+    });
+    return;
+  }
+
+  const directAction = findVisibleProfileActionControl(topCardRoot, {
+    headingRect,
+    matcher,
+    selectors
+  });
+  if (directAction) {
+    const clicked = describeElementForLog(directAction);
+    directAction.click();
+    showToast(successToast);
+    await logEvent({
+      source: "extension.content",
+      event: "linkedin-profile-shortcut.triggered",
+      runId,
+      message: `Triggered LinkedIn profile action "${action}" via ${shortcut}.`,
+      link: window.location.href,
+      details: {
+        action,
+        shortcut,
+        method: "direct",
+        clicked
+      }
+    });
+    return;
+  }
+
+  const moreControl = findVisibleMoreControl(topCardRoot, { headingRect });
+  if (!moreControl) {
+    showToast(notFoundToast, true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-profile-shortcut.not-found",
+      runId,
+      message: `Could not find direct action or More menu for "${action}".`,
+      link: window.location.href,
+      details: {
+        action,
+        shortcut,
+        headingTop: Math.round(headingRect.top),
+        headingBottom: Math.round(headingRect.bottom)
+      }
+    });
+    return;
+  }
+
+  moreControl.click();
+  const menuAction = await waitForProfileActionInMenuForControl(
+    moreControl,
+    {
+      matcher,
+      selectors
+    },
+    1600
+  );
+  if (menuAction) {
+    const clicked = describeElementForLog(menuAction);
+    menuAction.click();
+    showToast(successToast);
+    await logEvent({
+      source: "extension.content",
+      event: "linkedin-profile-shortcut.triggered",
+      runId,
+      message: `Triggered LinkedIn profile action "${action}" via ${shortcut}.`,
+      link: window.location.href,
+      details: {
+        action,
+        shortcut,
+        method: "more-menu",
+        clicked
+      }
+    });
+    return;
+  }
+
+  showToast(notFoundToast, true);
+  await logEvent({
+    source: "extension.content",
+    level: "warn",
+    event: "linkedin-profile-shortcut.not-found",
+    runId,
+    message: `Opened More actions menu but did not find "${action}".`,
+    link: window.location.href,
+    details: {
+      action,
+      shortcut
+    }
+  });
+}
+
+async function triggerLinkedInViewInRecruiterShortcut(
+  runId,
+  shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.VIEW_IN_RECRUITER)
+) {
+  await triggerLinkedInPublicProfileActionShortcut(runId, {
+    action: "view-in-recruiter",
+    shortcut: shortcutLabel,
+    matcher: (label) => isViewInRecruiterLabel(label),
+    successToast: "View in Recruiter action triggered.",
+    notFoundToast: "Couldn't find View in Recruiter on this profile."
+  });
+}
+
+async function triggerLinkedInMessageShortcut(
+  runId,
+  shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.MESSAGE_PROFILE)
+) {
+  await triggerLinkedInPublicProfileActionShortcut(runId, {
+    action: "message",
+    shortcut: shortcutLabel,
+    matcher: (label) => isMessageActionLabel(label),
+    successToast: "Message action triggered.",
+    notFoundToast: "Couldn't find a Message action on this profile."
+  });
+}
+
+async function triggerLinkedInContactInfoShortcut(
+  runId,
+  shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.CONTACT_INFO)
+) {
+  await triggerLinkedInPublicProfileActionShortcut(runId, {
+    action: "contact-info",
+    shortcut: shortcutLabel,
+    matcher: (label) => isContactInfoLabel(label),
+    successToast: "Contact info opened.",
+    notFoundToast: "Couldn't find Contact info on this profile."
+  });
+}
+
+function findVisibleEllipsisMoreControls(root = document) {
+  if (!root || typeof root.querySelectorAll !== "function") {
+    return [];
+  }
+  const selectors = ["button", "a", "a[role='button']", "[role='button']"];
+  const controls = [];
+  const candidates = root.querySelectorAll(selectors.join(","));
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
+      continue;
+    }
+    if (isInsideRecommendationModule(candidate)) {
+      continue;
+    }
+    const labels = [
+      candidate.getAttribute("aria-label") || "",
+      candidate.getAttribute("title") || "",
+      candidate.textContent || "",
+      getElementLabel(candidate)
+    ];
+    if (labels.some((label) => isExactEllipsisSeeMoreLabel(label))) {
+      controls.push(candidate);
+    }
+  }
+  return controls;
+}
+
+function getWindowScrollPosition() {
+  return {
+    x: window.scrollX || window.pageXOffset || 0,
+    y: window.scrollY || window.pageYOffset || 0
+  };
+}
+
+function captureViewportAnchor() {
+  const probeX = Math.max(0, Math.min(window.innerWidth - 1, Math.round(window.innerWidth / 2)));
+  const probeY = Math.max(0, Math.min(window.innerHeight - 1, 120));
+  const anchor = document.elementFromPoint(probeX, probeY);
+  if (!anchor) {
+    return null;
+  }
+  return {
+    element: anchor,
+    top: anchor.getBoundingClientRect().top
+  };
+}
+
+function restoreWindowScrollPosition(position) {
+  if (!position) {
+    return;
+  }
+  window.scrollTo({
+    left: Number(position.x) || 0,
+    top: Number(position.y) || 0,
+    behavior: "auto"
+  });
+}
+
+function restoreViewportState(state) {
+  if (!state || typeof state !== "object") {
+    return;
+  }
+  restoreWindowScrollPosition(state.scrollPosition || null);
+  const anchorElement = state.anchor?.element;
+  if (!anchorElement || !anchorElement.isConnected || typeof anchorElement.getBoundingClientRect !== "function") {
+    return;
+  }
+  const deltaTop = anchorElement.getBoundingClientRect().top - Number(state.anchor?.top || 0);
+  if (Math.abs(deltaTop) < 1) {
+    return;
+  }
+  window.scrollBy({
+    left: 0,
+    top: deltaTop,
+    behavior: "auto"
+  });
+}
+
+function clickWithoutViewportJump(control, viewportState) {
+  if (!control) {
+    return;
+  }
+  if (typeof control.focus === "function") {
+    try {
+      control.focus({ preventScroll: true });
+    } catch (_error) {
+      // Ignore focus failures on non-focusable controls.
+    }
+  }
+  control.click();
+  restoreViewportState(viewportState);
+}
+
+async function triggerExpandEllipsisMoreShortcut(
+  runId,
+  shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.EXPAND_SEE_MORE)
+) {
+  const pageRoot = document;
+  if (!pageRoot || typeof pageRoot.querySelectorAll !== "function") {
+    showToast('Couldn\'t find any "... see more" controls on this page.', true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-profile-shortcut.not-found",
+      runId,
+      message: 'Could not resolve page root for "... see more" expansion.',
+      link: window.location.href,
+      details: {
+        action: "expand-ellipsis-see-more",
+        shortcut: shortcutLabel
+      }
+    });
+    return;
+  }
+
+  const viewportState = {
+    scrollPosition: getWindowScrollPosition(),
+    anchor: captureViewportAnchor()
+  };
+  const clickedControls = new Set();
+  let clickedCount = 0;
+  let passCount = 0;
+  for (let pass = 0; pass < LINKEDIN_EXPAND_MORE_MAX_PASSES; pass += 1) {
+    const nextControls = findVisibleEllipsisMoreControls(pageRoot).filter((control) => !clickedControls.has(control));
+    passCount = pass + 1;
+    if (nextControls.length === 0) {
+      break;
+    }
+    for (const control of nextControls) {
+      clickedControls.add(control);
+      clickWithoutViewportJump(control, viewportState);
+      clickedCount += 1;
+    }
+    restoreViewportState(viewportState);
+    await waitFor(LINKEDIN_EXPAND_MORE_PASS_DELAY_MS);
+    restoreViewportState(viewportState);
+  }
+  restoreViewportState(viewportState);
+
+  if (clickedCount > 0) {
+    const noun = clickedCount === 1 ? "control" : "controls";
+    showToast(`Expanded ${clickedCount} "... see more" ${noun}.`);
+    await logEvent({
+      source: "extension.content",
+      event: "linkedin-profile-shortcut.triggered",
+      runId,
+      message: `Expanded ${clickedCount} "... see more" controls via ${shortcutLabel}.`,
+      link: window.location.href,
+      details: {
+        action: "expand-ellipsis-see-more",
+        shortcut: shortcutLabel,
+        clickedCount,
+        passCount
+      }
+    });
+    return;
+  }
+
+  showToast('No "... see more" controls found to expand.', true);
+  await logEvent({
+    source: "extension.content",
+    level: "warn",
+    event: "linkedin-profile-shortcut.not-found",
+    runId,
+    message: 'Shortcut pressed but no exact "... see more" controls were found.',
+    link: window.location.href,
+    details: {
+      action: "expand-ellipsis-see-more",
+      shortcut: shortcutLabel
+    }
+  });
+}
+
+function getElementShortcutSearchText(element) {
+  if (!element || typeof element.getAttribute !== "function") {
+    return "";
+  }
+  const values = [
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("placeholder") || "",
+    element.getAttribute("title") || "",
+    element.getAttribute("name") || "",
+    element.getAttribute("id") || "",
+    element.getAttribute("data-test-id") || "",
+    element.getAttribute("data-control-name") || "",
+    element.getAttribute("data-test-text") || "",
+    getElementLabel(element)
+  ];
+  const labelledBy = String(element.getAttribute("aria-labelledby") || "").trim();
+  if (labelledBy) {
+    labelledBy.split(/\s+/).forEach((id) => {
+      const labelNode = document.getElementById(id);
+      if (labelNode) {
+        values.push(labelNode.textContent || "");
+      }
+    });
+  }
+  const elementId = String(element.getAttribute("id") || "").trim();
+  if (elementId) {
+    const labels = document.querySelectorAll("label[for]");
+    for (const label of labels) {
+      if (String(label.getAttribute("for") || "").trim() !== elementId) {
+        continue;
+      }
+      values.push(label.textContent || "");
+      break;
+    }
+  }
+  const nearestLabel = element.closest("label");
+  if (nearestLabel) {
+    values.push(nearestLabel.textContent || "");
+  }
+  const nearestContainer = element.closest("[aria-label], [data-test-id], [data-control-name], [class*='compose'], [class*='composer']");
+  if (nearestContainer && nearestContainer !== element) {
+    values.push(
+      nearestContainer.getAttribute("aria-label") || "",
+      nearestContainer.getAttribute("data-test-id") || "",
+      nearestContainer.getAttribute("data-control-name") || ""
+    );
+  }
+  return normalizeProfileActionLabel(values.join(" "));
+}
+
+function isLikelyRecruiterComposerElement(element) {
+  let cursor = element;
+  while (cursor && cursor !== document.body) {
+    const descriptor = normalizeProfileActionLabel(
+      [
+        cursor.getAttribute?.("aria-label") || "",
+        cursor.getAttribute?.("data-test-id") || "",
+        cursor.getAttribute?.("data-control-name") || "",
+        cursor.className || ""
+      ].join(" ")
+    );
+    if (
+      descriptor.includes("composer") ||
+      descriptor.includes("compose") ||
+      descriptor.includes("inmail") ||
+      descriptor.includes("message-anywhere") ||
+      descriptor.includes("message composer") ||
+      descriptor.includes("right rail") ||
+      descriptor.includes("right-rail")
+    ) {
+      return true;
+    }
+    cursor = cursor.parentElement;
+  }
+  return false;
+}
+
+function compareRecruiterComposerCandidates(left, right) {
+  const leftPriority = isLikelyRecruiterComposerElement(left) ? 0 : 1;
+  const rightPriority = isLikelyRecruiterComposerElement(right) ? 0 : 1;
+  if (leftPriority !== rightPriority) {
+    return leftPriority - rightPriority;
+  }
+  const leftRect = left.getBoundingClientRect();
+  const rightRect = right.getBoundingClientRect();
+  if (Math.abs(leftRect.top - rightRect.top) > 1) {
+    return leftRect.top - rightRect.top;
+  }
+  return leftRect.left - rightRect.left;
+}
+
+function findRecruiterTemplateTextbox(options = {}) {
+  const requireComposerContext = Boolean(options.requireComposerContext);
+  const selectors = [
+    "input:not([type='hidden']):not([disabled])",
+    "textarea:not([disabled])",
+    "[contenteditable='true']",
+    "[role='textbox']"
+  ];
+  const matches = [];
+  const candidates = document.querySelectorAll(selectors.join(","));
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
+      continue;
+    }
+    const searchText = getElementShortcutSearchText(candidate);
+    if (!searchText.includes("template")) {
+      continue;
+    }
+    if (requireComposerContext && !isLikelyRecruiterComposerElement(candidate)) {
+      continue;
+    }
+    matches.push(candidate);
+  }
+  if (matches.length === 0) {
+    return null;
+  }
+  matches.sort(compareRecruiterComposerCandidates);
+  return matches[0];
+}
+
+function findRecruiterSendButton(options = {}) {
+  const requireComposerContext = Boolean(options.requireComposerContext);
+  const selectors = ["button", "a[role='button']", "[role='button']", "input[type='submit']", "input[type='button']"];
+  const matches = [];
+  const candidates = document.querySelectorAll(selectors.join(","));
+  for (const candidate of candidates) {
+    if (!isElementVisible(candidate) || isCandidateDisabled(candidate)) {
+      continue;
+    }
+    const label = [getElementLabel(candidate), candidate.getAttribute("value") || ""].join(" ");
+    if (!isSendLabel(label)) {
+      continue;
+    }
+    if (requireComposerContext && !isLikelyRecruiterComposerElement(candidate)) {
+      continue;
+    }
+    matches.push(candidate);
+  }
+  if (matches.length === 0) {
+    return null;
+  }
+  matches.sort(compareRecruiterComposerCandidates);
+  return matches[0];
+}
+
+function isRecruiterComposerVisible() {
+  if (!isLinkedInRecruiterProfilePage()) {
+    return false;
+  }
+  return Boolean(
+    findRecruiterTemplateTextbox({ requireComposerContext: true }) ||
+      findRecruiterSendButton({ requireComposerContext: true })
+  );
+}
+
+async function triggerRecruiterTemplateShortcut(
+  runId,
+  shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.RECRUITER_TEMPLATE)
+) {
+  if (!isRecruiterComposerVisible()) {
+    showToast("Recruiter composer is not visible.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-recruiter-shortcut.not-found",
+      runId,
+      message: "Template shortcut pressed but recruiter composer is not visible.",
+      link: window.location.href,
+      details: {
+        action: "focus-template-textbox",
+        shortcut: shortcutLabel
+      }
+    });
+    return;
+  }
+
+  const textbox = findRecruiterTemplateTextbox({ requireComposerContext: true });
+  if (!textbox) {
+    showToast("Couldn't find template textbox in Recruiter composer.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-recruiter-shortcut.not-found",
+      runId,
+      message: "Recruiter composer is visible but template textbox was not found.",
+      link: window.location.href,
+      details: {
+        action: "focus-template-textbox",
+        shortcut: shortcutLabel
+      }
+    });
+    return;
+  }
+
+  textbox.focus();
+  if (typeof textbox.click === "function") {
+    textbox.click();
+  }
+  showToast("Template textbox focused.");
+  await logEvent({
+    source: "extension.content",
+    event: "linkedin-recruiter-shortcut.triggered",
+    runId,
+    message: `Focused recruiter template textbox via ${shortcutLabel}.`,
+    link: window.location.href,
+    details: {
+      action: "focus-template-textbox",
+      shortcut: shortcutLabel,
+      clicked: describeElementForLog(textbox)
+    }
+  });
+}
+
+async function triggerRecruiterSendShortcut(
+  runId,
+  shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.RECRUITER_SEND)
+) {
+  if (!isRecruiterComposerVisible()) {
+    showToast("Recruiter composer is not visible.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-recruiter-shortcut.not-found",
+      runId,
+      message: "Send shortcut pressed but recruiter composer is not visible.",
+      link: window.location.href,
+      details: {
+        action: "send",
+        shortcut: shortcutLabel
+      }
+    });
+    return;
+  }
+
+  const sendButton = findRecruiterSendButton({ requireComposerContext: true });
+  if (!sendButton) {
+    showToast("Couldn't find Send in Recruiter composer.", true);
+    await logEvent({
+      source: "extension.content",
+      level: "warn",
+      event: "linkedin-recruiter-shortcut.not-found",
+      runId,
+      message: "Recruiter composer is visible but Send button was not found.",
+      link: window.location.href,
+      details: {
+        action: "send",
+        shortcut: shortcutLabel
+      }
+    });
+    return;
+  }
+
+  sendButton.click();
+  showToast("Recruiter send action triggered.");
+  await logEvent({
+    source: "extension.content",
+    event: "linkedin-recruiter-shortcut.triggered",
+    runId,
+    message: `Triggered recruiter send action via ${shortcutLabel}.`,
+    link: window.location.href,
+    details: {
+      action: "send",
+      shortcut: shortcutLabel,
+      clicked: describeElementForLog(sendButton)
     }
   });
 }
 
 function onKeyDown(event) {
-  if (!isSupportedActionPage()) {
-    return;
-  }
+  const supportedPage = isSupportedActionPage();
   const isLinkedInContext = isLinkedInProfilePage();
+  const isLinkedInPublicContext = isLinkedInPublicProfilePage();
+  const isLinkedInRecruiterContext = isLinkedInRecruiterProfilePage();
   const isModifierBasedShortcut = Boolean(event.metaKey || event.ctrlKey || event.altKey);
   if (isEditableElement(event.target) && !isModifierBasedShortcut) {
     return;
   }
 
-  if (isLinkedInContext && handleInviteDecisionShortcut(event)) {
+  if (supportedPage && isLinkedInContext && handleInviteDecisionShortcut(event)) {
     return;
   }
 
-  if (isLinkedInContext && isConnectShortcut(event)) {
+  if (supportedPage && isLinkedInContext && isConnectShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
     const runId = generateRunId();
-    triggerConnectShortcut(runId).catch((error) => {
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.CONNECT);
+    triggerConnectShortcut(runId, shortcutLabel).catch((error) => {
       showToast(error.message || "Could not run Connect shortcut.", true);
       logEvent({
         source: "extension.content",
@@ -7259,7 +9823,145 @@ function onKeyDown(event) {
         message: error.message || "Unexpected Connect shortcut error.",
         link: window.location.href,
         details: {
-          shortcut: CONNECT_SHORTCUT
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
+  if (supportedPage && isLinkedInPublicContext && isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.VIEW_IN_RECRUITER)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.VIEW_IN_RECRUITER);
+    triggerLinkedInViewInRecruiterShortcut(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || "Could not run View in Recruiter shortcut.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "linkedin-profile-shortcut.exception",
+        runId,
+        message: error.message || "Unexpected View in Recruiter shortcut error.",
+        link: window.location.href,
+        details: {
+          action: "view-in-recruiter",
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
+  if (supportedPage && isLinkedInPublicContext && isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.MESSAGE_PROFILE)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.MESSAGE_PROFILE);
+    triggerLinkedInMessageShortcut(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || "Could not run Message shortcut.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "linkedin-profile-shortcut.exception",
+        runId,
+        message: error.message || "Unexpected Message shortcut error.",
+        link: window.location.href,
+        details: {
+          action: "message",
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
+  if (supportedPage && isLinkedInPublicContext && isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.CONTACT_INFO)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.CONTACT_INFO);
+    triggerLinkedInContactInfoShortcut(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || "Could not run Contact info shortcut.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "linkedin-profile-shortcut.exception",
+        runId,
+        message: error.message || "Unexpected Contact info shortcut error.",
+        link: window.location.href,
+        details: {
+          action: "contact-info",
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
+  if (supportedPage && isLinkedInPublicContext && isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.EXPAND_SEE_MORE)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.EXPAND_SEE_MORE);
+    triggerExpandEllipsisMoreShortcut(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || 'Could not run "... see more" expansion shortcut.', true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "linkedin-profile-shortcut.exception",
+        runId,
+        message: error.message || 'Unexpected "... see more" shortcut error.',
+        link: window.location.href,
+        details: {
+          action: "expand-ellipsis-see-more",
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
+  if (supportedPage && isLinkedInRecruiterContext && isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.RECRUITER_TEMPLATE)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.RECRUITER_TEMPLATE);
+    triggerRecruiterTemplateShortcut(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || "Could not run recruiter template shortcut.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "linkedin-recruiter-shortcut.exception",
+        runId,
+        message: error.message || "Unexpected recruiter template shortcut error.",
+        link: window.location.href,
+        details: {
+          action: "focus-template-textbox",
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
+  if (supportedPage && isLinkedInRecruiterContext && isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.RECRUITER_SEND)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredLinkedInShortcutLabel(LINKEDIN_SHORTCUT_IDS.RECRUITER_SEND);
+    triggerRecruiterSendShortcut(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || "Could not run recruiter send shortcut.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "linkedin-recruiter-shortcut.exception",
+        runId,
+        message: error.message || "Unexpected recruiter send shortcut error.",
+        link: window.location.href,
+        details: {
+          action: "send",
+          shortcut: shortcutLabel
         }
       });
     });
@@ -7276,6 +9978,9 @@ function onKeyDown(event) {
   }
   const actionId = findActionByShortcut(shortcut);
   if (!actionId) {
+    return;
+  }
+  if (actionId !== ACTIONS.GEM_ACTIONS && !supportedPage) {
     return;
   }
 
