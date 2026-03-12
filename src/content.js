@@ -8533,7 +8533,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
     }
 
     if (!isSupportedActionPage()) {
-      showToast("Open LinkedIn, Gem candidate, Gmail, or GitHub profile to run this action.", true);
+      showToast("Open a LinkedIn, Gem candidate, or GitHub profile to run this action.", true);
       logEvent({
         source: "extension.content",
         level: "warn",

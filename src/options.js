@@ -149,6 +149,9 @@ function validateSettings(settings) {
   if (!settings.backendBaseUrl) {
     return "Backend base URL is required.";
   }
+  if (!isAllowedBackendBaseUrl(settings.backendBaseUrl)) {
+    return `Backend base URL must use one of: ${formatAllowedBackendOriginsForDisplay()}`;
+  }
 
   const seen = new Set();
   for (const [action, shortcut] of Object.entries(settings.shortcuts)) {
@@ -318,6 +321,12 @@ async function loadGemUsers(options = {}) {
   if (!backendBaseUrl) {
     if (!quiet) {
       setStatus("Set Backend Base URL first.", true);
+    }
+    return;
+  }
+  if (!isAllowedBackendBaseUrl(backendBaseUrl)) {
+    if (!quiet) {
+      setStatus(`Backend Base URL must use one of: ${formatAllowedBackendOriginsForDisplay()}`, true);
     }
     return;
   }

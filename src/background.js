@@ -95,6 +95,7 @@ async function getSettings() {
 
 function saveSettings(settings) {
   const normalized = normalizeSettings(settings);
+  validateBackendBaseUrlOrThrow(normalized.backendBaseUrl);
   return new Promise((resolve) => {
     chrome.storage.sync.set({ settings: normalized }, () => resolve());
   });
@@ -237,7 +238,6 @@ async function bootstrapOrgDefaults(reason = "runtime") {
     return { applied: false, reason: "already_configured" };
   }
   await saveSettings(merged.settings);
-  await broadcastSettingsToLinkedInTabs(merged.settings);
   logEvent(merged.settings, {
     event: "settings.org_defaults.applied",
     source: "extension.background",
@@ -310,24 +310,14 @@ function validateShortcutMap(shortcuts) {
   }
 }
 
-function broadcastSettingsToLinkedInTabs(settings) {
-  return new Promise((resolve) => {
-    chrome.tabs.query({}, (tabs) => {
-      if (chrome.runtime.lastError || !Array.isArray(tabs) || tabs.length === 0) {
-        resolve();
-        return;
-      }
-      let remaining = tabs.length;
-      for (const tab of tabs) {
-        chrome.tabs.sendMessage(tab.id, { type: "SETTINGS_UPDATED", settings }, () => {
-          remaining -= 1;
-          if (remaining <= 0) {
-            resolve();
-          }
-        });
-      }
-    });
-  });
+function validateBackendBaseUrlOrThrow(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) {
+    throw new Error("Backend base URL is required.");
+  }
+  if (!isAllowedBackendBaseUrl(value)) {
+    throw new Error(`Backend base URL must use one of: ${formatAllowedBackendOriginsForDisplay()}`);
+  }
 }
 
 function getLocalLogs() {
@@ -1484,7 +1474,7 @@ async function fetchBackendLogs(settings, limit = 200) {
     const backendMessage = parsed?.error || "Could not load backend logs.";
     const errorMessage =
       response.status === 401 && /unauthorized/i.test(String(backendMessage))
-        ? "Unauthorized. Check BACKEND_SHARED_TOKEN in backend/.env and extension Options."
+        ? "Unauthorized. Check BACKEND_SHARED_TOKEN and/or ALLOWED_EXTENSION_ORIGINS in backend/.env."
         : backendMessage;
     return { logs: [], error: errorMessage };
   }
@@ -1741,7 +1731,7 @@ async function callBackend(path, payload, settings, audit = {}) {
     const backendMessage = parsed?.error || parsed?.message || "Backend request failed.";
     const errorMessage =
       response.status === 401 && /unauthorized/i.test(String(backendMessage))
-        ? "Unauthorized. Check BACKEND_SHARED_TOKEN in backend/.env and extension Options."
+        ? "Unauthorized. Check BACKEND_SHARED_TOKEN and/or ALLOWED_EXTENSION_ORIGINS in backend/.env."
         : backendMessage;
     const surfacedError = `${errorMessage} (Backend: ${base})`;
     logEvent(settings, {
@@ -2912,7 +2902,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           source: "extension.background",
           message: "Settings updated from extension UI."
         });
-        await broadcastSettingsToLinkedInTabs(settings);
         sendResponse({ ok: true });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));
@@ -2945,7 +2934,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         validateShortcutMap(updated.shortcuts);
         await saveSettings(updated);
-        await broadcastSettingsToLinkedInTabs(updated);
         logEvent(updated, {
           event: "settings.shortcut.updated",
           source: "extension.background",

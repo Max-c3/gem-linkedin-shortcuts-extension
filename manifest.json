@@ -1,19 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Gem LinkedIn Shortcuts",
-  "version": "0.1.0",
-  "description": "Run Gem actions from anywhere with configurable keyboard shortcuts.",
+  "version": "0.2.0",
+  "description": "Run Gem and Ashby recruiting actions from LinkedIn, Gem, and GitHub profiles.",
   "permissions": [
-    "storage",
-    "tabs"
+    "storage"
   ],
   "host_permissions": [
-    "https://www.linkedin.com/*",
-    "https://www.gem.com/*",
-    "https://app.gem.com/*",
-    "https://github.com/*",
-    "https://*.rebuilding-gem.com/*",
-    "https://*.onrender.com/*",
+    "https://gem-linkedin-shortcuts-extension.onrender.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://localhost/*",
@@ -40,7 +34,13 @@
   "content_scripts": [
     {
       "matches": [
-        "<all_urls>"
+        "https://www.linkedin.com/in/*",
+        "https://www.linkedin.com/pub/*",
+        "https://www.linkedin.com/talent/profile/*",
+        "https://www.linkedin.com/talent/*/profile/*",
+        "https://www.gem.com/candidate/*",
+        "https://app.gem.com/candidate/*",
+        "https://github.com/*"
       ],
       "exclude_matches": [
         "https://reflect.app/*"
@@ -53,8 +53,8 @@
     },
     {
       "matches": [
-        "https://www.gem.com/*",
-        "https://app.gem.com/*"
+        "https://www.gem.com/candidate/*",
+        "https://app.gem.com/candidate/*"
       ],
       "js": [
         "src/gem_content.js"

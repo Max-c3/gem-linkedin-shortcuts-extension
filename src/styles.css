@@ -209,6 +209,10 @@ button.secondary {
   margin-bottom: 8px;
 }
 
+.popup-hint {
+  margin-bottom: 10px;
+}
+
 .popup .buttons {
   display: grid;
   grid-template-columns: 1fr;

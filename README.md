@@ -4,15 +4,20 @@ Chrome extension + backend service that lets you run Gem and Ashby workflows usi
 
 ## Core capabilities
 
-From any website (except `https://reflect.app/*`), the extension now provides:
+On supported profile pages, the extension provides a `Gem actions` launcher (`Cmd+K` by default) with:
 
-1. `Gem actions` launcher (`Cmd+K` by default) with:
-   - Create project
-   - Search project + navigate
-   - Create sequence
-   - Search someone in Gem
+1. Create project
+2. Search project + navigate
+3. Create sequence
+4. Search someone in Gem
 
-From a LinkedIn profile page (`https://www.linkedin.com/in/...`), the extension can:
+Supported pages:
+
+- LinkedIn public and recruiter profile pages
+- Gem candidate profile pages
+- GitHub profile pages
+
+From a supported profile page, the extension can:
 
 1. Add prospect to Gem.
 2. Add candidate to a Gem project (with in-page project picker).
@@ -34,12 +39,13 @@ This is the easiest path if you want users to click a link, install once, and us
 2. Configure backend secrets in deployment env vars (`GEM_API_KEY`, `ASHBY_API_KEY`, etc).
    - Leave `GEM_DEFAULT_USER_ID` and `GEM_DEFAULT_USER_EMAIL` empty for multi-user org setup.
    - Each user selects themselves in extension Options using the built-in "Load Users" picker.
+   - For a Chrome Web Store build, prefer `ALLOWED_EXTENSION_ORIGINS=chrome-extension://<your-published-extension-id>` over shipping a shared token in the extension bundle.
 3. Set extension defaults in `src/org-defaults.json`:
    - `backendBaseUrl`: your hosted backend URL
-   - `backendSharedToken`: optional (only if backend enforces `BACKEND_SHARED_TOKEN`)
+   - `backendSharedToken`: leave empty for Chrome Web Store builds
    - leave `createdByUserId`/`createdByUserEmail` empty so users can pick their own Gem account
    - optional defaults for project/sequence/custom field IDs
-4. Ensure `manifest.json` includes your backend origin in `host_permissions`.
+4. Ensure `manifest.json` includes your backend origin in `host_permissions` before packaging if you change away from the default hosted backend or localhost dev origins.
 5. Publish in Chrome Web Store as unlisted/private and share the install link.
 6. Use `https://<your-backend-domain>/privacy` as Chrome Web Store privacy policy URL.
 
@@ -54,6 +60,7 @@ bash scripts/package-extension.sh
 Chrome Web Store copy/template files:
 - `docs/chrome-web-store-listing.md`
 - `docs/privacy-policy.md`
+- `docs/chrome-web-store-review-checklist.md`
 
 ## Local quick start (developer setup)
 
@@ -80,7 +87,9 @@ cd backend
 cat > .env <<'EOF'
 PORT=8787
 GEM_API_KEY=<your_gem_api_key>
-# Optional shared-token gate:
+# Optional production gate for the published extension origin:
+# ALLOWED_EXTENSION_ORIGINS=chrome-extension://<published_extension_id>
+# Optional shared-token gate for private/manual installs only:
 # BACKEND_SHARED_TOKEN=<random_long_token>
 # Optional:
 # GEM_DEFAULT_USER_ID=<your_gem_user_id>
@@ -93,7 +102,8 @@ To get it to work, set at least:
 
 - `GEM_API_KEY`
 - `ASHBY_API_KEY`
-- `BACKEND_SHARED_TOKEN` only if you want token-gated backend routes
+- `ALLOWED_EXTENSION_ORIGINS` is recommended for Chrome Web Store builds
+- `BACKEND_SHARED_TOKEN` is only recommended for private/manual installs where each user enters it themselves
 - If no `GEM_DEFAULT_USER_ID`/`GEM_DEFAULT_USER_EMAIL` is set, each user must pick themselves in extension Options (`Load Users` -> select user -> Save). This fills both user ID and email; email alone is sufficient.
 
 ### 3. Start backend
@@ -124,10 +134,10 @@ Expected response:
 4. Select the repo root folder (`gem-linkedin-shortcuts-extension`)
 5. Refresh the loaded extension
 6. (Recommended) Click **Keyboard shortcuts** -> Set a shortcut for activating the extension (I use cmd + g)
-7. Open a Linkedin-profile (which is already stored in our gem)
+7. Open a supported profile page (LinkedIn, Gem candidate, or GitHub)
 8. Activate the extension -> click "open options"
-9. If backend token auth is enabled, set the same token in extension options (`Backend Shared Token`) and backend `.env` (`BACKEND_SHARED_TOKEN`).
-10. Refresh the extension again + Reload the Linkedin-profile
+9. If backend token auth is enabled for your private deployment, set the same token in extension options (`Backend Shared Token`) and backend `.env` (`BACKEND_SHARED_TOKEN`).
+10. Refresh the extension again and reload the supported profile tab
 11. GTG!
 
 - Your preferred shortcuts
@@ -151,20 +161,29 @@ Expected response:
 
 - If you see `Could not load projects: Unauthorized`, check whether `BACKEND_SHARED_TOKEN` is set in `backend/.env`.
 - If it is set, the same token must be entered in extension **Options** (`Backend Shared Token`).
-- If you moved backend off localhost, confirm `manifest.json` has your backend domain in `host_permissions`.
+- If you use `ALLOWED_EXTENSION_ORIGINS`, confirm it includes your published `chrome-extension://<extension-id>` origin.
+- If you moved backend off localhost or the default hosted backend, confirm `manifest.json` has your backend domain in `host_permissions` before packaging.
+
+## Local vs Chrome Web Store auth
+
+- Local unpacked development and the Chrome Web Store build can use different backend auth paths.
+- Local development can keep using `http://localhost:8787` and either a shared token or your unpacked extension origin in `ALLOWED_EXTENSION_ORIGINS`.
+- Chrome Web Store builds should keep `src/org-defaults.json` tokenless and authorize the published `chrome-extension://<extension-id>` origin on the backend instead.
 
 ## Architecture and security model
 
 - Extension never stores Gem/Ashby API keys.
+- Chrome Web Store builds should not ship org-wide backend shared tokens in `src/org-defaults.json`.
 - Backend reads secrets from `backend/.env`
 - Backend only exposes allowlisted action routes (not a generic proxy).
-- shared-token auth (`X-Backend-Token`) can gate all backend routes.
+- Backend shared-token auth (`X-Backend-Token`) and extension-origin allowlisting can gate backend routes.
 - Backend and extension logs redact token/key/secret/password-like fields.
 
 ## Org defaults file
 
 - `src/org-defaults.json` is bundled with the extension and auto-applied on install/startup.
 - It only fills missing/default values, so users can still override settings in options if needed.
+- Keep `backendSharedToken` empty in Chrome Web Store builds.
 - Start from `src/org-defaults.example.json`.
 
 ## Development notes

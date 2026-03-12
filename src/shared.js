@@ -29,6 +29,14 @@ const LINKEDIN_NATIVE_SHORTCUT_IDS = [
   "linkedinRecruiterSend"
 ];
 
+const ALLOWED_BACKEND_ORIGINS = Object.freeze([
+  "https://gem-linkedin-shortcuts-extension.onrender.com",
+  "http://localhost",
+  "http://127.0.0.1",
+  "https://localhost",
+  "https://127.0.0.1"
+]);
+
 const DEFAULT_SETTINGS = {
   enabled: true,
   backendBaseUrl: "http://localhost:8787",
@@ -251,6 +259,27 @@ function formatShortcutForMac(shortcut) {
       return part;
     })
     .join("+");
+}
+
+function getBackendOrigin(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) {
+    return "";
+  }
+  try {
+    return new URL(value).origin;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function isAllowedBackendBaseUrl(rawValue) {
+  const origin = getBackendOrigin(rawValue);
+  return Boolean(origin) && ALLOWED_BACKEND_ORIGINS.includes(origin);
+}
+
+function formatAllowedBackendOriginsForDisplay() {
+  return ALLOWED_BACKEND_ORIGINS.join(", ");
 }
 
 function isEditableElement(target) {

@@ -16,6 +16,9 @@
       <form id="settings-form">
         <section>
           <h2>Core</h2>
+          <p class="hint">
+            Published builds only allow the shipped backend origin and localhost/127.0.0.1 for local development.
+          </p>
           <label class="row checkbox">
             <input id="enabled" type="checkbox" />
             <span>Enable extension</span>
@@ -28,6 +31,7 @@
             <span>Backend Shared Token (optional)</span>
             <input id="backendSharedToken" type="password" autocomplete="off" />
           </label>
+          <p class="hint">Do not bundle org-wide backend secrets in a Chrome Web Store build.</p>
         </section>
 
         <section>

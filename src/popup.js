@@ -20,6 +20,10 @@ function isRecoverableContentError(message) {
   return /context invalidated|Receiving end does not exist/i.test(String(message || ""));
 }
 
+function getUnsupportedTabMessage() {
+  return "Open a LinkedIn, Gem candidate, or GitHub profile tab and retry. If that tab is already supported, refresh it after the extension update.";
+}
+
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(payload, (response) => {
@@ -111,7 +115,7 @@ document.querySelectorAll("button[data-action]").forEach((button) => {
     } catch (error) {
       const message = error.message || "Failed to send action.";
       if (isRecoverableContentError(message)) {
-        setStatus("Tab needs refresh after extension update. Refresh the active profile tab and retry.", true);
+        setStatus(getUnsupportedTabMessage(), true);
       } else {
         setStatus(message, true);
       }
