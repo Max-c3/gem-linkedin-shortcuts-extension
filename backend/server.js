@@ -516,11 +516,38 @@ function getAshbyAuthHeader() {
 function getAshbyWriteOptions() {
   if (ASHBY_WRITE_REQUIRE_CONFIRMATION && !ASHBY_WRITE_CONFIRMATION_TOKEN) {
     throw new Error(
-      "Ashby writes require confirmation token. Set ASHBY_WRITE_CONFIRMATION_TOKEN in backend env."
+      "Ashby writes require confirmation token. Set ASHBY_WRITE_CONFIRMATION_TOKEN in backend env, or set ASHBY_WRITE_REQUIRE_CONFIRMATION=false to disable the extra confirmation gate."
     );
   }
   return {
     writeConfirmation: ASHBY_WRITE_CONFIRMATION_TOKEN
+  };
+}
+
+function getHealthPayload() {
+  const warnings = [];
+  if (!GEM_API_KEY) {
+    warnings.push("GEM_API_KEY is not set.");
+  }
+  if (!ASHBY_API_KEY) {
+    warnings.push("ASHBY_API_KEY is not set.");
+  }
+  if (ASHBY_WRITE_ENABLED && ASHBY_WRITE_REQUIRE_CONFIRMATION && !ASHBY_WRITE_CONFIRMATION_TOKEN) {
+    warnings.push(
+      "Ashby writes are enabled, confirmation is required, and ASHBY_WRITE_CONFIRMATION_TOKEN is not set."
+    );
+  }
+
+  return {
+    ok: true,
+    config: {
+      gemApiKeyConfigured: Boolean(GEM_API_KEY),
+      ashbyApiKeyConfigured: Boolean(ASHBY_API_KEY),
+      ashbyWriteEnabled: ASHBY_WRITE_ENABLED,
+      ashbyWriteRequireConfirmation: ASHBY_WRITE_REQUIRE_CONFIRMATION,
+      ashbyWriteConfirmationConfigured: Boolean(ASHBY_WRITE_CONFIRMATION_TOKEN)
+    },
+    warnings
   };
 }
 
@@ -4547,7 +4574,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (route === "/health" && req.method === "GET") {
-    writeJson(req, res, 200, { ok: true });
+    writeJson(req, res, 200, getHealthPayload());
     return;
   }
 

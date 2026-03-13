@@ -39,6 +39,8 @@ This is the easiest path if you want users to click a link, install once, and us
 2. Configure backend secrets in deployment env vars (`GEM_API_KEY`, `ASHBY_API_KEY`, etc).
    - Leave `GEM_DEFAULT_USER_ID` and `GEM_DEFAULT_USER_EMAIL` empty for multi-user org setup.
    - Each user selects themselves in extension Options using the built-in "Load Users" picker.
+   - If you want the Ashby upload/create flows, also set `ASHBY_WRITE_ENABLED=true`.
+   - Ashby writes require `ASHBY_WRITE_CONFIRMATION_TOKEN` by default. If you do not want that extra gate, set `ASHBY_WRITE_REQUIRE_CONFIRMATION=false`.
    - For a Chrome Web Store build, prefer `ALLOWED_EXTENSION_ORIGINS=chrome-extension://<your-published-extension-id>` over shipping a shared token in the extension bundle.
 3. Set extension defaults in `src/org-defaults.json`:
    - `backendBaseUrl`: your hosted backend URL
@@ -95,13 +97,20 @@ GEM_API_KEY=<your_gem_api_key>
 # GEM_DEFAULT_USER_ID=<your_gem_user_id>
 # GEM_DEFAULT_USER_EMAIL=<your_email@example.com>
 # ASHBY_API_KEY=<your_ashby_api_key>
+# ASHBY_WRITE_ENABLED=true
+# ASHBY_WRITE_CONFIRMATION_TOKEN=<long_random_confirmation_token>
+# Or disable the extra confirmation gate instead:
+# ASHBY_WRITE_REQUIRE_CONFIRMATION=false
 EOF
 ```
 
 To get it to work, set at least:
 
 - `GEM_API_KEY`
-- `ASHBY_API_KEY`
+- `ASHBY_API_KEY` for Ashby read/list/search actions
+- `ASHBY_WRITE_ENABLED=true` for Ashby upload/create/update actions
+- `ASHBY_WRITE_CONFIRMATION_TOKEN` if you keep the default `ASHBY_WRITE_REQUIRE_CONFIRMATION=true`
+- Or `ASHBY_WRITE_REQUIRE_CONFIRMATION=false` if you intentionally want Ashby writes without the extra confirmation gate
 - `ALLOWED_EXTENSION_ORIGINS` is recommended for Chrome Web Store builds
 - `BACKEND_SHARED_TOKEN` is only recommended for private/manual installs where each user enters it themselves
 - If no `GEM_DEFAULT_USER_ID`/`GEM_DEFAULT_USER_EMAIL` is set, each user must pick themselves in extension Options (`Load Users` -> select user -> Save). This fills both user ID and email; email alone is sufficient.
@@ -123,8 +132,20 @@ curl -sS http://localhost:8787/health
 Expected response:
 
 ```json
-{"ok":true}
+{
+  "ok": true,
+  "config": {
+    "gemApiKeyConfigured": true,
+    "ashbyApiKeyConfigured": true,
+    "ashbyWriteEnabled": true,
+    "ashbyWriteRequireConfirmation": true,
+    "ashbyWriteConfirmationConfigured": true
+  },
+  "warnings": []
+}
 ```
+
+If `warnings` includes `ASHBY_WRITE_CONFIRMATION_TOKEN is not set`, the backend can read Ashby but will refuse Ashby write actions such as candidate upload/create.
 
 ### 4. Load the extension in Chrome
 
