@@ -320,13 +320,15 @@ function ensureOrgDefaultsBootstrapped(reason = "runtime") {
 
 function normalizeSettings(input) {
   const merged = deepMerge(DEFAULT_SETTINGS, input || {});
+  const rawInput = input && typeof input === "object" ? input : {};
+  const hasExplicitGemStatusDisplayMode = Object.prototype.hasOwnProperty.call(rawInput, "gemStatusDisplayMode");
   const normalizedShortcuts = {};
   const shortcutKeys = Object.keys(DEFAULT_SETTINGS.shortcuts || {});
   for (const key of shortcutKeys) {
     normalizedShortcuts[key] = normalizeShortcut(merged.shortcuts?.[key] || DEFAULT_SETTINGS.shortcuts[key]);
   }
   const normalizedGemStatusDisplayMode = normalizeGemStatusDisplayMode(
-    merged.gemStatusDisplayMode,
+    hasExplicitGemStatusDisplayMode ? merged.gemStatusDisplayMode : undefined,
     merged.showGemStatusBadge !== false
   );
   return {
