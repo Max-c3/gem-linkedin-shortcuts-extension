@@ -37,8 +37,16 @@ const ALLOWED_BACKEND_ORIGINS = Object.freeze([
   "https://127.0.0.1"
 ]);
 
+const GEM_STATUS_DISPLAY_MODES = Object.freeze({
+  FRAME_AND_STATUS: "frameAndStatus",
+  STATUS_ONLY: "statusOnly",
+  OFF: "off"
+});
+
 const DEFAULT_SETTINGS = {
   enabled: true,
+  showGemStatusBadge: true,
+  gemStatusDisplayMode: GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS,
   backendBaseUrl: "http://localhost:8787",
   backendSharedToken: "",
   createdByUserId: "",
@@ -72,9 +80,57 @@ const DEFAULT_SETTINGS = {
     linkedinContactInfo: "C",
     linkedinExpandSeeMore: "Option+A",
     linkedinRecruiterTemplate: "T",
-    linkedinRecruiterSend: "Option+S"
+    linkedinRecruiterSend: "Option+S",
+    cycleGemStatusDisplayMode: "Cmd+Control+Option+S"
   }
 };
+
+function normalizeGemStatusDisplayMode(rawValue, fallbackEnabled = true) {
+  const value = String(rawValue || "").trim();
+  if (value === GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS) {
+    return GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS;
+  }
+  if (value === GEM_STATUS_DISPLAY_MODES.STATUS_ONLY) {
+    return GEM_STATUS_DISPLAY_MODES.STATUS_ONLY;
+  }
+  if (value === GEM_STATUS_DISPLAY_MODES.OFF) {
+    return GEM_STATUS_DISPLAY_MODES.OFF;
+  }
+  if (rawValue === false) {
+    return GEM_STATUS_DISPLAY_MODES.OFF;
+  }
+  return fallbackEnabled ? GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS : GEM_STATUS_DISPLAY_MODES.OFF;
+}
+
+function isGemStatusDisplayEnabled(mode, fallbackEnabled = true) {
+  return normalizeGemStatusDisplayMode(mode, fallbackEnabled) !== GEM_STATUS_DISPLAY_MODES.OFF;
+}
+
+function gemStatusDisplayUsesFrame(mode, fallbackEnabled = true) {
+  return normalizeGemStatusDisplayMode(mode, fallbackEnabled) === GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS;
+}
+
+function cycleGemStatusDisplayMode(mode, fallbackEnabled = true) {
+  const normalized = normalizeGemStatusDisplayMode(mode, fallbackEnabled);
+  if (normalized === GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS) {
+    return GEM_STATUS_DISPLAY_MODES.STATUS_ONLY;
+  }
+  if (normalized === GEM_STATUS_DISPLAY_MODES.STATUS_ONLY) {
+    return GEM_STATUS_DISPLAY_MODES.OFF;
+  }
+  return GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS;
+}
+
+function formatGemStatusDisplayModeLabel(mode, fallbackEnabled = true) {
+  const normalized = normalizeGemStatusDisplayMode(mode, fallbackEnabled);
+  if (normalized === GEM_STATUS_DISPLAY_MODES.FRAME_AND_STATUS) {
+    return "Liquid glass frame + status";
+  }
+  if (normalized === GEM_STATUS_DISPLAY_MODES.STATUS_ONLY) {
+    return "Status only";
+  }
+  return "Off";
+}
 
 function shortcutCanOmitModifier(shortcutId) {
   return LINKEDIN_NATIVE_SHORTCUT_IDS.includes(String(shortcutId || "").trim());
@@ -273,9 +329,29 @@ function getBackendOrigin(rawValue) {
   }
 }
 
+function isLoopbackBackendOrigin(origin) {
+  const value = String(origin || "").trim();
+  if (!value) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    const hostname = String(parsed.hostname || "").toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1";
+  } catch (_error) {
+    return false;
+  }
+}
+
 function isAllowedBackendBaseUrl(rawValue) {
   const origin = getBackendOrigin(rawValue);
-  return Boolean(origin) && ALLOWED_BACKEND_ORIGINS.includes(origin);
+  if (!origin) {
+    return false;
+  }
+  if (ALLOWED_BACKEND_ORIGINS.includes(origin)) {
+    return true;
+  }
+  return isLoopbackBackendOrigin(origin) && ALLOWED_BACKEND_ORIGINS.some((allowedOrigin) => isLoopbackBackendOrigin(allowedOrigin));
 }
 
 function formatAllowedBackendOriginsForDisplay() {

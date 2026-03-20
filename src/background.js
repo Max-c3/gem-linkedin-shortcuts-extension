@@ -107,6 +107,44 @@ function getStoredSyncSettings() {
   });
 }
 
+function listLinkedInTabsForStatusSync() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({}, (tabs) => {
+      if (chrome.runtime.lastError) {
+        resolve([]);
+        return;
+      }
+      resolve(Array.isArray(tabs) ? tabs : []);
+    });
+  });
+}
+
+function notifyLinkedInStatusChanged(context = {}, runId = "") {
+  listLinkedInTabsForStatusSync()
+    .then((tabs) => {
+      tabs.forEach((tab) => {
+        const tabId = Number(tab?.id);
+        if (!Number.isInteger(tabId) || tabId < 0) {
+          return;
+        }
+        chrome.tabs.sendMessage(
+          tabId,
+          {
+            type: "GEM_STATUS_MAY_HAVE_CHANGED",
+            runId: runId || generateId(),
+            context: context && typeof context === "object" ? context : {}
+          },
+          () => {
+            if (chrome.runtime.lastError) {
+              // Ignore tabs without active content scripts.
+            }
+          }
+        );
+      });
+    })
+    .catch(() => {});
+}
+
 function isLocalhostBackendUrl(rawValue) {
   const value = String(rawValue || "").trim();
   if (!value) {
@@ -287,8 +325,14 @@ function normalizeSettings(input) {
   for (const key of shortcutKeys) {
     normalizedShortcuts[key] = normalizeShortcut(merged.shortcuts?.[key] || DEFAULT_SETTINGS.shortcuts[key]);
   }
+  const normalizedGemStatusDisplayMode = normalizeGemStatusDisplayMode(
+    merged.gemStatusDisplayMode,
+    merged.showGemStatusBadge !== false
+  );
   return {
     ...merged,
+    showGemStatusBadge: isGemStatusDisplayEnabled(normalizedGemStatusDisplayMode),
+    gemStatusDisplayMode: normalizedGemStatusDisplayMode,
     shortcuts: normalizedShortcuts
   };
 }
@@ -2284,6 +2328,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       settings,
       { ...audit, step: "setCustomField" }
     );
+    notifyLinkedInStatusChanged({ ...context, gemCandidateId: candidate.id }, runId);
     const message = "Custom field updated for candidate.";
     logEvent(settings, {
       event: "action.succeeded",

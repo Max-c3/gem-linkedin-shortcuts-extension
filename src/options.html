@@ -24,6 +24,14 @@
             <span>Enable extension</span>
           </label>
           <label class="row">
+            <span>Gem status display on LinkedIn</span>
+            <select id="gemStatusDisplayMode">
+              <option value="frameAndStatus">Liquid glass frame + status in top-left</option>
+              <option value="statusOnly">Only status in top-left</option>
+              <option value="off">Off (no frame, no status)</option>
+            </select>
+          </label>
+          <label class="row">
             <span>Backend Base URL</span>
             <input id="backendBaseUrl" type="text" />
           </label>
@@ -91,6 +99,13 @@
             <div class="shortcut-control">
               <input id="shortcut-gemActions" type="text" readonly />
               <button type="button" class="secondary shortcut-edit" data-shortcut-id="gemActions">Edit</button>
+            </div>
+          </div>
+          <div class="row">
+            <span>Cycle Gem status display mode</span>
+            <div class="shortcut-control">
+              <input id="shortcut-cycleGemStatusDisplayMode" type="text" readonly />
+              <button type="button" class="secondary shortcut-edit" data-shortcut-id="cycleGemStatusDisplayMode">Edit</button>
             </div>
           </div>
           <div class="row">

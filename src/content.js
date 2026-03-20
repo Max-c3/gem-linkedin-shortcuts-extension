@@ -20,6 +20,7 @@ const LINKEDIN_SHORTCUT_IDS = {
   RECRUITER_TEMPLATE: "linkedinRecruiterTemplate",
   RECRUITER_SEND: "linkedinRecruiterSend"
 };
+const GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID = "cycleGemStatusDisplayMode";
 const LINKEDIN_EXPAND_MORE_MAX_PASSES = 6;
 const LINKEDIN_EXPAND_MORE_PASS_DELAY_MS = 110;
 const CANDIDATE_NOTE_MAX_LENGTH = 10000;
@@ -40,7 +41,11 @@ const CANDIDATE_EMAIL_MEMORY_CACHE_LIMIT = 80;
 const CANDIDATE_EMAIL_MEMORY_TTL_MS = 30 * 60 * 1000;
 const PROJECT_MEMORY_TTL_MS = 30 * 60 * 1000;
 const PROFILE_URL_POLL_INTERVAL_MS = 300;
-const PROFILE_IDENTITY_RETRY_INTERVAL_MS = 1200;
+const PROFILE_IDENTITY_RETRY_INTERVAL_MS = 350;
+const GEM_STATUS_BOOTSTRAP_REFRESH_STEPS_MS = [0, 120, 360, 840, 1500, 2400];
+const GEM_STATUS_LIVE_REFRESH_VISIBLE_MS = 5000;
+const GEM_STATUS_LIVE_REFRESH_HIDDEN_MS = 20000;
+const GEM_STATUS_LIVE_REFRESH_MAX_BACKOFF_MS = 120000;
 const GEM_ACTION_ACCESS_OPTIONS = [
   { key: "a", value: "shared", label: "Shared project", description: "Everyone on your team can add or remove candidates." },
   { key: "s", value: "personal", label: "Personal project", description: "Only you can see and manage this project." },
@@ -62,6 +67,16 @@ let projectMemoryEntry = null;
 let lastPrefetchedProfileContextKey = "";
 let profileUrlPollTimerId = 0;
 let profileUrlPollLastUrl = "";
+let gemStatusIndicatorElements = null;
+let gemStatusIndicatorRequestId = 0;
+let gemStatusLayoutWatcherBound = false;
+let gemStatusRefreshInFlightPromise = null;
+let gemStatusRefreshInFlightContextKey = "";
+let gemStatusRefreshInFlightForce = false;
+let gemStatusBootstrapTimerIds = [];
+let gemStatusLiveRefreshInFlight = false;
+let gemStatusLiveRefreshNextAtMs = 0;
+let gemStatusLiveRefreshFailureStreak = 0;
 let profileIdentityCache = {
   pageUrl: "",
   linkedinUrl: "",
@@ -926,6 +941,28 @@ function getSettings() {
   });
 }
 
+function saveSettings(settings) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: "SAVE_SETTINGS", settings }, (response) => {
+      if (chrome.runtime.lastError) {
+        const msg = chrome.runtime.lastError.message || "Runtime message failed.";
+        if (isContextInvalidatedError(msg)) {
+          triggerContextRecovery(msg);
+          reject(new Error("Extension updated. Reloading page."));
+          return;
+        }
+        reject(new Error(msg));
+        return;
+      }
+      if (!response?.ok) {
+        reject(new Error(response?.message || "Could not save settings"));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
 function runAction(actionId, context) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
@@ -1331,6 +1368,35 @@ function getContextLink(context) {
   );
 }
 
+function normalizeStatusTextToken(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeStatusMatchKey(value) {
+  return normalizeStatusTextToken(value)
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function summarizeStatusLabels(labels, maxVisible = 3) {
+  if (!Array.isArray(labels) || labels.length === 0) {
+    return "";
+  }
+  const normalized = labels
+    .map((label) => String(label || "").trim())
+    .filter(Boolean);
+  if (normalized.length === 0) {
+    return "";
+  }
+  if (normalized.length <= maxVisible) {
+    return normalized.join(", ");
+  }
+  return `${normalized.slice(0, maxVisible).join(", ")} +${normalized.length - maxVisible} more`;
+}
+
 function contextHasResolvableIdentity(context) {
   if (!context || typeof context !== "object") {
     return false;
@@ -1405,6 +1471,7 @@ function setCustomFieldMemoryEntry(context, data) {
   customFieldMemoryCache.delete(key);
   customFieldMemoryCache.set(key, {
     fetchedAt: Date.now(),
+    candidateId: String(data?.candidateId || ""),
     customFields: normalizedFields
   });
   while (customFieldMemoryCache.size > CUSTOM_FIELD_MEMORY_CACHE_LIMIT) {
@@ -1448,6 +1515,719 @@ function warmCustomFieldsForContext(context, runId, options = {}) {
 
   customFieldWarmPromises.set(key, promise);
   return promise;
+}
+
+function createGemStatusIndicatorStyles() {
+  if (document.getElementById("gls-gem-status-style")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "gls-gem-status-style";
+  style.textContent = `
+    #gls-gem-status-signal {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2147483000;
+      --gls-frame-thickness: clamp(5px, 0.52vw, 9px);
+      --gls-status-banner-gap: 14px;
+      --gls-status-card-top: 74px;
+      --gls-status-accent: #ff5f67;
+      --gls-status-secondary: #ffb4bc;
+      --gls-status-accent-soft: rgba(255, 95, 103, 0.72);
+      --gls-status-secondary-soft: rgba(255, 180, 188, 0.64);
+      --gls-status-outline: rgba(255, 95, 103, 0.72);
+      --gls-status-surface: rgba(21, 23, 30, 0.98);
+      --gls-status-surface-top: rgba(255, 255, 255, 0.12);
+      --gls-status-shadow: rgba(145, 18, 32, 0.36);
+      --gls-status-text: #fff5f6;
+      --gls-status-frame-opacity: 1;
+    }
+    #gls-gem-status-signal[hidden] {
+      display: none !important;
+    }
+    #gls-gem-status-signal[data-display-mode='statusOnly']::before {
+      content: none;
+    }
+    #gls-gem-status-signal[data-display-mode='statusOnly'] .gls-gem-status-frame {
+      display: none;
+    }
+    #gls-gem-status-signal::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(126% 62% at 50% -10%, var(--gls-status-accent) 0, var(--gls-status-accent-soft) 38%, transparent 72%),
+        radial-gradient(126% 62% at 50% 112%, var(--gls-status-secondary) 0, var(--gls-status-secondary-soft) 42%, transparent 74%),
+        radial-gradient(72% 132% at -8% 50%, var(--gls-status-accent) 0, var(--gls-status-accent-soft) 44%, transparent 74%),
+        radial-gradient(72% 132% at 108% 50%, var(--gls-status-secondary) 0, var(--gls-status-secondary-soft) 44%, transparent 74%);
+      -webkit-mask: radial-gradient(96% 88% at 50% 50%, transparent 50%, #000 90%);
+      mask: radial-gradient(96% 88% at 50% 50%, transparent 50%, #000 90%);
+      opacity: 1;
+      filter: saturate(190%) contrast(112%);
+    }
+    #gls-gem-status-signal::after {
+      content: none;
+    }
+    .gls-gem-status-frame {
+      position: fixed;
+      inset: 0;
+      padding: var(--gls-frame-thickness);
+      border-radius: 0;
+      border: none;
+      background:
+        linear-gradient(90deg, var(--gls-status-accent), var(--gls-status-secondary) 50%, var(--gls-status-accent)),
+        linear-gradient(
+          135deg,
+          var(--gls-status-accent) 0,
+          rgba(16, 18, 23, 0.98) 34%,
+          rgba(16, 18, 23, 0.98) 66%,
+          var(--gls-status-secondary) 100%
+        ),
+        conic-gradient(
+          from 214deg at 50% 50%,
+          var(--gls-status-accent-soft),
+          rgba(255, 255, 255, 0.03) 17%,
+          var(--gls-status-secondary-soft) 44%,
+          rgba(255, 255, 255, 0.02) 68%,
+          var(--gls-status-accent-soft) 100%
+        );
+      opacity: var(--gls-status-frame-opacity);
+      transition:
+        opacity 180ms ease,
+        border-color 180ms ease,
+        box-shadow 180ms ease,
+        background 180ms ease;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.74),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.38),
+        inset 0 0 44px rgba(255, 255, 255, 0.1),
+        0 0 0 2px var(--gls-status-outline),
+        0 0 64px var(--gls-status-accent),
+        0 0 108px var(--gls-status-secondary),
+        0 28px 68px var(--gls-status-shadow);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      overflow: visible;
+    }
+    .gls-gem-status-frame::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      padding: 1px;
+      background: linear-gradient(
+        135deg,
+        rgba(255, 255, 255, 0.86),
+        rgba(255, 255, 255, 0.18) 34%,
+        var(--gls-status-secondary-soft) 56%,
+        rgba(255, 255, 255, 0.42)
+      );
+      -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      opacity: 0.9;
+    }
+    .gls-gem-status-card {
+      position: fixed;
+      top: var(--gls-status-card-top);
+      left: var(--gls-status-banner-gap);
+      transform: none;
+      max-width: min(460px, calc(100vw - (var(--gls-status-banner-gap) * 2)));
+      padding: 7px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.26);
+      background:
+        linear-gradient(
+          98deg,
+          var(--gls-status-accent) 0,
+          rgba(14, 16, 21, 0.985) 18%,
+          rgba(14, 16, 21, 0.985) 82%,
+          var(--gls-status-secondary) 100%
+        ),
+        var(--gls-status-surface);
+      color: var(--gls-status-text);
+      text-align: left;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.2),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.1),
+        0 8px 18px var(--gls-status-shadow),
+        0 0 0 1px rgba(255, 255, 255, 0.12),
+        0 0 28px var(--gls-status-accent),
+        0 0 40px var(--gls-status-secondary);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    .gls-gem-status-card::before {
+      content: none;
+    }
+    .gls-gem-status-card::after {
+      content: none;
+    }
+    .gls-gem-status-label {
+      display: none;
+    }
+    .gls-gem-status-value {
+      max-width: 100%;
+      font-size: clamp(15px, 1vw, 19px);
+      line-height: 1.14;
+      font-weight: 730;
+      letter-spacing: -0.007em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow:
+        0 0 10px var(--gls-status-accent-soft),
+        0 0 14px var(--gls-status-secondary-soft);
+    }
+    .gls-gem-status-meta {
+      display: none;
+    }
+    @media (max-width: 900px) {
+      .gls-gem-status-card {
+        max-width: min(360px, calc(100vw - (var(--gls-status-banner-gap) * 2)));
+        padding: 6px 10px;
+      }
+      .gls-gem-status-value {
+        font-size: clamp(13px, 3.5vw, 16px);
+      }
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function getLinkedInHeaderBounds() {
+  const candidates = [];
+  const selectors = ["#global-nav", ".global-nav", "header.global-nav", "header[role='banner']"];
+  selectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((element) => {
+      if (!element || typeof element.getBoundingClientRect !== "function") {
+        return;
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.height <= 0 || rect.bottom <= 0) {
+        return;
+      }
+      const style = window.getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") {
+        return;
+      }
+      const position = String(style.position || "").toLowerCase();
+      if (position === "fixed" || position === "sticky" || rect.top <= 8) {
+        candidates.push({ top: rect.top, bottom: rect.bottom });
+      }
+    });
+  });
+  if (candidates.length === 0) {
+    return { top: 0, bottom: 56 };
+  }
+  const minTop = Math.min(...candidates.map((candidate) => candidate.top));
+  const maxBottom = Math.max(...candidates.map((candidate) => candidate.bottom));
+  return {
+    top: Math.max(0, Math.min(60, Math.round(minTop))),
+    bottom: Math.max(44, Math.min(180, Math.round(maxBottom)))
+  };
+}
+
+function applyGemStatusLayout() {
+  if (!gemStatusIndicatorElements?.root) {
+    return;
+  }
+  const gap = window.innerWidth <= 900 ? 8 : 10;
+  const headerBounds = getLinkedInHeaderBounds();
+  const cardTop = headerBounds.top + gap;
+  gemStatusIndicatorElements.root.style.setProperty("--gls-status-banner-gap", `${gap}px`);
+  gemStatusIndicatorElements.root.style.setProperty("--gls-status-card-top", `${cardTop}px`);
+}
+
+function ensureGemStatusIndicatorElements() {
+  if (gemStatusIndicatorElements?.root?.isConnected) {
+    return gemStatusIndicatorElements;
+  }
+  createGemStatusIndicatorStyles();
+  const root = document.createElement("div");
+  root.id = "gls-gem-status-signal";
+  root.hidden = true;
+
+  const frame = document.createElement("div");
+  frame.className = "gls-gem-status-frame";
+
+  const card = document.createElement("div");
+  card.className = "gls-gem-status-card";
+  card.setAttribute("role", "status");
+  card.setAttribute("aria-live", "polite");
+
+  const value = document.createElement("div");
+  value.className = "gls-gem-status-value";
+
+  card.appendChild(value);
+  root.appendChild(frame);
+  root.appendChild(card);
+
+  (document.body || document.documentElement).appendChild(root);
+  gemStatusIndicatorElements = { root, frame, card, value };
+  if (!gemStatusLayoutWatcherBound) {
+    gemStatusLayoutWatcherBound = true;
+    window.addEventListener(
+      "resize",
+      () => {
+        if (!gemStatusIndicatorElements?.root || gemStatusIndicatorElements.root.hidden) {
+          return;
+        }
+        applyGemStatusLayout();
+      },
+      { passive: true }
+    );
+  }
+  return gemStatusIndicatorElements;
+}
+
+function hideGemStatusIndicator() {
+  if (!gemStatusIndicatorElements?.root) {
+    return;
+  }
+  gemStatusIndicatorElements.root.hidden = true;
+  gemStatusIndicatorElements.root.removeAttribute("data-tone");
+  gemStatusIndicatorElements.root.removeAttribute("data-display-mode");
+}
+
+function clearGemStatusBootstrapTimers() {
+  if (!Array.isArray(gemStatusBootstrapTimerIds) || gemStatusBootstrapTimerIds.length === 0) {
+    return;
+  }
+  gemStatusBootstrapTimerIds.forEach((timerId) => window.clearTimeout(timerId));
+  gemStatusBootstrapTimerIds = [];
+}
+
+function scheduleGemStatusLiveRefresh(delayMs = 0) {
+  gemStatusLiveRefreshNextAtMs = Date.now() + Math.max(0, Number(delayMs) || 0);
+}
+
+function getGemStatusLiveRefreshIntervalMs() {
+  const baseInterval = document.visibilityState === "visible"
+    ? GEM_STATUS_LIVE_REFRESH_VISIBLE_MS
+    : GEM_STATUS_LIVE_REFRESH_HIDDEN_MS;
+  if (gemStatusLiveRefreshFailureStreak <= 0) {
+    return baseInterval;
+  }
+  const multiplier = Math.pow(2, Math.min(4, gemStatusLiveRefreshFailureStreak));
+  return Math.min(GEM_STATUS_LIVE_REFRESH_MAX_BACKOFF_MS, baseInterval * multiplier);
+}
+
+function scheduleGemStatusBootstrapRefreshes(contextHint = null) {
+  clearGemStatusBootstrapTimers();
+  const settings = cachedSettings;
+  if (!settings?.enabled || !isCurrentGemStatusDisplayEnabled(settings) || !isLinkedInProfilePage()) {
+    return;
+  }
+  const hintedContextKey = getCustomFieldContextKey(contextHint);
+  GEM_STATUS_BOOTSTRAP_REFRESH_STEPS_MS.forEach((delayMs) => {
+    const timerId = window.setTimeout(() => {
+      const liveSettings = cachedSettings;
+      if (!liveSettings?.enabled || !isCurrentGemStatusDisplayEnabled(liveSettings) || !isLinkedInProfilePage()) {
+        return;
+      }
+      const liveContext = getProfileContext();
+      const liveContextKey = getCustomFieldContextKey(liveContext);
+      const effectiveContext = hintedContextKey && hintedContextKey === liveContextKey ? contextHint : liveContext;
+      refreshGemStatusIndicator({
+        context: effectiveContext,
+        runId: generateRunId(),
+        forceRefresh: false
+      }).catch(() => {});
+    }, Math.max(0, Number(delayMs) || 0));
+    gemStatusBootstrapTimerIds.push(timerId);
+  });
+}
+
+function maybeRefreshGemStatusLive(options = {}) {
+  if (!cachedSettings) {
+    return;
+  }
+  const settings = cachedSettings;
+  if (!settings.enabled || !isCurrentGemStatusDisplayEnabled(settings) || !isLinkedInProfilePage()) {
+    return;
+  }
+  if (gemStatusLiveRefreshInFlight) {
+    return;
+  }
+  const now = Date.now();
+  const force = Boolean(options.force);
+  if (!force && gemStatusLiveRefreshNextAtMs > now) {
+    return;
+  }
+  const context = options.context || getProfileContext();
+  if (!contextHasResolvableIdentity(context)) {
+    scheduleGemStatusLiveRefresh(500);
+    return;
+  }
+
+  gemStatusLiveRefreshInFlight = true;
+  refreshGemStatusIndicator({
+    context,
+    runId: options.runId || generateRunId(),
+    forceRefresh: options.forceRefresh !== false
+  })
+    .then(() => {
+      gemStatusLiveRefreshFailureStreak = 0;
+    })
+    .catch(() => {
+      gemStatusLiveRefreshFailureStreak = Math.min(gemStatusLiveRefreshFailureStreak + 1, 6);
+    })
+    .finally(() => {
+      gemStatusLiveRefreshInFlight = false;
+      scheduleGemStatusLiveRefresh(getGemStatusLiveRefreshIntervalMs());
+    });
+}
+
+function resetGemStatusIndicator() {
+  gemStatusIndicatorRequestId += 1;
+  hideGemStatusIndicator();
+  clearGemStatusBootstrapTimers();
+  gemStatusLiveRefreshInFlight = false;
+  gemStatusLiveRefreshNextAtMs = 0;
+  gemStatusLiveRefreshFailureStreak = 0;
+  gemStatusRefreshInFlightPromise = null;
+  gemStatusRefreshInFlightContextKey = "";
+  gemStatusRefreshInFlightForce = false;
+}
+
+function getGemStatusPalette(statusText, hasValue) {
+  const normalized = normalizeStatusTextToken(statusText);
+  const matchKey = normalizeStatusMatchKey(statusText);
+  if (!hasValue) {
+    return {
+      tone: "neutral",
+      accent: "#96a3b8",
+      accentSecondary: "#d6deea",
+      accentSoft: "rgba(150, 163, 184, 0.16)",
+      accentSecondarySoft: "rgba(214, 222, 234, 0.14)",
+      outline: "rgba(198, 209, 226, 0.46)",
+      surface: "rgba(28, 34, 44, 0.8)",
+      surfaceTop: "rgba(255, 255, 255, 0.08)",
+      shadow: "rgba(15, 23, 42, 0.18)",
+      text: "#f8fafc",
+      frameOpacity: "0.76"
+    };
+  }
+  const exactPaletteByStatus = {
+    "reviewed accepted": {
+      tone: "reviewed-accepted",
+      accent: "#2fd07f",
+      accentSecondary: "#9af2c7",
+      accentSoft: "rgba(47, 208, 127, 0.22)",
+      accentSecondarySoft: "rgba(154, 242, 199, 0.16)",
+      outline: "rgba(120, 236, 178, 0.62)",
+      surface: "rgba(12, 43, 29, 0.8)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(8, 74, 46, 0.34)",
+      text: "#effff7",
+      frameOpacity: "0.96"
+    },
+    "reviewed rejected": {
+      tone: "reviewed-rejected",
+      accent: "#ff5e74",
+      accentSecondary: "#ffb0ba",
+      accentSoft: "rgba(255, 94, 116, 0.24)",
+      accentSecondarySoft: "rgba(255, 176, 186, 0.16)",
+      outline: "rgba(255, 128, 147, 0.66)",
+      surface: "rgba(52, 16, 27, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(122, 19, 42, 0.36)",
+      text: "#fff4f6",
+      frameOpacity: "0.97"
+    },
+    "applied in review": {
+      tone: "applied-in-review",
+      accent: "#8b96ad",
+      accentSecondary: "#d8deea",
+      accentSoft: "rgba(139, 150, 173, 0.2)",
+      accentSecondarySoft: "rgba(216, 222, 234, 0.16)",
+      outline: "rgba(196, 205, 223, 0.56)",
+      surface: "rgba(31, 37, 48, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(16, 22, 34, 0.34)",
+      text: "#f6f8fc",
+      frameOpacity: "0.93"
+    },
+    hired: {
+      tone: "hired",
+      accent: "#98a2b8",
+      accentSecondary: "#33d17f",
+      accentSoft: "rgba(152, 162, 184, 0.18)",
+      accentSecondarySoft: "rgba(51, 209, 127, 0.2)",
+      outline: "rgba(171, 224, 197, 0.56)",
+      surface: "rgba(27, 35, 39, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(9, 44, 28, 0.34)",
+      text: "#f1fff7",
+      frameOpacity: "0.96"
+    },
+    interviewing: {
+      tone: "interviewing",
+      accent: "#98a2b8",
+      accentSecondary: "#49a6ff",
+      accentSoft: "rgba(152, 162, 184, 0.18)",
+      accentSecondarySoft: "rgba(73, 166, 255, 0.22)",
+      outline: "rgba(151, 201, 245, 0.56)",
+      surface: "rgba(25, 33, 45, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(11, 48, 94, 0.34)",
+      text: "#f2f9ff",
+      frameOpacity: "0.95"
+    },
+    "rejected us": {
+      tone: "rejected-us",
+      accent: "#98a2b8",
+      accentSecondary: "#ffaf4f",
+      accentSoft: "rgba(152, 162, 184, 0.18)",
+      accentSecondarySoft: "rgba(255, 175, 79, 0.22)",
+      outline: "rgba(240, 190, 129, 0.56)",
+      surface: "rgba(39, 32, 23, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(117, 72, 17, 0.34)",
+      text: "#fff9f2",
+      frameOpacity: "0.95"
+    },
+    "we rejected": {
+      tone: "we-rejected",
+      accent: "#98a2b8",
+      accentSecondary: "#ff6678",
+      accentSoft: "rgba(152, 162, 184, 0.18)",
+      accentSecondarySoft: "rgba(255, 102, 120, 0.22)",
+      outline: "rgba(238, 151, 164, 0.56)",
+      surface: "rgba(45, 24, 31, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(122, 24, 44, 0.34)",
+      text: "#fff5f7",
+      frameOpacity: "0.96"
+    }
+  };
+  if (exactPaletteByStatus[matchKey]) {
+    return exactPaletteByStatus[matchKey];
+  }
+  if (/(^|[^a-z])(dnc|do not contact|do-not-contact|don't contact|dont contact|no contact|opt out|opt-out|unsubscribe|blocked|blacklist)([^a-z]|$)/.test(normalized)) {
+    return {
+      tone: "danger",
+      accent: "#ff5f67",
+      accentSecondary: "#ffb7bf",
+      accentSoft: "rgba(255, 95, 103, 0.24)",
+      accentSecondarySoft: "rgba(255, 183, 191, 0.16)",
+      outline: "rgba(255, 95, 103, 0.76)",
+      surface: "rgba(86, 12, 22, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.12)",
+      shadow: "rgba(145, 18, 32, 0.36)",
+      text: "#fff5f6",
+      frameOpacity: "1"
+    };
+  }
+  if (/(on hold|hold|paused|pause|cooldown|later|nurture|waiting|not now|rejected|rejection|pass)([^a-z]|$)/.test(normalized)) {
+    return {
+      tone: "caution",
+      accent: "#ffb020",
+      accentSecondary: "#ffd28a",
+      accentSoft: "rgba(255, 176, 32, 0.22)",
+      accentSecondarySoft: "rgba(255, 210, 138, 0.16)",
+      outline: "rgba(255, 176, 32, 0.68)",
+      surface: "rgba(73, 44, 2, 0.8)",
+      surfaceTop: "rgba(255, 255, 255, 0.1)",
+      shadow: "rgba(140, 95, 10, 0.28)",
+      text: "#fff9ef",
+      frameOpacity: "0.9"
+    };
+  }
+  if (/(interested|engaged|active process|interview|ready|approved|priority|top target|move forward|moving forward)([^a-z]|$)/.test(normalized)) {
+    return {
+      tone: "positive",
+      accent: "#1fce78",
+      accentSecondary: "#8bf0be",
+      accentSoft: "rgba(31, 206, 120, 0.22)",
+      accentSecondarySoft: "rgba(139, 240, 190, 0.16)",
+      outline: "rgba(31, 206, 120, 0.66)",
+      surface: "rgba(7, 61, 35, 0.8)",
+      surfaceTop: "rgba(255, 255, 255, 0.1)",
+      shadow: "rgba(10, 116, 61, 0.28)",
+      text: "#effff6",
+      frameOpacity: "0.9"
+    };
+  }
+  if (/(contacted|reached out|outreach|sequence|sequenced|new lead|new|sourced|screen|pipeline|active)([^a-z]|$)/.test(normalized)) {
+    return {
+      tone: "info",
+      accent: "#3aa0ff",
+      accentSecondary: "#9fd2ff",
+      accentSoft: "rgba(58, 160, 255, 0.22)",
+      accentSecondarySoft: "rgba(159, 210, 255, 0.16)",
+      outline: "rgba(58, 160, 255, 0.66)",
+      surface: "rgba(9, 38, 82, 0.82)",
+      surfaceTop: "rgba(255, 255, 255, 0.1)",
+      shadow: "rgba(10, 63, 135, 0.28)",
+      text: "#eef7ff",
+      frameOpacity: "0.9"
+    };
+  }
+  return {
+    tone: "neutral",
+    accent: "#b7c2d8",
+    accentSecondary: "#eef3ff",
+    accentSoft: "rgba(183, 194, 216, 0.14)",
+    accentSecondarySoft: "rgba(238, 243, 255, 0.12)",
+    outline: "rgba(183, 194, 216, 0.48)",
+    surface: "rgba(28, 36, 47, 0.8)",
+    surfaceTop: "rgba(255, 255, 255, 0.08)",
+    shadow: "rgba(15, 23, 42, 0.2)",
+    text: "#f8fafc",
+    frameOpacity: "0.8"
+  };
+}
+
+function findGemStatusField(customFields) {
+  const fields = normalizeCustomFieldsForPicker(customFields);
+  if (fields.length === 0) {
+    return null;
+  }
+  const exactMatches = fields.filter((field) => normalizeStatusTextToken(field.name) === "status");
+  const fuzzyMatches = exactMatches.length > 0
+    ? exactMatches
+    : fields.filter((field) => normalizeStatusTextToken(field.name).startsWith("status"));
+  if (fuzzyMatches.length === 0) {
+    return null;
+  }
+  return fuzzyMatches
+    .slice()
+    .sort((left, right) => {
+      const leftScore = (left.currentValueLabels?.length ? 4 : 0) + (left.scope === "team" ? 2 : 0) + (left.scope === "project" ? 1 : 0);
+      const rightScore = (right.currentValueLabels?.length ? 4 : 0) + (right.scope === "team" ? 2 : 0) + (right.scope === "project" ? 1 : 0);
+      if (leftScore !== rightScore) {
+        return rightScore - leftScore;
+      }
+      return String(left.name || "").localeCompare(String(right.name || ""));
+    })[0];
+}
+
+function renderGemStatusIndicator(context, data) {
+  const displayMode = getCurrentGemStatusDisplayMode();
+  if (!isGemStatusDisplayEnabled(displayMode)) {
+    hideGemStatusIndicator();
+    return;
+  }
+  const candidateId = String(data?.candidateId || "").trim();
+  if (!candidateId) {
+    hideGemStatusIndicator();
+    return;
+  }
+  const statusField = findGemStatusField(data?.customFields);
+  if (!statusField) {
+    hideGemStatusIndicator();
+    return;
+  }
+  const labels = Array.isArray(statusField.currentValueLabels)
+    ? statusField.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
+    : [];
+  const hasValue = labels.length > 0;
+  const statusText = hasValue ? summarizeStatusLabels(labels, 3) : "Not set";
+  const palette = getGemStatusPalette(statusText, hasValue);
+  const elements = ensureGemStatusIndicatorElements();
+  elements.root.dataset.displayMode = displayMode;
+  elements.root.dataset.tone = palette.tone;
+  elements.root.style.setProperty("--gls-status-accent", palette.accent);
+  elements.root.style.setProperty("--gls-status-secondary", palette.accentSecondary || palette.accent);
+  elements.root.style.setProperty("--gls-status-accent-soft", palette.accentSoft);
+  elements.root.style.setProperty(
+    "--gls-status-secondary-soft",
+    palette.accentSecondarySoft || palette.accentSoft
+  );
+  elements.root.style.setProperty("--gls-status-outline", palette.outline);
+  elements.root.style.setProperty("--gls-status-surface", palette.surface);
+  elements.root.style.setProperty("--gls-status-surface-top", palette.surfaceTop);
+  elements.root.style.setProperty("--gls-status-shadow", palette.shadow);
+  elements.root.style.setProperty("--gls-status-text", palette.text);
+  elements.root.style.setProperty("--gls-status-frame-opacity", palette.frameOpacity);
+  applyGemStatusLayout();
+  elements.value.textContent = statusText;
+  elements.root.hidden = false;
+}
+
+async function refreshGemStatusIndicator(options = {}) {
+  const settings = cachedSettings || DEFAULT_SETTINGS;
+  const context = options.context || getProfileContext();
+  const isStatusEnabled = Boolean(settings.enabled) && isCurrentGemStatusDisplayEnabled(settings);
+  if (!isStatusEnabled || !isLinkedInProfilePage()) {
+    resetGemStatusIndicator();
+    return;
+  }
+  if (!contextHasResolvableIdentity(context)) {
+    hideGemStatusIndicator();
+    return;
+  }
+
+  const contextKey = getCustomFieldContextKey(context);
+  if (!contextKey) {
+    hideGemStatusIndicator();
+    return;
+  }
+
+  const memoryEntry = getCustomFieldMemoryEntry(context);
+  if (memoryEntry.entry && String(memoryEntry.entry.candidateId || "").trim()) {
+    renderGemStatusIndicator(context, memoryEntry.entry);
+  } else {
+    hideGemStatusIndicator();
+  }
+
+  const forceRefresh = Boolean(options.forceRefresh) || !memoryEntry.entry || !String(memoryEntry.entry.candidateId || "").trim();
+  if (
+    gemStatusRefreshInFlightPromise &&
+    gemStatusRefreshInFlightContextKey === contextKey &&
+    (gemStatusRefreshInFlightForce || !forceRefresh)
+  ) {
+    await gemStatusRefreshInFlightPromise;
+    return;
+  }
+
+  const requestId = ++gemStatusIndicatorRequestId;
+  const refreshPromise = warmCustomFieldsForContext(context, options.runId || generateRunId(), {
+      preferCache: !forceRefresh,
+      refreshInBackground: !forceRefresh,
+      forceRefresh,
+      allowCreate: false
+    })
+    .then((data) => {
+      if (requestId !== gemStatusIndicatorRequestId) {
+        return;
+      }
+      const liveContextKey = getCustomFieldContextKey(getProfileContext());
+      if (liveContextKey !== contextKey || !cachedSettings?.enabled || !isCurrentGemStatusDisplayEnabled(cachedSettings) || !isLinkedInProfilePage()) {
+        return;
+      }
+      renderGemStatusIndicator(context, data);
+    })
+    .catch((_error) => {
+      if (requestId === gemStatusIndicatorRequestId) {
+        hideGemStatusIndicator();
+      }
+      throw _error;
+    });
+
+  gemStatusRefreshInFlightPromise = refreshPromise;
+  gemStatusRefreshInFlightContextKey = contextKey;
+  gemStatusRefreshInFlightForce = forceRefresh;
+
+  try {
+    await refreshPromise;
+  } finally {
+    if (gemStatusRefreshInFlightPromise === refreshPromise) {
+      gemStatusRefreshInFlightPromise = null;
+      gemStatusRefreshInFlightContextKey = "";
+      gemStatusRefreshInFlightForce = false;
+    }
+  }
 }
 
 function getCandidateEmailMemoryEntry(context) {
@@ -1524,10 +2304,23 @@ function warmCandidateEmailsForContext(context, runId, options = {}) {
 }
 
 function prefetchPickersForCurrentProfile() {
-  if (!cachedSettings?.enabled || !isSupportedActionPage()) {
+  const settings = cachedSettings;
+  if (!settings?.enabled || !isSupportedActionPage()) {
+    resetGemStatusIndicator();
     return;
   }
   const profileContext = getProfileContext();
+  if (isLinkedInProfilePage()) {
+    if (isCurrentGemStatusDisplayEnabled(settings)) {
+      refreshGemStatusIndicator({ context: profileContext, runId: generateRunId() }).catch(() => {});
+      scheduleGemStatusBootstrapRefreshes(profileContext);
+      scheduleGemStatusLiveRefresh(contextHasResolvableIdentity(profileContext) ? 1200 : 240);
+    } else {
+      resetGemStatusIndicator();
+    }
+  } else {
+    resetGemStatusIndicator();
+  }
   if (!contextHasResolvableIdentity(profileContext)) {
     return;
   }
@@ -1557,15 +2350,16 @@ function startProfileUrlPrefetchWatcher() {
   profileUrlPollLastUrl = normalizePageUrlForWatcher(window.location.href);
   profileUrlPollTimerId = window.setInterval(() => {
     const currentUrl = normalizePageUrlForWatcher(window.location.href);
-    if (currentUrl === profileUrlPollLastUrl) {
-      return;
+    if (currentUrl !== profileUrlPollLastUrl) {
+      profileUrlPollLastUrl = currentUrl;
+      if (!isSupportedActionPage()) {
+        lastPrefetchedProfileContextKey = "";
+        resetGemStatusIndicator();
+      } else {
+        prefetchPickersForCurrentProfile();
+      }
     }
-    profileUrlPollLastUrl = currentUrl;
-    if (!isSupportedActionPage()) {
-      lastPrefetchedProfileContextKey = "";
-      return;
-    }
-    prefetchPickersForCurrentProfile();
+    maybeRefreshGemStatusLive();
   }, PROFILE_URL_POLL_INTERVAL_MS);
 }
 
@@ -1621,6 +2415,19 @@ function logEvent(payload) {
 async function refreshSettings() {
   cachedSettings = await getSettings();
   return cachedSettings;
+}
+
+function getCurrentGemStatusDisplayMode(settings = cachedSettings || DEFAULT_SETTINGS) {
+  const baseline = settings || {};
+  return normalizeGemStatusDisplayMode(
+    baseline.gemStatusDisplayMode,
+    baseline.showGemStatusBadge !== false
+  );
+}
+
+function isCurrentGemStatusDisplayEnabled(settings = cachedSettings || DEFAULT_SETTINGS) {
+  const mode = getCurrentGemStatusDisplayMode(settings);
+  return isGemStatusDisplayEnabled(mode);
 }
 
 function findActionByShortcut(shortcut) {
@@ -3675,7 +4482,10 @@ async function showCustomFieldPicker(runId, context) {
       loading = false;
       loadError = "";
       allFields = normalizeCustomFieldsForPicker(data);
-      setCustomFieldMemoryEntry(context, allFields);
+      setCustomFieldMemoryEntry(context, {
+        candidateId: data?.candidateId || "",
+        customFields: allFields
+      });
 
       if (step === "values" && selectedField) {
         const refreshedField = allFields.find((field) => field.id === selectedField.id) || selectedField;
@@ -8624,14 +9434,39 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
     if (result?.ok) {
       if (actionId === ACTIONS.SET_CUSTOM_FIELD) {
         try {
-          await warmCustomFieldsForContext(context, result.runId || effectiveRunId, {
+          const refreshedCustomFields = await warmCustomFieldsForContext(context, result.runId || effectiveRunId, {
             preferCache: false,
             refreshInBackground: false,
             forceRefresh: true
           });
+          if (
+            isLinkedInProfilePage() &&
+            isCurrentGemStatusDisplayEnabled(cachedSettings) &&
+            getCustomFieldContextKey(getProfileContext()) === getCustomFieldContextKey(context)
+          ) {
+            renderGemStatusIndicator(context, refreshedCustomFields);
+            scheduleGemStatusLiveRefresh(0);
+          }
         } catch (_error) {
           // Ignore refresh errors; action itself already succeeded.
         }
+      } else if (
+        isLinkedInProfilePage() &&
+        [
+          ACTIONS.ADD_PROSPECT,
+          ACTIONS.ADD_TO_PROJECT,
+          ACTIONS.ADD_NOTE_TO_CANDIDATE,
+          ACTIONS.OPEN_ACTIVITY,
+          ACTIONS.SET_REMINDER,
+          ACTIONS.SEND_SEQUENCE,
+          ACTIONS.EDIT_SEQUENCE
+        ].includes(actionId)
+      ) {
+        refreshGemStatusIndicator({
+          context,
+          forceRefresh: true,
+          runId: result.runId || effectiveRunId
+        }).catch(() => {});
       }
       showToast(result.message || "Action completed.");
       if (actionId === ACTIONS.UPLOAD_TO_ASHBY && result.link) {
@@ -8671,7 +9506,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
   }
 }
 
-function getConfiguredLinkedInShortcut(shortcutId) {
+function getConfiguredShortcut(shortcutId) {
   const configured = normalizeShortcut(cachedSettings?.shortcuts?.[shortcutId] || "");
   if (configured) {
     return configured;
@@ -8679,16 +9514,16 @@ function getConfiguredLinkedInShortcut(shortcutId) {
   return normalizeShortcut(DEFAULT_SETTINGS?.shortcuts?.[shortcutId] || "");
 }
 
-function getConfiguredLinkedInShortcutLabel(shortcutId) {
-  const shortcut = getConfiguredLinkedInShortcut(shortcutId);
+function getConfiguredShortcutLabel(shortcutId) {
+  const shortcut = getConfiguredShortcut(shortcutId);
   return formatShortcutForMac(shortcut) || shortcut;
 }
 
-function isConfiguredLinkedInShortcut(event, shortcutId) {
+function isConfiguredShortcut(event, shortcutId) {
   if (!event || event.repeat) {
     return false;
   }
-  const expectedShortcut = getConfiguredLinkedInShortcut(shortcutId);
+  const expectedShortcut = getConfiguredShortcut(shortcutId);
   if (!expectedShortcut) {
     return false;
   }
@@ -8699,8 +9534,66 @@ function isConfiguredLinkedInShortcut(event, shortcutId) {
   return actualShortcut === expectedShortcut;
 }
 
+function getConfiguredLinkedInShortcut(shortcutId) {
+  return getConfiguredShortcut(shortcutId);
+}
+
+function getConfiguredLinkedInShortcutLabel(shortcutId) {
+  return getConfiguredShortcutLabel(shortcutId);
+}
+
+function isConfiguredLinkedInShortcut(event, shortcutId) {
+  return isConfiguredShortcut(event, shortcutId);
+}
+
 function isConnectShortcut(event) {
   return isConfiguredLinkedInShortcut(event, LINKEDIN_SHORTCUT_IDS.CONNECT);
+}
+
+function isCycleGemStatusDisplayModeShortcut(event) {
+  return isConfiguredShortcut(event, GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID);
+}
+
+async function cycleGemStatusDisplayModeSetting(
+  runId,
+  shortcutLabel = getConfiguredShortcutLabel(GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID)
+) {
+  const currentSettings = cachedSettings || (await refreshSettings());
+  const currentMode = getCurrentGemStatusDisplayMode(currentSettings);
+  const nextMode = cycleGemStatusDisplayMode(currentMode);
+  const nextSettings = deepMerge(DEFAULT_SETTINGS, currentSettings || {});
+  nextSettings.gemStatusDisplayMode = nextMode;
+  nextSettings.showGemStatusBadge = isGemStatusDisplayEnabled(nextMode);
+
+  await saveSettings(nextSettings);
+  cachedSettings = deepMerge(DEFAULT_SETTINGS, nextSettings);
+
+  if (!isGemStatusDisplayEnabled(nextMode)) {
+    resetGemStatusIndicator();
+  } else if (isLinkedInProfilePage()) {
+    prefetchPickersForCurrentProfile();
+    scheduleGemStatusLiveRefresh(0);
+    maybeRefreshGemStatusLive({
+      force: true,
+      forceRefresh: true,
+      runId
+    });
+  }
+
+  const nextLabel = formatGemStatusDisplayModeLabel(nextMode);
+  showToast(`Gem status display: ${nextLabel}.`);
+  await logEvent({
+    source: "extension.content",
+    event: "gem_status.display_mode.cycled",
+    runId,
+    message: `Gem status display set to ${nextLabel.toLowerCase()}.`,
+    link: window.location.href,
+    details: {
+      fromMode: currentMode,
+      toMode: nextMode,
+      shortcut: shortcutLabel
+    }
+  });
 }
 
 function isElementVisible(element) {
@@ -9997,6 +10890,28 @@ function onKeyDown(event) {
     return;
   }
 
+  if (supportedPage && isLinkedInContext && isCycleGemStatusDisplayModeShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const runId = generateRunId();
+    const shortcutLabel = getConfiguredShortcutLabel(GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID);
+    cycleGemStatusDisplayModeSetting(runId, shortcutLabel).catch((error) => {
+      showToast(error.message || "Could not cycle Gem status display mode.", true);
+      logEvent({
+        source: "extension.content",
+        level: "error",
+        event: "gem_status.display_mode.cycle_failed",
+        runId,
+        message: error.message || "Unexpected Gem status display mode shortcut error.",
+        link: window.location.href,
+        details: {
+          shortcut: shortcutLabel
+        }
+      });
+    });
+    return;
+  }
+
   if (supportedPage && isLinkedInContext && isConnectShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -10193,14 +11108,59 @@ function onKeyDown(event) {
 async function init() {
   window.addEventListener("keydown", onKeyDown, true);
   startProfileUrlPrefetchWatcher();
+  window.addEventListener(
+    "load",
+    () => {
+      if (!(cachedSettings?.enabled && isSupportedActionPage())) {
+        return;
+      }
+      lastPrefetchedProfileContextKey = "";
+      prefetchPickersForCurrentProfile();
+      scheduleGemStatusLiveRefresh(0);
+      maybeRefreshGemStatusLive({ force: true, forceRefresh: true, runId: generateRunId() });
+    },
+    { passive: true }
+  );
+  window.addEventListener(
+    "focus",
+    () => {
+      if (!(cachedSettings?.enabled && isLinkedInProfilePage())) {
+        return;
+      }
+      scheduleGemStatusLiveRefresh(0);
+      maybeRefreshGemStatusLive({ force: true, forceRefresh: true, runId: generateRunId() });
+    },
+    { passive: true }
+  );
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (!(cachedSettings?.enabled && isLinkedInProfilePage())) {
+        return;
+      }
+      if (document.visibilityState === "visible") {
+        scheduleGemStatusBootstrapRefreshes(getProfileContext());
+        scheduleGemStatusLiveRefresh(0);
+        maybeRefreshGemStatusLive({ force: true, forceRefresh: true, runId: generateRunId() });
+        return;
+      }
+      scheduleGemStatusLiveRefresh(getGemStatusLiveRefreshIntervalMs());
+    },
+    { passive: true }
+  );
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === "sync" && changes.settings) {
       cachedSettings = deepMerge(DEFAULT_SETTINGS, changes.settings.newValue || {});
       if (cachedSettings?.enabled && isSupportedActionPage()) {
         lastPrefetchedProfileContextKey = "";
         prefetchPickersForCurrentProfile();
+        if (isLinkedInProfilePage()) {
+          scheduleGemStatusLiveRefresh(0);
+          maybeRefreshGemStatusLive({ force: true, forceRefresh: true, runId: generateRunId() });
+        }
       } else {
         lastPrefetchedProfileContextKey = "";
+        resetGemStatusIndicator();
       }
     }
   });
@@ -10223,17 +11183,44 @@ async function init() {
   if (cachedSettings?.enabled && isSupportedActionPage()) {
     lastPrefetchedProfileContextKey = "";
     prefetchPickersForCurrentProfile();
+    if (isLinkedInProfilePage()) {
+      scheduleGemStatusLiveRefresh(0);
+      maybeRefreshGemStatusLive({ force: true, forceRefresh: true, runId: generateRunId() });
+    }
+  } else {
+    resetGemStatusIndicator();
   }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "GEM_STATUS_MAY_HAVE_CHANGED") {
+    if (cachedSettings?.enabled && isCurrentGemStatusDisplayEnabled(cachedSettings) && isLinkedInProfilePage()) {
+      const context = getProfileContext();
+      scheduleGemStatusBootstrapRefreshes(context);
+      scheduleGemStatusLiveRefresh(0);
+      maybeRefreshGemStatusLive({
+        context,
+        force: true,
+        forceRefresh: true,
+        runId: message.runId || generateRunId()
+      });
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message?.type === "SETTINGS_UPDATED") {
     cachedSettings = deepMerge(DEFAULT_SETTINGS, message.settings || {});
     if (cachedSettings?.enabled && isSupportedActionPage()) {
       lastPrefetchedProfileContextKey = "";
       prefetchPickersForCurrentProfile();
+      if (isLinkedInProfilePage()) {
+        scheduleGemStatusLiveRefresh(0);
+        maybeRefreshGemStatusLive({ force: true, forceRefresh: true, runId: generateRunId() });
+      }
     } else {
       lastPrefetchedProfileContextKey = "";
+      resetGemStatusIndicator();
     }
     sendResponse({ ok: true });
     return false;

@@ -1,6 +1,7 @@
 "use strict";
 
 const enabledCheckbox = document.getElementById("enabled");
+const gemStatusDisplayModeSelect = document.getElementById("gemStatusDisplayMode");
 const statusEl = document.getElementById("status");
 const optionsBtn = document.getElementById("open-options");
 
@@ -21,7 +22,7 @@ function isRecoverableContentError(message) {
 }
 
 function getUnsupportedTabMessage() {
-  return "Open a LinkedIn, Gem candidate, or GitHub profile tab and retry. If that tab is already supported, refresh it after the extension update.";
+  return "Open a LinkedIn, Gem candidate, Gem project, or GitHub profile tab and retry. If that tab is already supported, refresh it after the extension update.";
 }
 
 function sendRuntimeMessage(payload) {
@@ -65,27 +66,36 @@ async function loadState() {
   }
   const settings = deepMerge(DEFAULT_SETTINGS, response.settings || {});
   enabledCheckbox.checked = !!settings.enabled;
+  gemStatusDisplayModeSelect.value = normalizeGemStatusDisplayMode(
+    settings.gemStatusDisplayMode,
+    settings.showGemStatusBadge !== false
+  );
 }
 
-enabledCheckbox.addEventListener("change", async () => {
+async function updateSettingsPatch(patch, successMessage, successEvent, failureEvent) {
   try {
     const response = await sendRuntimeMessage({ type: "GET_SETTINGS" });
     if (!response?.ok) {
       throw new Error(response?.message || "Could not load settings");
     }
     const settings = deepMerge(DEFAULT_SETTINGS, response.settings || {});
-    settings.enabled = enabledCheckbox.checked;
+    Object.assign(settings, patch || {});
+    settings.gemStatusDisplayMode = normalizeGemStatusDisplayMode(
+      settings.gemStatusDisplayMode,
+      settings.showGemStatusBadge !== false
+    );
+    settings.showGemStatusBadge = isGemStatusDisplayEnabled(settings.gemStatusDisplayMode);
     const saveResponse = await sendRuntimeMessage({ type: "SAVE_SETTINGS", settings });
     if (!saveResponse?.ok) {
       throw new Error(saveResponse?.message || "Could not save settings");
     }
-    setStatus(enabledCheckbox.checked ? "Enabled" : "Disabled");
+    setStatus(successMessage);
     sendRuntimeMessage({
       type: "LOG_EVENT",
       payload: {
         source: "extension.popup",
-        event: "popup.enabled_toggled",
-        message: enabledCheckbox.checked ? "Extension enabled from popup." : "Extension disabled from popup."
+        event: successEvent,
+        message: successMessage
       }
     }).catch(() => {});
   } catch (error) {
@@ -95,11 +105,33 @@ enabledCheckbox.addEventListener("change", async () => {
       payload: {
         source: "extension.popup",
         level: "error",
-        event: "popup.enabled_toggle_failed",
-        message: error.message || "Failed to toggle extension."
+        event: failureEvent,
+        message: error.message || "Failed to update popup setting."
       }
     }).catch(() => {});
   }
+}
+
+enabledCheckbox.addEventListener("change", async () => {
+  await updateSettingsPatch(
+    { enabled: enabledCheckbox.checked },
+    enabledCheckbox.checked ? "Enabled" : "Disabled",
+    "popup.enabled_toggled",
+    "popup.enabled_toggle_failed"
+  );
+});
+
+gemStatusDisplayModeSelect.addEventListener("change", async () => {
+  const nextMode = normalizeGemStatusDisplayMode(gemStatusDisplayModeSelect.value, true);
+  await updateSettingsPatch(
+    {
+      gemStatusDisplayMode: nextMode,
+      showGemStatusBadge: isGemStatusDisplayEnabled(nextMode)
+    },
+    `Gem status display: ${formatGemStatusDisplayModeLabel(nextMode)}.`,
+    "popup.status_badge_toggled",
+    "popup.status_badge_toggle_failed"
+  );
 });
 
 document.querySelectorAll("button[data-action]").forEach((button) => {

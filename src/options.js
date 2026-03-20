@@ -20,6 +20,7 @@ let gemUsersLoaded = false;
 
 const SHORTCUT_LABELS = {
   gemActions: "Gem actions",
+  cycleGemStatusDisplayMode: "Cycle Gem status display mode",
   addProspect: "Add Prospect",
   addToProject: "Add to Project",
   uploadToAshby: "Upload to Ashby",
@@ -66,8 +67,14 @@ function getShortcutValue(shortcutId) {
 }
 
 function readInputs() {
+  const gemStatusDisplayMode = normalizeGemStatusDisplayMode(
+    document.getElementById("gemStatusDisplayMode").value,
+    true
+  );
   return {
     enabled: document.getElementById("enabled").checked,
+    gemStatusDisplayMode,
+    showGemStatusBadge: isGemStatusDisplayEnabled(gemStatusDisplayMode),
     backendBaseUrl: document.getElementById("backendBaseUrl").value.trim(),
     backendSharedToken: document.getElementById("backendSharedToken").value.trim(),
     createdByUserId: document.getElementById("createdByUserId").value.trim(),
@@ -80,6 +87,7 @@ function readInputs() {
     sequenceComposeUrlTemplate: document.getElementById("sequenceComposeUrlTemplate").value.trim(),
     shortcuts: {
       gemActions: getShortcutValue("gemActions"),
+      cycleGemStatusDisplayMode: getShortcutValue("cycleGemStatusDisplayMode"),
       addProspect: getShortcutValue("addProspect"),
       addToProject: getShortcutValue("addToProject"),
       uploadToAshby: getShortcutValue("uploadToAshby"),
@@ -108,6 +116,10 @@ function readInputs() {
 
 function writeInputs(settings) {
   document.getElementById("enabled").checked = !!settings.enabled;
+  document.getElementById("gemStatusDisplayMode").value = normalizeGemStatusDisplayMode(
+    settings.gemStatusDisplayMode,
+    settings.showGemStatusBadge !== false
+  );
   document.getElementById("backendBaseUrl").value = settings.backendBaseUrl || "";
   document.getElementById("backendSharedToken").value = settings.backendSharedToken || "";
   document.getElementById("createdByUserId").value = settings.createdByUserId || "";
@@ -120,6 +132,7 @@ function writeInputs(settings) {
   document.getElementById("sequenceComposeUrlTemplate").value = settings.sequenceComposeUrlTemplate || "";
 
   setShortcutValue("gemActions", settings.shortcuts.gemActions || "");
+  setShortcutValue("cycleGemStatusDisplayMode", settings.shortcuts.cycleGemStatusDisplayMode || "");
   setShortcutValue("addProspect", settings.shortcuts.addProspect || "");
   setShortcutValue("addToProject", settings.shortcuts.addToProject || "");
   setShortcutValue("uploadToAshby", settings.shortcuts.uploadToAshby || "");
