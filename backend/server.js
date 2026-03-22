@@ -64,10 +64,12 @@ const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, "logs");
 const LOG_FILE = path.join(LOG_DIR, "events.jsonl");
 const LOG_MAX_BYTES = Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024);
 const PROJECTS_SCAN_MAX = Number(process.env.PROJECTS_SCAN_MAX || 20000);
+const CUSTOM_FIELDS_SCAN_MAX = Number(process.env.CUSTOM_FIELDS_SCAN_MAX || PROJECTS_SCAN_MAX || 20000);
 const SEQUENCES_SCAN_MAX = Number(process.env.SEQUENCES_SCAN_MAX || 20000);
 const ASHBY_JOBS_SCAN_MAX = Number(process.env.ASHBY_JOBS_SCAN_MAX || 5000);
 const ASHBY_CANDIDATES_SCAN_MAX = Number(process.env.ASHBY_CANDIDATES_SCAN_MAX || 100000);
 const GEM_CANDIDATE_LOOKUP_SCAN_MAX = Number(process.env.GEM_CANDIDATE_LOOKUP_SCAN_MAX || 5000);
+const GEM_CUSTOM_FIELDS_CACHE_TTL_MS = Number(process.env.GEM_CUSTOM_FIELDS_CACHE_TTL_MS || 10 * 60 * 1000);
 const GEM_LINKEDIN_URL_LOOKUP_TTL_MS = Number(process.env.GEM_LINKEDIN_URL_LOOKUP_TTL_MS || 10 * 60 * 1000);
 const GEM_CANDIDATE_SEARCH_SCAN_MAX = Number(process.env.GEM_CANDIDATE_SEARCH_SCAN_MAX || 50000);
 const GEM_CANDIDATE_SEARCH_TTL_MS = Number(process.env.GEM_CANDIDATE_SEARCH_TTL_MS || 15 * 60 * 1000);
@@ -131,6 +133,14 @@ let gemCandidateSearchCache = {
   candidates: []
 };
 let gemCandidateSearchRefreshPromise = null;
+let gemCustomFieldCatalogCache = {
+  builtAtMs: 0,
+  builtAt: "",
+  scannedCount: 0,
+  isComplete: false,
+  fields: []
+};
+let gemCustomFieldCatalogRefreshPromise = null;
 const gemCandidateSearchProbeHistory = new Map();
 
 function generateId() {
@@ -1587,62 +1597,20 @@ async function listProjects(payload, audit) {
   return { projects: normalized };
 }
 
-async function listCustomFields(payload, audit) {
-  const requestedLimitRaw = Number(payload.limit);
-  const requestedLimit =
-    Number.isFinite(requestedLimitRaw) && requestedLimitRaw > 0
-      ? Math.max(1, Math.min(requestedLimitRaw, PROJECTS_SCAN_MAX))
-      : 0;
-  const scanTarget = requestedLimit || PROJECTS_SCAN_MAX;
-  const pageSize = 100;
-  const maxPages = Math.max(1, Math.ceil(scanTarget / pageSize));
-  let aggregated = [];
-
-  for (let page = 1; page <= maxPages; page += 1) {
-    const pageData = await gemRequest(
-      "/v0/custom_fields",
-      {
-        query: {
-          page_size: pageSize,
-          page
-        }
-      },
-      audit
-    );
-    const fields = Array.isArray(pageData) ? pageData : [];
-    aggregated = aggregated.concat(fields);
-    if (fields.length < pageSize || aggregated.length >= scanTarget) {
-      break;
-    }
+function getGemCustomFieldCatalogAgeMs(cache = gemCustomFieldCatalogCache) {
+  if (!cache?.builtAtMs) {
+    return Number.POSITIVE_INFINITY;
   }
+  return Date.now() - Number(cache.builtAtMs);
+}
 
-  let candidateProjectIds = [];
-  const candidateCustomFieldMembershipById = new Map();
-  const candidateId = String(payload.candidateId || "").trim();
-  if (candidateId) {
-    const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
-    candidateProjectIds = Array.isArray(candidate?.project_ids) ? candidate.project_ids.map((id) => String(id || "")) : [];
-    const memberships = Array.isArray(candidate?.custom_fields) ? candidate.custom_fields : [];
-    memberships.forEach((membership) => {
-      const membershipFieldId = String(membership?.id || membership?.custom_field_id || "").trim();
-      if (!membershipFieldId) {
-        return;
-      }
-      const valueOptionIdsRaw = Array.isArray(membership?.value_option_ids)
-        ? membership.value_option_ids
-        : Array.isArray(membership?.option_ids)
-          ? membership.option_ids
-          : [];
-      const valueOptionIds = valueOptionIdsRaw.map((id) => String(id || "").trim()).filter(Boolean);
-      candidateCustomFieldMembershipById.set(membershipFieldId, {
-        value: membership?.value,
-        valueOptionIds
-      });
-    });
-  }
+function isGemCustomFieldCatalogFresh(cache = gemCustomFieldCatalogCache) {
+  return getGemCustomFieldCatalogAgeMs(cache) <= GEM_CUSTOM_FIELDS_CACHE_TTL_MS;
+}
 
+function normalizeGemCustomFieldCatalog(fields) {
   const seen = new Set();
-  let customFields = aggregated
+  return (Array.isArray(fields) ? fields : [])
     .map((field) => ({
       id: String(field.id || ""),
       name: String(field.name || ""),
@@ -1665,6 +1633,143 @@ async function listCustomFields(payload, audit) {
       if (!field.id || seen.has(field.id) || field.isHidden) {
         return false;
       }
+      seen.add(field.id);
+      return true;
+    });
+}
+
+async function refreshGemCustomFieldCatalog(audit) {
+  const configuredScanLimit = Number.isFinite(Number(CUSTOM_FIELDS_SCAN_MAX))
+    ? Number(CUSTOM_FIELDS_SCAN_MAX)
+    : 0;
+  const scanLimit = configuredScanLimit > 0 ? Math.min(configuredScanLimit, 50000) : 0;
+  if (scanLimit <= 0) {
+    gemCustomFieldCatalogCache = {
+      builtAtMs: Date.now(),
+      builtAt: new Date().toISOString(),
+      scannedCount: 0,
+      isComplete: true,
+      fields: []
+    };
+    return gemCustomFieldCatalogCache;
+  }
+
+  const pageSize = 100;
+  const maxPages = Math.max(1, Math.ceil(scanLimit / pageSize));
+  const fields = await listPaged("/v0/custom_fields", audit, {
+    pageSize,
+    maxPages,
+    limit: scanLimit
+  });
+  const normalized = normalizeGemCustomFieldCatalog(fields);
+
+  gemCustomFieldCatalogCache = {
+    builtAtMs: Date.now(),
+    builtAt: new Date().toISOString(),
+    scannedCount: Array.isArray(fields) ? fields.length : 0,
+    isComplete: Array.isArray(fields) ? fields.length < scanLimit : false,
+    fields: normalized
+  };
+
+  logEvent({
+    source: "backend",
+    event: "gem.custom_fields_catalog.refreshed",
+    message: "Refreshed Gem custom field catalog cache.",
+    requestId: audit.requestId,
+    route: audit.route,
+    runId: audit.runId,
+    actionId: audit.actionId,
+    details: {
+      scanLimit,
+      scannedCount: gemCustomFieldCatalogCache.scannedCount,
+      customFieldCount: normalized.length,
+      isComplete: gemCustomFieldCatalogCache.isComplete
+    }
+  });
+
+  return gemCustomFieldCatalogCache;
+}
+
+function ensureGemCustomFieldCatalog(audit, options = {}) {
+  const forceRefresh = Boolean(options.forceRefresh);
+  if (!forceRefresh && isGemCustomFieldCatalogFresh(gemCustomFieldCatalogCache) && Array.isArray(gemCustomFieldCatalogCache.fields)) {
+    return Promise.resolve(gemCustomFieldCatalogCache);
+  }
+  if (gemCustomFieldCatalogRefreshPromise) {
+    return gemCustomFieldCatalogRefreshPromise;
+  }
+  gemCustomFieldCatalogRefreshPromise = refreshGemCustomFieldCatalog(audit).finally(() => {
+    gemCustomFieldCatalogRefreshPromise = null;
+  });
+  return gemCustomFieldCatalogRefreshPromise;
+}
+
+function buildCandidateCustomFieldMembershipById(memberships) {
+  const map = new Map();
+  (Array.isArray(memberships) ? memberships : []).forEach((membership) => {
+    const membershipFieldId = String(membership?.id || membership?.custom_field_id || "").trim();
+    if (!membershipFieldId) {
+      return;
+    }
+    const valueOptionIdsRaw = Array.isArray(membership?.value_option_ids)
+      ? membership.value_option_ids
+      : Array.isArray(membership?.option_ids)
+        ? membership.option_ids
+        : [];
+    const valueOptionIds = valueOptionIdsRaw.map((id) => String(id || "").trim()).filter(Boolean);
+    map.set(membershipFieldId, {
+      value: membership?.value,
+      valueOptionIds
+    });
+  });
+  return map;
+}
+
+async function resolveCustomFieldCandidateContext(payload, audit) {
+  const candidateId = String(payload.candidateId || "").trim();
+  if (!candidateId) {
+    return {
+      candidateId: "",
+      candidateProjectIds: [],
+      candidateCustomFieldMembershipById: new Map()
+    };
+  }
+
+  const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
+  return {
+    candidateId,
+    candidateProjectIds: Array.isArray(candidate?.project_ids) ? candidate.project_ids.map((id) => String(id || "")) : [],
+    candidateCustomFieldMembershipById: buildCandidateCustomFieldMembershipById(candidate?.custom_fields)
+  };
+}
+
+async function listCustomFields(payload, audit) {
+  const requestedLimitRaw = Number(payload.limit);
+  const requestedLimit =
+    Number.isFinite(requestedLimitRaw) && requestedLimitRaw > 0
+      ? Math.max(1, Math.min(requestedLimitRaw, CUSTOM_FIELDS_SCAN_MAX))
+      : 0;
+  if (Boolean(payload.catalogOnly)) {
+    await ensureGemCustomFieldCatalog(audit, { forceRefresh: Boolean(payload.forceRefresh) });
+    return {
+      candidateId: String(payload.candidateId || "").trim(),
+      customFields: []
+    };
+  }
+  const [catalog, candidateContext] = await Promise.all([
+    ensureGemCustomFieldCatalog(audit, { forceRefresh: Boolean(payload.forceRefresh) }),
+    resolveCustomFieldCandidateContext(payload, audit)
+  ]);
+
+  const candidateProjectIds = Array.isArray(candidateContext.candidateProjectIds) ? candidateContext.candidateProjectIds : [];
+  const candidateCustomFieldMembershipById =
+    candidateContext.candidateCustomFieldMembershipById instanceof Map
+      ? candidateContext.candidateCustomFieldMembershipById
+      : new Map();
+  const candidateId = String(candidateContext.candidateId || "").trim();
+
+  let customFields = (Array.isArray(catalog?.fields) ? catalog.fields : [])
+    .filter((field) => {
       if (field.scope === "project") {
         return Boolean(field.projectId) && candidateProjectIds.includes(field.projectId);
       }
@@ -1706,7 +1811,7 @@ async function listCustomFields(payload, audit) {
         ...field,
         currentOptionIds,
         currentValueLabels,
-        options: field.options.sort((a, b) => a.value.localeCompare(b.value))
+        options: field.options.slice().sort((a, b) => a.value.localeCompare(b.value))
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));

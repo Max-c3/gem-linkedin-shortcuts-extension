@@ -2902,6 +2902,19 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
     forceFreshLookup: Boolean(options.forceFreshLookup)
   });
   if (!candidateId) {
+    try {
+      await callBackend(
+        "/api/custom-fields/list",
+        {
+          limit: 0,
+          catalogOnly: true
+        },
+        settings,
+        { ...audit, step: "warmCustomFieldCatalog" }
+      );
+    } catch (_error) {
+      // Best-effort warm-up only. The interactive load path will still fetch on demand.
+    }
     await setCachedCustomFieldsForContext(context, "", []);
     return {
       candidateId: "",

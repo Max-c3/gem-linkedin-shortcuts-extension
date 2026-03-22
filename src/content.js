@@ -3148,16 +3148,18 @@ function prefetchPickersForCurrentProfile() {
     resetGemStatusIndicator();
     return;
   }
-  const profileContext = getProfileContext();
-  if (isLinkedInProfilePage()) {
+  let profileContext = getProfileContext();
+  const isLinkedInContext = isLinkedInProfilePage();
+  if (isLinkedInContext) {
     syncLinkedInGemStatusForCurrentPage({
       delayMs: contextHasResolvedLinkedInStatusIdentity(profileContext)
         ? LINKEDIN_PAGE_CHANGE_REFRESH_DELAY_MS
         : LINKEDIN_PAGE_CHANGE_IDENTITY_RETRY_DELAY_MS
     });
-    return;
+    profileContext = getProfileContext();
+  } else {
+    resetGemStatusIndicator();
   }
-  resetGemStatusIndicator();
   if (!contextHasResolvableIdentity(profileContext)) {
     return;
   }
@@ -3166,13 +3168,16 @@ function prefetchPickersForCurrentProfile() {
     return;
   }
   lastPrefetchedProfileContextKey = contextKey;
-  prefetchProjects(generateRunId(), { forceRefresh: true }).catch(() => {});
-  prefetchSequences(generateRunId()).catch(() => {});
   warmCustomFieldsForContext(profileContext, generateRunId(), {
     preferCache: true,
     refreshInBackground: true,
     allowCreate: false
   }).catch(() => {});
+  if (isLinkedInContext) {
+    return;
+  }
+  prefetchProjects(generateRunId(), { forceRefresh: true }).catch(() => {});
+  prefetchSequences(generateRunId()).catch(() => {});
   warmCandidateEmailsForContext(profileContext, generateRunId(), {
     preferCache: true,
     refreshInBackground: true,
