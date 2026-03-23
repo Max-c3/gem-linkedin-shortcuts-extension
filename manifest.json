@@ -51,8 +51,7 @@
       ],
       "js": [
         "src/shared.js",
-        "src/content_bootstrap.js",
-        "src/content.js"
+        "src/content_bootstrap.js"
       ],
       "run_at": "document_idle"
     },

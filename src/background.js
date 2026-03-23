@@ -28,7 +28,7 @@ const CANDIDATE_EMAIL_CACHE_LIMIT = 200;
 const SHARED_RUNTIME_FILE = "src/shared.js";
 const CONTENT_RUNTIME_FILES = Object.freeze(["src/content.js"]);
 const CANDIDATE_RESOLUTION_TTL_MS = 2 * 60 * 1000;
-const CANDIDATE_RESOLUTION_NEGATIVE_TTL_MS = 1500;
+const CANDIDATE_RESOLUTION_NEGATIVE_TTL_MS = 5 * 60 * 1000;
 const CANDIDATE_RESOLUTION_CACHE_LIMIT = 300;
 const ORG_DEFAULTS_PATH = "src/org-defaults.json";
 const ORG_DEFAULT_SETTINGS_KEYS = [
@@ -696,6 +696,59 @@ async function setCachedCustomFieldsForContext(context, candidateId, customField
     }, {});
 
   await setCustomFieldCacheStore(pruned);
+}
+
+function normalizePassiveStatusToken(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizePassiveCustomFields(fields) {
+  return Array.isArray(fields)
+    ? fields
+        .map((field) => ({
+          id: String(field?.id || "").trim(),
+          name: String(field?.name || "").trim(),
+          scope: String(field?.scope || "").trim(),
+          currentValueLabels: Array.isArray(field?.currentValueLabels)
+            ? field.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
+            : []
+        }))
+        .filter((field) => field.id && field.name)
+    : [];
+}
+
+function findPassiveGemStatusField(customFields) {
+  const normalizedFields = normalizePassiveCustomFields(customFields);
+  if (normalizedFields.length === 0) {
+    return null;
+  }
+  const exactMatches = normalizedFields.filter((field) => normalizePassiveStatusToken(field.name) === "status");
+  const fuzzyMatches = exactMatches.length > 0
+    ? exactMatches
+    : normalizedFields.filter((field) => normalizePassiveStatusToken(field.name).startsWith("status"));
+  if (fuzzyMatches.length === 0) {
+    return null;
+  }
+  return fuzzyMatches
+    .slice()
+    .sort((left, right) => {
+      const leftScore = (left.currentValueLabels.length ? 4 : 0) + (left.scope === "team" ? 2 : 0) + (left.scope === "project" ? 1 : 0);
+      const rightScore = (right.currentValueLabels.length ? 4 : 0) + (right.scope === "team" ? 2 : 0) + (right.scope === "project" ? 1 : 0);
+      if (leftScore !== rightScore) {
+        return rightScore - leftScore;
+      }
+      return left.name.localeCompare(right.name);
+    })[0];
+}
+
+function getPassiveGemStatusLabels(customFields) {
+  const statusField = findPassiveGemStatusField(customFields);
+  return Array.isArray(statusField?.currentValueLabels)
+    ? statusField.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
+    : [];
 }
 
 function normalizeCustomFieldSelectionLabels(selection, field = null) {
@@ -1957,7 +2010,7 @@ function pingTabContentRuntime(tabId) {
         resolve(false);
         return;
       }
-      resolve(Boolean(response?.ok));
+      resolve(Boolean(response?.ok && response?.version === CONTENT_RUNTIME_VERSION));
     });
   });
 }
@@ -1985,6 +2038,10 @@ async function ensureContentRuntimeInTab(tabId, files = CONTENT_RUNTIME_FILES) {
     target: { tabId },
     files: Array.isArray(files) && files.length > 0 ? files : CONTENT_RUNTIME_FILES
   });
+  const readyAfterInject = await pingTabContentRuntime(tabId);
+  if (!readyAfterInject && (!Array.isArray(files) || files.includes("src/content.js"))) {
+    throw new Error("Could not initialize the current page helper. Reload the tab and retry.");
+  }
   return { injected: true };
 }
 
@@ -2190,6 +2247,7 @@ async function ensureCandidate(settings, context, audit, options = {}) {
       profileUrl: collectContextProfileUrls(context)[0] || ""
     }
   });
+  notifyLinkedInStatusChanged({ ...context, gemCandidateId: created.candidate.id }, audit.runId);
   return created.candidate;
 }
 
@@ -2971,11 +3029,12 @@ function ensureCustomFieldRefresh(settings, context, runId, options = {}) {
 async function listCustomFieldsForContext(settings, context, runId, options = {}) {
   const forceRefresh = Boolean(options.forceRefresh);
   const allowCreate = options.allowCreate !== false;
+  const allowEmptyCandidateCache = Boolean(options.allowEmptyCandidateCache);
   const actionId = ACTIONS.SET_CUSTOM_FIELD;
 
   const cached = await getCachedCustomFieldsForContext(context);
   const cachedCandidateId = String(cached.entry?.candidateId || "").trim();
-  const hasUsableCachedEntry = Boolean(cached.entry && cachedCandidateId);
+  const hasUsableCachedEntry = Boolean(cached.entry && (cachedCandidateId || allowEmptyCandidateCache));
   if (!forceRefresh && hasUsableCachedEntry) {
     if (!cached.isFresh) {
       ensureCustomFieldRefresh(settings, context, runId, { allowCreate }).catch(() => {});
@@ -3015,6 +3074,25 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
     }
   });
   return refreshed;
+}
+
+async function getPassiveGemStatusForContext(settings, context, runId, options = {}) {
+  const data = await listCustomFieldsForContext(settings, context, runId, {
+    preferCache: options.preferCache !== false,
+    refreshInBackground: options.refreshInBackground !== false,
+    forceRefresh: Boolean(options.forceRefresh),
+    allowCreate: false,
+    allowEmptyCandidateCache: true
+  });
+  const candidateId = String(data?.candidateId || "").trim();
+  return {
+    candidateId,
+    statusLabels: getPassiveGemStatusLabels(data?.customFields),
+    hasCandidate: Boolean(candidateId),
+    fromCache: Boolean(data?.fromCache),
+    stale: Boolean(data?.stale),
+    source: data?.fromCache ? (data?.stale ? "stale-cache" : "cache") : "backend"
+  };
 }
 
 async function findExistingCandidateIdForContext(settings, context, runId, actionId, options = {}) {
@@ -3726,6 +3804,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           primaryEmail: data.primaryEmail,
           fromCache: Boolean(data.fromCache),
           stale: Boolean(data.stale)
+        });
+      })
+      .catch((error) => sendResponse({ ok: false, message: error.message }));
+    return true;
+  }
+
+  if (message.type === "GET_PASSIVE_GEM_STATUS") {
+    getSettings()
+      .then(async (settings) => {
+        const runId = message.runId || generateId();
+        const context = message.context || {};
+        const data = await getPassiveGemStatusForContext(settings, context, runId, {
+          preferCache: message.preferCache !== false,
+          refreshInBackground: message.refreshInBackground !== false,
+          forceRefresh: Boolean(message.forceRefresh)
+        });
+        sendResponse({
+          ok: true,
+          runId,
+          candidateId: data.candidateId,
+          statusLabels: data.statusLabels,
+          hasCandidate: data.hasCandidate,
+          fromCache: data.fromCache,
+          stale: data.stale,
+          source: data.source
         });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));

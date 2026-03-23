@@ -4,8 +4,8 @@ const enabledCheckbox = document.getElementById("enabled");
 const gemStatusDisplayModeSelect = document.getElementById("gemStatusDisplayMode");
 const statusEl = document.getElementById("status");
 const optionsBtn = document.getElementById("open-options");
-const LINKEDIN_BOOTSTRAP_FILES = ["src/content_bootstrap.js"];
-const FULL_RUNTIME_FILES = ["src/content.js"];
+const LINKEDIN_BOOTSTRAP_FILES = ["src/shared.js", "src/content_bootstrap.js"];
+const FULL_RUNTIME_FILES = ["src/shared.js", "src/content.js"];
 const SUPPORTED_TAB_PATTERNS = [
   /^https:\/\/www\.linkedin\.com\/(?:in|pub)\//i,
   /^https:\/\/www\.linkedin\.com\/talent(?:\/[^/]+)?\/profile\//i,
@@ -24,6 +24,8 @@ function generateRunId() {
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.style.color = isError ? "#a61d24" : "#4f5358";
+  statusEl.style.borderColor = isError ? "#e4b9bc" : "#d9dee5";
+  statusEl.style.background = isError ? "#fff5f6" : "#f7f9fc";
 }
 
 function isRecoverableContentError(message) {
@@ -71,6 +73,27 @@ function sendTabMessage(tabId, payload) {
   });
 }
 
+function formatActionResultStatus(result) {
+  if (!result || typeof result !== "object") {
+    return {
+      message: "The page helper did not return a result.",
+      isError: true
+    };
+  }
+  const message = String(result.message || "").trim() || (result.ok ? "Action completed." : "Action failed.");
+  const debugSummary = String(result.debugSummary || "").trim();
+  if (!debugSummary) {
+    return { message, isError: result.ok === false };
+  }
+  if (message === debugSummary) {
+    return { message, isError: result.ok === false };
+  }
+  return {
+    message: result.ok === false ? `${message} ${debugSummary}` : message,
+    isError: result.ok === false
+  };
+}
+
 async function getCurrentTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs?.[0] || null;
@@ -78,6 +101,92 @@ async function getCurrentTab() {
 
 function pingContent(tabId) {
   return sendTabMessage(tabId, { type: "PING" });
+}
+
+function isCurrentRuntimeResponse(response) {
+  return Boolean(response?.ok && response?.kind !== "bootstrap" && response?.version === CONTENT_RUNTIME_VERSION);
+}
+
+function isLinkedInBootstrapResponse(response) {
+  return Boolean(response?.ok && response?.kind === "bootstrap" && response?.version === CONTENT_RUNTIME_VERSION);
+}
+
+function isAcceptableHelperResponse(response, tab = null) {
+  if (isCurrentRuntimeResponse(response)) {
+    return true;
+  }
+  if (isLinkedInTabUrl(tab?.url || "")) {
+    return isLinkedInBootstrapResponse(response);
+  }
+  return false;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    let sawLoading = false;
+    const timeoutId = window.setTimeout(() => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+      reject(new Error("Timed out while reloading the tab helper."));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      window.clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+    };
+
+    const handleUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId) {
+        return;
+      }
+      if (changeInfo.status === "loading") {
+        sawLoading = true;
+        return;
+      }
+      if (changeInfo.status !== "complete" || !sawLoading) {
+        return;
+      }
+      cleanup();
+      resolve();
+    };
+
+    chrome.tabs.onUpdated.addListener(handleUpdated);
+  });
+}
+
+function reloadTabAndWait(tabId, timeoutMs = 20000) {
+  const waitPromise = waitForTabComplete(tabId, timeoutMs);
+  chrome.tabs.reload(tabId);
+  return waitPromise;
+}
+
+async function waitForCurrentRuntime(tabId, attempts = 30, delayMs = 150, tab = null) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await pingContent(tabId);
+      if (isAcceptableHelperResponse(response, tab)) {
+        return true;
+      }
+    } catch (_error) {
+      // Keep retrying until the content runtime is ready.
+    }
+    if (attempt < attempts - 1) {
+      await sleep(delayMs);
+    }
+  }
+  return false;
 }
 
 function getContentScriptFilesForTab(tab) {
@@ -96,11 +205,18 @@ async function ensureContentScriptReady(tab) {
   if (!Number.isInteger(tabId) || tabId < 0) {
     throw new Error("No active tab found.");
   }
+  const isLinkedInTab = isLinkedInTabUrl(tab?.url || "");
 
   try {
     const response = await pingContent(tabId);
-    if (response?.ok) {
+    if (isAcceptableHelperResponse(response, tab)) {
       return;
+    }
+    if (!isLinkedInTab && response?.ok && response?.version !== CONTENT_RUNTIME_VERSION) {
+      await reloadTabAndWait(tabId);
+      if (await waitForCurrentRuntime(tabId, 30, 150, tab)) {
+        return;
+      }
     }
   } catch (error) {
     if (!isRecoverableContentError(error.message || "")) {
@@ -119,20 +235,46 @@ async function ensureContentScriptReady(tab) {
     throw new Error(getUnsupportedTabMessage());
   }
 
-  const response = await pingContent(tabId);
-  if (!response?.ok) {
-    throw new Error("Couldn't initialize the page helper. Reload the tab and retry.");
+  if (await waitForCurrentRuntime(tabId, 12, 120, tab)) {
+    return;
+  }
+  await reloadTabAndWait(tabId);
+  if (!(await waitForCurrentRuntime(tabId, 30, 150, tab))) {
+    throw new Error("Couldn't initialize the current page helper. Reload the tab and retry.");
   }
 }
 
 async function sendActionToContent(tabId, actionId) {
   const runId = generateRunId();
-  let response = await sendTabMessage(tabId, { type: "TRIGGER_ACTION", actionId, source: "popup", runId });
-  if (response?.deferred) {
-    await new Promise((resolve) => window.setTimeout(resolve, 40));
+  let response = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     response = await sendTabMessage(tabId, { type: "TRIGGER_ACTION", actionId, source: "popup", runId });
+    if (!response?.deferred) {
+      return response;
+    }
+    await sleep(120);
   }
   return response;
+}
+
+async function loadActiveTabContextStatus() {
+  const activeTab = await getCurrentTab();
+  if (!activeTab || !isSupportedTabUrl(activeTab.url || "")) {
+    setStatus(getUnsupportedTabMessage(), true);
+    return;
+  }
+  await ensureContentScriptReady(activeTab);
+  const response = await sendTabMessage(activeTab.id, { type: "GET_CONTEXT_DEBUG" });
+  if (!response?.ok) {
+    throw new Error(response?.message || "Could not inspect the current tab.");
+  }
+  setStatus(
+    response.summary ||
+      (response.hasIdentity
+        ? "Supported page detected."
+        : "Supported page detected, but no candidate identity is available yet."),
+    !response.supported || !response.hasIdentity
+  );
 }
 
 async function syncSettingsToActiveTab(settings) {
@@ -234,10 +376,12 @@ document.querySelectorAll("button[data-action]").forEach((button) => {
     const actionId = button.getAttribute("data-action");
     try {
       const activeTab = await getCurrentTab();
+      setStatus("Running action...");
       await ensureContentScriptReady(activeTab);
       const tabId = Number(activeTab?.id);
-      await sendActionToContent(tabId, actionId);
-      setStatus("Action sent.");
+      const response = await sendActionToContent(tabId, actionId);
+      const status = formatActionResultStatus(response);
+      setStatus(status.message, status.isError);
     } catch (error) {
       const message = error.message || "Failed to send action.";
       if (isRecoverableContentError(message)) {
@@ -264,5 +408,16 @@ optionsBtn.addEventListener("click", () => {
 });
 
 loadState()
-  .then(() => repairActiveTabIfSupported().catch(() => {}))
+  .then(async () => {
+    try {
+      await loadActiveTabContextStatus();
+    } catch (error) {
+      const message = error.message || "Could not inspect the current tab.";
+      if (isRecoverableContentError(message)) {
+        setStatus(getUnsupportedTabMessage(), true);
+      } else {
+        setStatus(message, true);
+      }
+    }
+  })
   .catch((error) => setStatus(error.message, true));

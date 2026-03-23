@@ -75,19 +75,30 @@
   const BOOTSTRAP_DEFAULT_SETTINGS =
     typeof DEFAULT_SETTINGS !== "undefined" ? DEFAULT_SETTINGS : FALLBACK_DEFAULT_SETTINGS;
   const GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID = "cycleGemStatusDisplayMode";
-  const PAGE_CHANGE_FORWARD_DELAY_MS = 120;
+  const PAGE_CHANGE_FORWARD_DELAY_MS = 650;
   const ACTIVE_RUNTIME_FILES = ["src/content.js"];
+  const PASSIVE_RUNTIME_FILES = ["src/linkedin_passive.js"];
 
   const state = {
     cachedSettings: null,
     initialized: false,
     pageUrl: "",
+    passiveRuntimeEnsured: false,
+    passiveRuntimeEnsurePromise: null,
     runtimeEnsured: false,
     runtimeEnsurePromise: null,
     pageChangeTimerId: 0,
     replayingShortcut: false
   };
   let toastContainer = null;
+
+  function clearPendingPassiveRuntimeEnsure() {
+    if (!state.pageChangeTimerId) {
+      return;
+    }
+    window.clearTimeout(state.pageChangeTimerId);
+    state.pageChangeTimerId = 0;
+  }
 
   function bootstrapIsPlainObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -287,6 +298,15 @@
     }
   }
 
+  function isLinkedInPublicProfilePage() {
+    try {
+      const parsed = new URL(window.location.href);
+      return isLinkedInHost(parsed.hostname) && isLinkedInPublicProfilePath(parsed.pathname);
+    } catch (_error) {
+      return false;
+    }
+  }
+
   function normalizePageUrl() {
     try {
       const parsed = new URL(window.location.href);
@@ -295,6 +315,171 @@
     } catch (_error) {
       return String(window.location.href || "");
     }
+  }
+
+  function normalizeUrlForContext(url, options = {}) {
+    const keepHash = Boolean(options.keepHash);
+    const keepSearch = Boolean(options.keepSearch);
+    const fallback = String(url || "").trim();
+    if (!fallback) {
+      return "";
+    }
+    try {
+      const parsed = new URL(fallback, window.location.origin);
+      if (!keepSearch) {
+        parsed.search = "";
+      }
+      if (!keepHash) {
+        parsed.hash = "";
+      }
+      return parsed.toString().replace(/\/$/, "");
+    } catch (_error) {
+      let normalized = fallback;
+      if (!keepSearch) {
+        normalized = normalized.replace(/\?.*$/, "");
+      }
+      if (!keepHash) {
+        normalized = normalized.replace(/#.*$/, "");
+      }
+      return normalized.replace(/\/$/, "");
+    }
+  }
+
+  function normalizeLinkedInIdentifier(value) {
+    const raw = String(value || "")
+      .trim()
+      .replace(/^@/, "")
+      .replace(/\/+$/, "");
+    if (!raw) {
+      return "";
+    }
+    try {
+      return decodeURIComponent(raw);
+    } catch (_error) {
+      return raw;
+    }
+  }
+
+  function toCanonicalLinkedInPublicProfileUrl(rawUrl) {
+    const input = String(rawUrl || "").trim();
+    if (!input) {
+      return "";
+    }
+    try {
+      const parsed = new URL(input, window.location.origin);
+      if (!isLinkedInHost(parsed.hostname) || !isLinkedInPublicProfilePath(parsed.pathname)) {
+        return "";
+      }
+      parsed.protocol = "https:";
+      parsed.hostname = "www.linkedin.com";
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString().replace(/\/$/, "");
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function getLinkedInHandle(url) {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      const match = parsed.pathname.match(/^\/(?:in|pub)\/([^/]+)/i);
+      return match ? decodeURIComponent(match[1]) : "";
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function findLinkedInPublicProfileUrlInInlineScripts() {
+    const scripts = Array.from(document.querySelectorAll("script:not([src])"));
+    const profileUrlPattern = /https?:\/\/(?:www\.)?linkedin\.com\/(?:in|pub)\/[A-Za-z0-9%._-]+/i;
+    const identifierPatterns = [
+      /"publicIdentifier"\s*:\s*"([^"]+)"/i,
+      /"public_identifier"\s*:\s*"([^"]+)"/i,
+      /"vanityName"\s*:\s*"([^"]+)"/i
+    ];
+
+    for (const script of scripts) {
+      const text = String(script?.textContent || "").trim();
+      if (!text || text.length > 800000) {
+        continue;
+      }
+      const normalized = text.replace(/\\\//g, "/");
+      const profileUrlMatch = normalized.match(profileUrlPattern);
+      if (profileUrlMatch?.[0]) {
+        return profileUrlMatch[0];
+      }
+      for (const pattern of identifierPatterns) {
+        const identifierMatch = normalized.match(pattern);
+        if (!identifierMatch?.[1]) {
+          continue;
+        }
+        const identifier = normalizeLinkedInIdentifier(identifierMatch[1]);
+        if (identifier) {
+          return `https://www.linkedin.com/in/${encodeURIComponent(identifier)}`;
+        }
+      }
+    }
+    return "";
+  }
+
+  function findLinkedInPublicProfileUrlInDom(options = {}) {
+    const allowInlineScript = options.allowInlineScript !== false;
+    const currentUrl = String(window.location.href || "").trim();
+    const canonicalHref = String(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "").trim();
+    const ogUrl = String(
+      document.querySelector("meta[property='og:url'], meta[name='og:url']")?.getAttribute("content") || ""
+    ).trim();
+    const candidates = [currentUrl, canonicalHref, ogUrl];
+    if (allowInlineScript) {
+      candidates.push(findLinkedInPublicProfileUrlInInlineScripts());
+    }
+
+    for (const candidate of candidates) {
+      const canonical = toCanonicalLinkedInPublicProfileUrl(candidate);
+      if (canonical) {
+        return canonical;
+      }
+    }
+
+    const anchors = Array.from(
+      document.querySelectorAll("a[href*='/in/'], a[href*='linkedin.com/in/'], a[href*='/pub/'], a[href*='linkedin.com/pub/']")
+    );
+    for (const anchor of anchors.slice(0, 160)) {
+      const href = String(anchor.getAttribute("href") || anchor.href || "").trim();
+      const canonical = toCanonicalLinkedInPublicProfileUrl(href);
+      if (canonical) {
+        return canonical;
+      }
+    }
+
+    return "";
+  }
+
+  function getLinkedInProfileName() {
+    const heading = document.querySelector("h1");
+    return heading ? String(heading.textContent || "").trim() : "";
+  }
+
+  function getLinkedInDebugContext() {
+    const linkedinUrl = isLinkedInPublicProfilePage()
+      ? toCanonicalLinkedInPublicProfileUrl(window.location.href)
+      : findLinkedInPublicProfileUrlInDom({ allowInlineScript: true });
+    return {
+      sourcePlatform: "linkedin",
+      pageUrl: normalizePageUrl(),
+      profileUrl: normalizeUrlForContext(window.location.href),
+      linkedinUrl,
+      linkedInHandle: getLinkedInHandle(linkedinUrl),
+      profileName: getLinkedInProfileName()
+    };
+  }
+
+  function getLinkedInDebugSummary(context) {
+    if (String(context?.linkedinUrl || "").trim() || String(context?.linkedInHandle || "").trim()) {
+      return "LinkedIn profile detected. Signals: LinkedIn profile link.";
+    }
+    return "LinkedIn profile detected, but no stable candidate identity signal was found.";
   }
 
   function getCurrentGemStatusDisplayMode(settings = state.cachedSettings || BOOTSTRAP_DEFAULT_SETTINGS) {
@@ -322,7 +507,14 @@
   }
 
   function isContentRuntimeReadyLocally() {
-    return Boolean(window.__GLS_UNIFIED_CONTENT_RUNTIME_READY__);
+    return Boolean(
+      window.__GLS_UNIFIED_CONTENT_RUNTIME_READY__ &&
+      window.__GLS_UNIFIED_CONTENT_RUNTIME_VERSION__ === CONTENT_RUNTIME_VERSION
+    );
+  }
+
+  function isPassiveRuntimeReadyLocally() {
+    return Boolean(window.__GLS_LINKEDIN_PASSIVE_RUNTIME_READY__);
   }
 
   function getSettings() {
@@ -501,17 +693,55 @@
     return state.runtimeEnsurePromise;
   }
 
+  function ensurePassiveRuntime(reason = "") {
+    if (isPassiveRuntimeReadyLocally()) {
+      state.passiveRuntimeEnsured = true;
+      return Promise.resolve(true);
+    }
+    if (state.passiveRuntimeEnsured) {
+      return Promise.resolve(true);
+    }
+    if (state.passiveRuntimeEnsurePromise) {
+      return state.passiveRuntimeEnsurePromise;
+    }
+
+    state.passiveRuntimeEnsurePromise = sendRuntimeMessage({
+      type: "ENSURE_CONTENT_RUNTIME",
+      reason,
+      files: PASSIVE_RUNTIME_FILES
+    })
+      .then((response) => {
+        if (!response?.ok) {
+          throw new Error(response?.message || "Could not load LinkedIn status runtime.");
+        }
+        state.passiveRuntimeEnsured = true;
+        dispatchDeferredRuntimeEvent("gls:settings-updated", {
+          settings: state.cachedSettings || BOOTSTRAP_DEFAULT_SETTINGS
+        });
+        dispatchDeferredRuntimeEvent("gls:linkedin-page-changed", {
+          reason: reason || "passive-runtime-ensured",
+          pageUrl: normalizePageUrl(),
+          forceRefresh: true
+        });
+        return true;
+      })
+      .finally(() => {
+        state.passiveRuntimeEnsurePromise = null;
+      });
+
+    return state.passiveRuntimeEnsurePromise;
+  }
+
   function scheduleBannerRuntimeEnsure(reason) {
-    if (!state.cachedSettings?.enabled || !isCurrentGemStatusDisplayEnabled(state.cachedSettings) || state.runtimeEnsured) {
+    if (!state.cachedSettings?.enabled || !isCurrentGemStatusDisplayEnabled(state.cachedSettings)) {
+      clearPendingPassiveRuntimeEnsure();
       return;
     }
-    if (state.pageChangeTimerId) {
-      window.clearTimeout(state.pageChangeTimerId);
-    }
+    clearPendingPassiveRuntimeEnsure();
     state.pageChangeTimerId = window.setTimeout(() => {
       state.pageChangeTimerId = 0;
-      ensureContentRuntime(reason).catch((error) => {
-        showToast(error?.message || "Could not load LinkedIn helper runtime.", true);
+      ensurePassiveRuntime(reason).catch((error) => {
+        showToast(error?.message || "Could not load LinkedIn status helper.", true);
       });
     }, PAGE_CHANGE_FORWARD_DELAY_MS);
   }
@@ -523,10 +753,11 @@
     }
     state.pageUrl = nextUrl;
     if (!isLinkedInProfilePage()) {
+      clearPendingPassiveRuntimeEnsure();
       return;
     }
 
-    if (state.runtimeEnsured) {
+    if (state.runtimeEnsured || state.passiveRuntimeEnsured || isPassiveRuntimeReadyLocally()) {
       dispatchDeferredRuntimeEvent("gls:linkedin-page-changed", {
         reason,
         pageUrl: nextUrl
@@ -619,14 +850,11 @@
     if (isContentRuntimeReadyLocally()) {
       state.runtimeEnsured = true;
     }
-    if (state.runtimeEnsured) {
-      return false;
-    }
     if (!(state.cachedSettings?.enabled && isCurrentGemStatusDisplayEnabled(state.cachedSettings) && isLinkedInProfilePage())) {
       sendResponse({ ok: true, skipped: true });
       return false;
     }
-    ensureContentRuntime("status-changed")
+    ensurePassiveRuntime("status-changed")
       .then(() => {
         dispatchDeferredRuntimeEvent("gls:gem-status-changed", {
           context: message?.context && typeof message.context === "object" ? message.context : {},
@@ -640,10 +868,61 @@
 
   function handleSettingsUpdatedMessage(message, sendResponse) {
     state.cachedSettings = normalizeSettings(message.settings || {});
+    const finish = () => {
+      dispatchDeferredRuntimeEvent("gls:settings-updated", {
+        settings: state.cachedSettings
+      });
+      sendResponse({ ok: true });
+    };
     if (state.cachedSettings.enabled && isCurrentGemStatusDisplayEnabled(state.cachedSettings) && isLinkedInProfilePage()) {
-      scheduleBannerRuntimeEnsure("settings-updated");
+      ensurePassiveRuntime("settings-updated")
+        .then(finish)
+        .catch((error) => sendResponse({ ok: false, message: error.message }));
+      return true;
     }
-    sendResponse({ ok: true });
+    clearPendingPassiveRuntimeEnsure();
+    finish();
+    return false;
+  }
+
+  function handleGetContextDebugMessage(_message, sendResponse) {
+    const passiveDebug =
+      typeof window.__GLS_LINKEDIN_PASSIVE_RUNTIME__?.getContextDebug === "function"
+        ? window.__GLS_LINKEDIN_PASSIVE_RUNTIME__.getContextDebug()
+        : null;
+    if (passiveDebug?.ok) {
+      sendResponse(passiveDebug);
+      return false;
+    }
+    const context = getLinkedInDebugContext();
+    sendResponse({
+      ok: true,
+      supported: isLinkedInProfilePage(),
+      hasIdentity: Boolean(String(context.linkedinUrl || "").trim() || String(context.linkedInHandle || "").trim()),
+      sourcePlatform: "linkedin",
+      summary: getLinkedInDebugSummary(context),
+      context: {
+        sourcePlatform: "linkedin",
+        gemCandidateId: "",
+        gemProfileUrl: "",
+        linkedinUrl: String(context.linkedinUrl || "").trim(),
+        linkedInHandle: String(context.linkedInHandle || "").trim(),
+        contactEmail: "",
+        contactEmailCount: 0,
+        gmailThreadToken: ""
+      }
+    });
+    return false;
+  }
+
+  function handleGetActionContextMessage(_message, sendResponse) {
+    const context = getLinkedInDebugContext();
+    sendResponse({
+      ok: true,
+      supported: isLinkedInProfilePage(),
+      hasIdentity: Boolean(String(context.linkedinUrl || "").trim() || String(context.linkedInHandle || "").trim()),
+      context
+    });
     return false;
   }
 
@@ -680,7 +959,7 @@
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === "PING") {
-        sendResponse({ ok: true, kind: "bootstrap" });
+        sendResponse({ ok: true, kind: "bootstrap", version: typeof CONTENT_RUNTIME_VERSION !== "undefined" ? CONTENT_RUNTIME_VERSION : "" });
         return false;
       }
 
@@ -692,11 +971,34 @@
         return handleSettingsUpdatedMessage(message, sendResponse);
       }
 
+      if (message?.type === "GET_CONTEXT_DEBUG") {
+        return handleGetContextDebugMessage(message, sendResponse);
+      }
+
+      if (message?.type === "GET_ACTION_CONTEXT") {
+        return handleGetActionContextMessage(message, sendResponse);
+      }
+
       if (message?.type === "TRIGGER_ACTION") {
         return handleTriggerActionMessage(message, sendResponse);
       }
 
       return false;
+    });
+
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+      if (namespace !== "sync" || !changes.settings) {
+        return;
+      }
+      state.cachedSettings = normalizeSettings(changes.settings.newValue || {});
+      dispatchDeferredRuntimeEvent("gls:settings-updated", {
+        settings: state.cachedSettings
+      });
+      if (state.cachedSettings.enabled && isCurrentGemStatusDisplayEnabled(state.cachedSettings) && isLinkedInProfilePage()) {
+        ensurePassiveRuntime("storage-settings-updated").catch(() => {});
+        return;
+      }
+      clearPendingPassiveRuntimeEnsure();
     });
 
     try {
@@ -706,12 +1008,18 @@
     }
 
     if (state.cachedSettings?.enabled && isCurrentGemStatusDisplayEnabled(state.cachedSettings) && isLinkedInProfilePage()) {
-      scheduleBannerRuntimeEnsure("initial-status");
+      const scheduleInitialEnsure = () => scheduleBannerRuntimeEnsure("initial-status");
+      if (document.readyState === "complete") {
+        scheduleInitialEnsure();
+      } else {
+        window.addEventListener("load", scheduleInitialEnsure, { passive: true, once: true });
+      }
     }
   }
 
   window.__GLS_LINKEDIN_BOOTSTRAP__ = {
     ensureContentRuntime,
+    ensurePassiveRuntime,
     dispatchDeferredRuntimeEvent,
     getSettings: () => state.cachedSettings
   };

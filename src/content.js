@@ -2,6 +2,7 @@
 
 if (!window.__GLS_UNIFIED_CONTENT_RUNTIME_READY__) {
 window.__GLS_UNIFIED_CONTENT_RUNTIME_READY__ = true;
+window.__GLS_UNIFIED_CONTENT_RUNTIME_VERSION__ = CONTENT_RUNTIME_VERSION;
 
 let cachedSettings = null;
 let toastContainer = null;
@@ -202,6 +203,10 @@ function isLinkedInRecruiterProfilePage() {
   } catch (_error) {
     return /^https:\/\/www\.linkedin\.com\/talent\/(?:.*\/)?profile\/[^/]+(?:\/.*)?$/i.test(window.location.href);
   }
+}
+
+function isBootstrapManagedLinkedInPage() {
+  return isLinkedInProfilePage() && Boolean(window.__GLS_LINKEDIN_BOOTSTRAP__);
 }
 
 function isGemCandidateProfilePage() {
@@ -1697,6 +1702,9 @@ function contextHasResolvableIdentity(context) {
   if (String(context.profileUrl || "").trim()) {
     return true;
   }
+  if (String(context.gemProfileUrl || "").trim()) {
+    return true;
+  }
   if (isValidEmailAddressForPicker(String(context.contactEmail || "").trim())) {
     return true;
   }
@@ -1704,6 +1712,62 @@ function contextHasResolvableIdentity(context) {
     return context.contactEmails.some((email) => isValidEmailAddressForPicker(email));
   }
   return false;
+}
+
+function describeContextSignals(context) {
+  const sourcePlatform = String(context?.sourcePlatform || "").trim().toLowerCase();
+  const signals = [];
+  const contactEmails = Array.isArray(context?.contactEmails)
+    ? context.contactEmails.filter((email) => isValidEmailAddressForPicker(email))
+    : [];
+
+  if (String(context?.gemCandidateId || "").trim()) {
+    signals.push("Gem candidate ID");
+  }
+  if (String(context?.gemProfileUrl || "").trim()) {
+    signals.push("Gem profile link");
+  }
+  if (String(context?.linkedinUrl || "").trim()) {
+    signals.push("LinkedIn profile link");
+  } else if (String(context?.linkedInHandle || "").trim()) {
+    signals.push("LinkedIn handle");
+  }
+  if (contactEmails.length > 0) {
+    signals.push(`${contactEmails.length} email${contactEmails.length === 1 ? "" : "s"}`);
+  } else if (isValidEmailAddressForPicker(String(context?.contactEmail || "").trim())) {
+    signals.push("1 email");
+  }
+  if (String(context?.profileUrl || "").trim() && sourcePlatform !== "gmail") {
+    signals.push("profile URL");
+  }
+
+  if (signals.length === 0) {
+    if (sourcePlatform === "gmail") {
+      return "Gmail thread detected, but no Gem profile link, LinkedIn profile, or candidate email was found.";
+    }
+    if (sourcePlatform === "linkedin") {
+      return "LinkedIn profile detected, but no stable candidate identity signal was found.";
+    }
+    if (sourcePlatform === "gem") {
+      return "Gem page detected, but no stable candidate identity signal was found.";
+    }
+    if (sourcePlatform === "github") {
+      return "GitHub profile detected, but no stable candidate identity signal was found.";
+    }
+    return "No stable candidate identity signal was found on this page.";
+  }
+
+  const label =
+    sourcePlatform === "gmail"
+      ? "Gmail thread detected"
+      : sourcePlatform === "linkedin"
+        ? "LinkedIn profile detected"
+        : sourcePlatform === "gem"
+          ? "Gem page detected"
+          : sourcePlatform === "github"
+            ? "GitHub profile detected"
+            : "Supported page detected";
+  return `${label}. Signals: ${signals.join(", ")}.`;
 }
 
 function shouldAllowCandidateCreateForContext(context) {
@@ -10191,10 +10255,12 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
   const effectiveRunId = runId || generateRunId();
   const initialContext = getProfileContext();
   const initialLink = getContextLink(initialContext);
+  const contextSignalSummary = describeContextSignals(initialContext);
   try {
     const settings = cachedSettings || (await refreshSettings());
     if (!settings.enabled) {
-      showToast("Gem shortcuts are disabled in extension settings.", true);
+      const message = "Gem shortcuts are disabled in extension settings.";
+      showToast(message, true);
       logEvent({
         source: "extension.content",
         level: "warn",
@@ -10204,7 +10270,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         message: "Action blocked because extension is disabled.",
         link: initialLink
       });
-      return;
+      return { ok: false, message, runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
 
     if (actionId === ACTIONS.GEM_ACTIONS) {
@@ -10217,11 +10283,12 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         link: window.location.href
       });
       await handleGemActionsShortcut(source, effectiveRunId);
-      return;
+      return { ok: true, message: "Opened Gem actions.", runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
 
     if (!isSupportedActionPage()) {
-      showToast("Open a LinkedIn, Gem candidate, Gmail thread, or GitHub profile to run this action.", true);
+      const message = "Open a LinkedIn, Gem candidate, Gmail thread, or GitHub profile to run this action.";
+      showToast(message, true);
       logEvent({
         source: "extension.content",
         level: "warn",
@@ -10231,20 +10298,27 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         message: "Action blocked because current page is not supported.",
         link: window.location.href
       });
-      return;
+      return { ok: false, message, runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
     if (!contextHasResolvableIdentity(initialContext)) {
-      showToast("Could not detect a candidate identity on this page.", true);
+      const missingIdentityMessage =
+        String(initialContext?.sourcePlatform || "").trim().toLowerCase() === "gmail"
+          ? describeContextSignals(initialContext)
+          : "Could not detect a candidate identity on this page.";
+      showToast(missingIdentityMessage, true);
       logEvent({
         source: "extension.content",
         level: "warn",
         event: "action.blocked",
         actionId,
         runId: effectiveRunId,
-        message: "Action blocked because candidate identity could not be detected.",
+        message:
+          String(initialContext?.sourcePlatform || "").trim().toLowerCase() === "gmail"
+            ? "Action blocked because a Gem candidate could not be detected from this Gmail thread."
+            : "Action blocked because candidate identity could not be detected.",
         link: initialLink
       });
-      return;
+      return { ok: false, message: missingIdentityMessage, runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
 
     if (actionId === "viewActivityFeed") {
@@ -10263,21 +10337,23 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       // if (actionId === ACTIONS.VIEW_ACTIVITY_FEED) {
       //   await showActivityFeed(effectiveRunId, initialContext);
       // }
-      return;
+      return { ok: false, message, runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
 
     if (actionId === ACTIONS.MANAGE_EMAILS) {
       const result = await showEmailPicker(effectiveRunId, initialContext);
       if (!result) {
-        showToast("Action cancelled.", true);
-        return;
+        const message = "Action cancelled.";
+        showToast(message, true);
+        return { ok: false, message, runId: effectiveRunId, debugSummary: contextSignalSummary };
       }
-      return;
+      return { ok: true, message: "Opened email picker.", runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
 
     const context = await getRuntimeContext(actionId, settings, effectiveRunId);
     if (!context) {
-      showToast("Action cancelled.", true);
+      const message = "Action cancelled.";
+      showToast(message, true);
       logEvent({
         source: "extension.content",
         level: "warn",
@@ -10287,7 +10363,7 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         message: "Action cancelled by user input.",
         link: initialLink
       });
-      return;
+      return { ok: false, message, runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
     context.source = source;
     context.runId = effectiveRunId;
@@ -10423,7 +10499,13 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
         message: result.message || "Action completed.",
         link: result.link || contextLink
       });
-      return;
+      return {
+        ok: true,
+        message: result.message || "Action completed.",
+        runId: result.runId || effectiveRunId,
+        link: result.link || "",
+        debugSummary: describeContextSignals(context)
+      };
     }
     showToast(result?.message || "Action failed.", true);
     await logEvent({
@@ -10435,6 +10517,12 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       message: result?.message || "Action failed.",
       link: contextLink
     });
+    return {
+      ok: false,
+      message: result?.message || "Action failed.",
+      runId: result?.runId || effectiveRunId,
+      debugSummary: describeContextSignals(context)
+    };
   } catch (error) {
     showToast(error.message || "Action failed.", true);
     logEvent({
@@ -10446,6 +10534,12 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       message: error.message || "Action failed.",
       link: initialLink
     });
+    return {
+      ok: false,
+      message: error.message || "Action failed.",
+      runId: effectiveRunId,
+      debugSummary: contextSignalSummary
+    };
   }
 }
 
@@ -12078,15 +12172,21 @@ function onKeyDown(event) {
 }
 
 async function init() {
+  const bootstrapManagedLinkedIn = isBootstrapManagedLinkedInPage();
   if (!isLinkedInProfilePage()) {
     window.addEventListener("keydown", onKeyDown, true);
-  } else {
+  } else if (!bootstrapManagedLinkedIn) {
     bindLinkedInPageChangeWatcher();
   }
-  startProfileUrlPrefetchWatcher();
+  if (!bootstrapManagedLinkedIn) {
+    startProfileUrlPrefetchWatcher();
+  }
   window.addEventListener(
     "load",
     () => {
+      if (bootstrapManagedLinkedIn && isLinkedInProfilePage()) {
+        return;
+      }
       if (!(cachedSettings?.enabled && isSupportedActionPage())) {
         return;
       }
@@ -12102,6 +12202,9 @@ async function init() {
   window.addEventListener(
     "focus",
     () => {
+      if (bootstrapManagedLinkedIn) {
+        return;
+      }
       if (!(cachedSettings?.enabled && isLinkedInProfilePage())) {
         return;
       }
@@ -12118,6 +12221,9 @@ async function init() {
   document.addEventListener(
     "visibilitychange",
     () => {
+      if (bootstrapManagedLinkedIn) {
+        return;
+      }
       if (!(cachedSettings?.enabled && isLinkedInProfilePage())) {
         return;
       }
@@ -12138,6 +12244,9 @@ async function init() {
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === "sync" && changes.settings) {
       cachedSettings = deepMerge(DEFAULT_SETTINGS, changes.settings.newValue || {});
+      if (bootstrapManagedLinkedIn && isLinkedInProfilePage()) {
+        return;
+      }
       if (cachedSettings?.enabled && isSupportedActionPage()) {
         if (isLinkedInProfilePage()) {
           queueLinkedInPageChange({ force: true, delayMs: 0, forceRefresh: false });
@@ -12165,6 +12274,9 @@ async function init() {
     setTimeout(() => {
       refreshSettings()
         .then(() => {
+          if (bootstrapManagedLinkedIn && isLinkedInProfilePage()) {
+            return;
+          }
           if (cachedSettings?.enabled && isSupportedActionPage()) {
             if (isLinkedInProfilePage()) {
               queueLinkedInPageChange({ force: true, delayMs: 0, forceRefresh: false });
@@ -12180,6 +12292,10 @@ async function init() {
     }, 1000);
   }
 
+  if (bootstrapManagedLinkedIn && isLinkedInProfilePage()) {
+    return;
+  }
+
   if (cachedSettings?.enabled && isSupportedActionPage()) {
     if (isLinkedInProfilePage()) {
       queueLinkedInPageChange({ force: true, delayMs: 0, forceRefresh: false });
@@ -12193,6 +12309,9 @@ async function init() {
 }
 
 function handleGemStatusChangedSignal(message = {}) {
+  if (isBootstrapManagedLinkedInPage()) {
+    return;
+  }
   if (!(cachedSettings?.enabled && isCurrentGemStatusDisplayEnabled(cachedSettings) && isLinkedInProfilePage())) {
     return;
   }
@@ -12232,12 +12351,29 @@ function handleGemStatusChangedSignal(message = {}) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "CONTENT_RUNTIME_PING") {
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, version: CONTENT_RUNTIME_VERSION });
     return false;
   }
 
   if (message?.type === "PING") {
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, version: CONTENT_RUNTIME_VERSION });
+    return false;
+  }
+
+  if (isBootstrapManagedLinkedInPage()) {
+    if (message?.type === "TRIGGER_ACTION") {
+      const runId = message.runId || generateRunId();
+      handleAction(message.actionId, message.source || "popup", runId)
+        .then((result) =>
+          sendResponse(
+            result && typeof result === "object"
+              ? result
+              : { ok: false, message: "Action returned no result.", runId }
+          )
+        )
+        .catch((error) => sendResponse({ ok: false, message: error.message }));
+      return true;
+    }
     return false;
   }
 
@@ -12264,10 +12400,49 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "GET_CONTEXT_DEBUG") {
+    const context = getProfileContext();
+    sendResponse({
+      ok: true,
+      supported: isSupportedActionPage(),
+      hasIdentity: contextHasResolvableIdentity(context),
+      sourcePlatform: String(context?.sourcePlatform || "").trim().toLowerCase(),
+      summary: describeContextSignals(context),
+      context: {
+        sourcePlatform: String(context?.sourcePlatform || "").trim().toLowerCase(),
+        gemCandidateId: String(context?.gemCandidateId || "").trim(),
+        gemProfileUrl: String(context?.gemProfileUrl || "").trim(),
+        linkedinUrl: String(context?.linkedinUrl || "").trim(),
+        linkedInHandle: String(context?.linkedInHandle || "").trim(),
+        contactEmail: String(context?.contactEmail || "").trim(),
+        contactEmailCount: Array.isArray(context?.contactEmails) ? context.contactEmails.length : 0,
+        gmailThreadToken: String(context?.gmailThreadToken || "").trim()
+      }
+    });
+    return false;
+  }
+
+  if (message?.type === "GET_ACTION_CONTEXT") {
+    const context = getProfileContext();
+    sendResponse({
+      ok: true,
+      supported: isSupportedActionPage(),
+      hasIdentity: contextHasResolvableIdentity(context),
+      context
+    });
+    return false;
+  }
+
   if (message?.type === "TRIGGER_ACTION") {
     const runId = message.runId || generateRunId();
     handleAction(message.actionId, message.source || "popup", runId)
-      .then(() => sendResponse({ ok: true }))
+      .then((result) =>
+        sendResponse(
+          result && typeof result === "object"
+            ? result
+            : { ok: false, message: "Action returned no result.", runId }
+        )
+      )
       .catch((error) => sendResponse({ ok: false, message: error.message }));
     return true;
   }
@@ -12293,6 +12468,9 @@ window.addEventListener("gls:content-runtime-keydown", (event) => {
 });
 
 window.addEventListener("gls:linkedin-page-changed", (event) => {
+  if (isBootstrapManagedLinkedInPage()) {
+    return;
+  }
   const detail = event?.detail && typeof event.detail === "object" ? event.detail : {};
   if (!isLinkedInProfilePage()) {
     return;
@@ -12305,6 +12483,9 @@ window.addEventListener("gls:linkedin-page-changed", (event) => {
 });
 
 window.addEventListener("gls:gem-status-changed", (event) => {
+  if (isBootstrapManagedLinkedInPage()) {
+    return;
+  }
   const detail = event?.detail && typeof event.detail === "object" ? event.detail : {};
   handleGemStatusChangedSignal({
     context: detail.context && typeof detail.context === "object" ? detail.context : {},
@@ -12316,6 +12497,9 @@ window.addEventListener("gls:settings-updated", (event) => {
   const detail = event?.detail && typeof event.detail === "object" ? event.detail : {};
   if (detail.settings && typeof detail.settings === "object") {
     cachedSettings = deepMerge(DEFAULT_SETTINGS, detail.settings);
+  }
+  if (isBootstrapManagedLinkedInPage()) {
+    return;
   }
   if (cachedSettings?.enabled && isSupportedActionPage()) {
     if (isLinkedInProfilePage()) {
