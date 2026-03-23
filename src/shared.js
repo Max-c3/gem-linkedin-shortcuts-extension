@@ -1,6 +1,7 @@
 "use strict";
 
 globalThis.__GLS_SHARED_RUNTIME_READY__ = true;
+const CONTENT_RUNTIME_VERSION = "2026-03-23-8";
 
 const ACTIONS = {
   GEM_ACTIONS: "gemActions",
@@ -345,6 +346,179 @@ function isAllowedBackendBaseUrl(rawValue) {
 function formatAllowedBackendOriginsForDisplay() {
   return ALLOWED_BACKEND_ORIGINS.join(", ");
 }
+
+function glsIsLinkedInHost(hostname) {
+  return /(^|\.)linkedin\.com$/i.test(String(hostname || ""));
+}
+
+function glsIsLinkedInPublicProfilePath(pathname) {
+  return /^\/(?:in|pub)\/[^/]+(?:\/.*)?$/.test(String(pathname || ""));
+}
+
+function glsNormalizeLinkedInIdentifier(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/^@/, "")
+    .replace(/\/+$/, "");
+  if (!raw) {
+    return "";
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch (_error) {
+    return raw;
+  }
+}
+
+function glsToCanonicalLinkedInPublicProfileUrl(rawUrl, urlBase = globalThis.location?.origin || "https://www.linkedin.com") {
+  const input = String(rawUrl || "").trim();
+  if (!input) {
+    return "";
+  }
+  try {
+    const parsed = new URL(input, urlBase);
+    if (!glsIsLinkedInHost(parsed.hostname) || !glsIsLinkedInPublicProfilePath(parsed.pathname)) {
+      return "";
+    }
+    parsed.protocol = "https:";
+    parsed.hostname = "www.linkedin.com";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function glsGetLinkedInHandle(url, urlBase = globalThis.location?.origin || "https://www.linkedin.com") {
+  try {
+    const parsed = new URL(url, urlBase);
+    const match = parsed.pathname.match(/^\/(?:in|pub)\/([^/]+)/i);
+    return match ? decodeURIComponent(match[1]) : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function glsFindLinkedInPublicProfileUrlInInlineScripts(options = {}) {
+  const doc = options.document || globalThis.document;
+  if (!doc) {
+    return "";
+  }
+  const profileUrlPattern = /https?:\/\/(?:www\.)?linkedin\.com\/(?:in|pub)\/[A-Za-z0-9%._-]+/i;
+  const identifierPatterns = [
+    /"publicIdentifier"\s*:\s*"([^"]+)"/i,
+    /"public_identifier"\s*:\s*"([^"]+)"/i,
+    /"vanityName"\s*:\s*"([^"]+)"/i
+  ];
+  const signalPattern = /(linkedin\.com\/(?:in|pub)\/|publicIdentifier|public_identifier|vanityName)/i;
+  const scripts = Array.from(doc.scripts || []).filter((script) => script && !script.src);
+  const maxScriptCount = Number(options.maxScriptCount);
+  const limitedScripts =
+    Number.isFinite(maxScriptCount) && maxScriptCount > 0 ? scripts.slice(0, Math.trunc(maxScriptCount)) : scripts;
+  const maxScriptTextLength = Number(options.maxScriptTextLength);
+  const textLengthLimit =
+    Number.isFinite(maxScriptTextLength) && maxScriptTextLength > 0 ? Math.trunc(maxScriptTextLength) : 0;
+  const urlBase = options.urlBase || globalThis.location?.origin || "https://www.linkedin.com";
+
+  for (const script of limitedScripts) {
+    const text = String(script?.textContent || "");
+    if (!text) {
+      continue;
+    }
+    if (textLengthLimit > 0 && text.length > textLengthLimit) {
+      continue;
+    }
+    if (options.requireSignalPattern !== false && !signalPattern.test(text)) {
+      continue;
+    }
+    const normalized = text.replace(/\\\//g, "/");
+    const profileUrlMatch = normalized.match(profileUrlPattern);
+    if (profileUrlMatch?.[0]) {
+      return profileUrlMatch[0];
+    }
+    for (const pattern of identifierPatterns) {
+      const identifierMatch = normalized.match(pattern);
+      if (!identifierMatch?.[1]) {
+        continue;
+      }
+      const identifier = glsNormalizeLinkedInIdentifier(identifierMatch[1]);
+      if (identifier) {
+        return `https://www.linkedin.com/in/${encodeURIComponent(identifier)}`;
+      }
+    }
+  }
+
+  return "";
+}
+
+function glsFindLinkedInPublicProfileUrlInDom(options = {}) {
+  const doc = options.document || globalThis.document;
+  const winLocationHref = options.locationHref || globalThis.location?.href || "";
+  const urlBase = options.urlBase || globalThis.location?.origin || "https://www.linkedin.com";
+  if (!doc) {
+    return "";
+  }
+
+  const currentUrl = String(winLocationHref || "").trim();
+  const canonicalHref = String(doc.querySelector("link[rel='canonical']")?.getAttribute("href") || "").trim();
+  const ogUrl = String(
+    doc.querySelector("meta[property='og:url'], meta[name='og:url']")?.getAttribute("content") || ""
+  ).trim();
+  const candidates = [currentUrl, canonicalHref, ogUrl];
+  const inlineScriptOrder = String(options.inlineScriptOrder || "beforeAnchors").trim();
+
+  if (inlineScriptOrder === "beforeAnchors" && options.allowInlineScript !== false) {
+    candidates.push(
+      glsFindLinkedInPublicProfileUrlInInlineScripts({
+        ...options.inlineScriptOptions,
+        document: doc,
+        urlBase
+      })
+    );
+  }
+
+  for (const candidate of candidates) {
+    const canonical = glsToCanonicalLinkedInPublicProfileUrl(candidate, urlBase);
+    if (canonical) {
+      return canonical;
+    }
+  }
+
+  if (options.allowAnchorScan !== false) {
+    const anchors = Array.from(
+      doc.querySelectorAll("a[href*='/in/'], a[href*='linkedin.com/in/'], a[href*='/pub/'], a[href*='linkedin.com/pub/']")
+    );
+    const maxAnchorScan = Number(options.anchorScanLimit);
+    const limitedAnchors =
+      Number.isFinite(maxAnchorScan) && maxAnchorScan > 0 ? anchors.slice(0, Math.trunc(maxAnchorScan)) : anchors;
+    for (const anchor of limitedAnchors) {
+      const href = String(anchor.getAttribute("href") || anchor.href || "").trim();
+      const canonical = glsToCanonicalLinkedInPublicProfileUrl(href, urlBase);
+      if (canonical) {
+        return canonical;
+      }
+    }
+  }
+
+  if (inlineScriptOrder === "afterAnchors" && options.allowInlineScript !== false) {
+    const inlineScriptUrl = glsFindLinkedInPublicProfileUrlInInlineScripts({
+      ...options.inlineScriptOptions,
+      document: doc,
+      urlBase
+    });
+    return glsToCanonicalLinkedInPublicProfileUrl(inlineScriptUrl, urlBase);
+  }
+
+  return "";
+}
+
+globalThis.__GLS_LINKEDIN_IDENTITY_HELPERS__ = Object.freeze({
+  toCanonicalPublicProfileUrl: glsToCanonicalLinkedInPublicProfileUrl,
+  getLinkedInHandle: glsGetLinkedInHandle,
+  findLinkedInPublicProfileUrlInInlineScripts: glsFindLinkedInPublicProfileUrlInInlineScripts,
+  findLinkedInPublicProfileUrlInDom: glsFindLinkedInPublicProfileUrlInDom
+});
 
 function isEditableElement(target) {
   if (!target) {

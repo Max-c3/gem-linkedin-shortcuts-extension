@@ -416,39 +416,12 @@ function normalizeLinkedInUrl(url) {
   }
 }
 
-function normalizeLinkedInIdentifier(value) {
-  const raw = String(value || "")
-    .trim()
-    .replace(/^@/, "")
-    .replace(/\/+$/, "");
-  if (!raw) {
-    return "";
-  }
-  try {
-    return decodeURIComponent(raw);
-  } catch (_error) {
-    return raw;
-  }
+function getLinkedInIdentityHelpers() {
+  return window.__GLS_LINKEDIN_IDENTITY_HELPERS__ || {};
 }
 
 function toCanonicalLinkedInPublicProfileUrl(rawUrl) {
-  const input = String(rawUrl || "").trim();
-  if (!input) {
-    return "";
-  }
-  try {
-    const parsed = new URL(input, window.location.origin);
-    if (!isLinkedInHost(parsed.hostname) || !isLinkedInPublicProfilePath(parsed.pathname)) {
-      return "";
-    }
-    parsed.protocol = "https:";
-    parsed.hostname = "www.linkedin.com";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
-  } catch (_error) {
-    return "";
-  }
+  return getLinkedInIdentityHelpers().toCanonicalPublicProfileUrl?.(rawUrl, window.location.origin) || "";
 }
 
 function getCurrentLinkedInPublicProfileUrl() {
@@ -456,77 +429,32 @@ function getCurrentLinkedInPublicProfileUrl() {
 }
 
 function findLinkedInPublicProfileUrlInInlineScripts() {
-  const scripts = Array.from(document.querySelectorAll("script:not([src])"));
-  const profileUrlPattern = /https?:\/\/(?:www\.)?linkedin\.com\/(?:in|pub)\/[A-Za-z0-9%._-]+/i;
-  const identifierPatterns = [
-    /"publicIdentifier"\s*:\s*"([^"]+)"/i,
-    /"public_identifier"\s*:\s*"([^"]+)"/i,
-    /"vanityName"\s*:\s*"([^"]+)"/i
-  ];
-
-  for (const script of scripts) {
-    const text = String(script?.textContent || "").trim();
-    if (!text || text.length > 800000) {
-      continue;
-    }
-    const normalized = text.replace(/\\\//g, "/");
-    const profileUrlMatch = normalized.match(profileUrlPattern);
-    if (profileUrlMatch?.[0]) {
-      return profileUrlMatch[0];
-    }
-    for (const pattern of identifierPatterns) {
-      const identifierMatch = normalized.match(pattern);
-      if (!identifierMatch?.[1]) {
-        continue;
-      }
-      const identifier = normalizeLinkedInIdentifier(identifierMatch[1]);
-      if (identifier) {
-        return `https://www.linkedin.com/in/${encodeURIComponent(identifier)}`;
-      }
-    }
-  }
-  return "";
+  return getLinkedInIdentityHelpers().findLinkedInPublicProfileUrlInInlineScripts?.({
+    document,
+    urlBase: window.location.origin,
+    maxScriptTextLength: 800000,
+    requireSignalPattern: true
+  }) || "";
 }
 
 function findLinkedInPublicProfileUrlInDom() {
-  const candidates = [];
-  const currentUrl = String(window.location.href || "").trim();
-  const canonicalHref = String(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "").trim();
-  const ogUrl = String(
-    document.querySelector("meta[property='og:url'], meta[name='og:url']")?.getAttribute("content") || ""
-  ).trim();
-  const inlineScriptUrl = findLinkedInPublicProfileUrlInInlineScripts();
-  candidates.push(currentUrl, canonicalHref, ogUrl, inlineScriptUrl);
-
-  for (const candidate of candidates) {
-    const canonical = toCanonicalLinkedInPublicProfileUrl(candidate);
-    if (canonical) {
-      return canonical;
+  return getLinkedInIdentityHelpers().findLinkedInPublicProfileUrlInDom?.({
+    document,
+    locationHref: window.location.href,
+    urlBase: window.location.origin,
+    allowInlineScript: true,
+    allowAnchorScan: true,
+    anchorScanLimit: 250,
+    inlineScriptOrder: "beforeAnchors",
+    inlineScriptOptions: {
+      maxScriptTextLength: 800000,
+      requireSignalPattern: true
     }
-  }
-
-  const anchors = Array.from(
-    document.querySelectorAll("a[href*='/in/'], a[href*='linkedin.com/in/'], a[href*='/pub/'], a[href*='linkedin.com/pub/']")
-  );
-  for (const anchor of anchors.slice(0, 250)) {
-    const href = String(anchor.getAttribute("href") || anchor.href || "").trim();
-    const canonical = toCanonicalLinkedInPublicProfileUrl(href);
-    if (canonical) {
-      return canonical;
-    }
-  }
-
-  return getCurrentLinkedInPublicProfileUrl();
+  }) || getCurrentLinkedInPublicProfileUrl();
 }
 
 function getLinkedInHandle(url) {
-  try {
-    const parsed = new URL(url);
-    const match = parsed.pathname.match(/^\/(?:in|pub)\/([^/]+)/);
-    return match ? decodeURIComponent(match[1]) : "";
-  } catch (_error) {
-    return "";
-  }
+  return getLinkedInIdentityHelpers().getLinkedInHandle?.(url, window.location.origin) || "";
 }
 
 function getProfileName() {
@@ -1478,13 +1406,15 @@ function listCustomFieldsForContext(context, runId, options = {}) {
           context,
           {
             candidateId: response.candidateId || "",
-            customFields: Array.isArray(response.customFields) ? response.customFields : []
+            customFields: Array.isArray(response.customFields) ? response.customFields : [],
+            statusLabels: Array.isArray(response.statusLabels) ? response.statusLabels : []
           },
           response.candidateId || ""
         );
         resolve({
           candidateId: payload.candidateId || "",
           customFields: Array.isArray(payload.customFields) ? payload.customFields : [],
+          statusLabels: Array.isArray(payload.statusLabels) ? payload.statusLabels : [],
           fromCache: Boolean(response.fromCache),
           stale: Boolean(response.stale)
         });
@@ -1885,6 +1815,12 @@ function isStatusFieldLike(value) {
 }
 
 function getStatusLabelsFromCustomFieldData(data) {
+  const explicit = Array.isArray(data?.statusLabels)
+    ? data.statusLabels.map((label) => String(label || "").trim()).filter(Boolean)
+    : [];
+  if (explicit.length > 0) {
+    return explicit;
+  }
   const statusField = findGemStatusField(data?.customFields);
   return Array.isArray(statusField?.currentValueLabels)
     ? statusField.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
@@ -2029,9 +1965,11 @@ function buildOptimisticGemStatusData(context, selection, candidateId = "") {
       }
     : context;
   const existingEntry = getCustomFieldMemoryEntry(candidateContext).entry || getCustomFieldMemoryEntry(context).entry;
+  const customFields = buildDataWithStatusSelection(existingEntry?.customFields || [], selection);
   return {
     candidateId: normalizedCandidateId,
-    customFields: buildDataWithStatusSelection(existingEntry?.customFields || [], selection)
+    customFields,
+    statusLabels: getStatusLabelsFromCustomFieldData({ customFields })
   };
 }
 
@@ -2044,10 +1982,12 @@ function mergeOptimisticGemStatusIntoCustomFieldData(context, data, candidateId 
   if (!shouldPreferOptimisticGemStatusData(normalizedData, optimisticEntry)) {
     return normalizedData;
   }
+  const customFields = buildDataWithStatusSelection(normalizedData.customFields || [], optimisticEntry);
   return {
     ...normalizedData,
     candidateId: resolvedCandidateId || String(normalizedData.candidateId || "").trim(),
-    customFields: buildDataWithStatusSelection(normalizedData.customFields || [], optimisticEntry)
+    customFields,
+    statusLabels: getStatusLabelsFromCustomFieldData({ customFields })
   };
 }
 
@@ -2852,10 +2792,7 @@ function renderGemStatusIndicator(context, data) {
     return;
   }
   rememberGemCandidateIdForCurrentLinkedInPage(candidateId);
-  const statusField = findGemStatusField(data?.customFields);
-  const labels = Array.isArray(statusField?.currentValueLabels)
-    ? statusField.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
-    : [];
+  const labels = getStatusLabelsFromCustomFieldData(data);
   const hasValue = labels.length > 0;
   const statusText = hasValue ? summarizeStatusLabels(labels, 3) : "Not set";
   const palette = getGemStatusPalette(statusText, hasValue);

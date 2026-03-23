@@ -1840,6 +1840,50 @@ function buildCandidateCustomFieldMembershipById(memberships) {
   return map;
 }
 
+function normalizeGemStatusToken(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function findDerivedGemStatusField(customFields) {
+  const fields = Array.isArray(customFields) ? customFields : [];
+  if (fields.length === 0) {
+    return null;
+  }
+  const exactMatches = fields.filter((field) => normalizeGemStatusToken(field?.name) === "status");
+  const fuzzyMatches = exactMatches.length > 0
+    ? exactMatches
+    : fields.filter((field) => normalizeGemStatusToken(field?.name).startsWith("status"));
+  if (fuzzyMatches.length === 0) {
+    return null;
+  }
+  return fuzzyMatches
+    .slice()
+    .sort((left, right) => {
+      const leftLabels = Array.isArray(left?.currentValueLabels)
+        ? left.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
+        : [];
+      const rightLabels = Array.isArray(right?.currentValueLabels)
+        ? right.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
+        : [];
+      const leftScore = (leftLabels.length ? 4 : 0) + (left?.scope === "team" ? 2 : 0) + (left?.scope === "project" ? 1 : 0);
+      const rightScore = (rightLabels.length ? 4 : 0) + (right?.scope === "team" ? 2 : 0) + (right?.scope === "project" ? 1 : 0);
+      if (leftScore !== rightScore) {
+        return rightScore - leftScore;
+      }
+      return String(left?.name || "").localeCompare(String(right?.name || ""));
+    })[0];
+}
+
+function getDerivedGemStatusLabels(customFields) {
+  const statusField = findDerivedGemStatusField(customFields);
+  return Array.isArray(statusField?.currentValueLabels)
+    ? statusField.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
+    : [];
+}
+
 async function resolveCustomFieldCandidateContext(payload, audit) {
   const candidateId = String(payload.candidateId || "").trim();
   if (!candidateId) {
@@ -1868,7 +1912,9 @@ async function listCustomFields(payload, audit) {
     await ensureGemCustomFieldCatalog(audit, { forceRefresh: Boolean(payload.forceRefresh) });
     return {
       candidateId: String(payload.candidateId || "").trim(),
-      customFields: []
+      customFields: [],
+      statusLabels: [],
+      candidateProjectIds: []
     };
   }
   const [catalog, candidateContext] = await Promise.all([
@@ -1931,13 +1977,17 @@ async function listCustomFields(payload, audit) {
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 
+  const statusLabels = getDerivedGemStatusLabels(customFields);
+
   if (requestedLimit > 0) {
     customFields = customFields.slice(0, requestedLimit);
   }
 
   return {
     candidateId,
-    customFields
+    customFields,
+    statusLabels,
+    candidateProjectIds
   };
 }
 
@@ -2295,6 +2345,89 @@ async function getSequence(payload, audit) {
   return { sequence };
 }
 
+function normalizeSequenceListItem(sequence) {
+  return {
+    id: String(sequence?.id || ""),
+    name: String(sequence?.name || ""),
+    userId: String(sequence?.user_id || sequence?.userId || ""),
+    createdAt: String(sequence?.created_at || sequence?.createdAt || sequence?.created || "")
+  };
+}
+
+function parseSequenceDate(value) {
+  if (!value) {
+    return 0;
+  }
+  const raw = String(value).trim();
+  if (/^\d+$/.test(raw)) {
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) {
+      return numeric > 1e12 ? numeric : numeric * 1000;
+    }
+  }
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function stripLikelySequenceVariantSuffix(name) {
+  const raw = String(name || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const stripped = raw.replace(
+    /\s+\d{1,2}:\d{2}\s*(?:am|pm)\s+[A-Za-z]{3},\s+[A-Za-z]{3}\s+\d{1,2}(?:,\s*\d{4})?$/i,
+    ""
+  );
+  return stripped.trim();
+}
+
+function choosePreferredSequenceRepresentative(group) {
+  if (!Array.isArray(group) || group.length === 0) {
+    return null;
+  }
+  const sortedNewestFirst = group
+    .slice()
+    .sort((left, right) => parseSequenceDate(right?.createdAt) - parseSequenceDate(left?.createdAt));
+  const canonical = sortedNewestFirst.find((item) => {
+    const base = stripLikelySequenceVariantSuffix(item?.name);
+    return base && base.toLowerCase() === String(item?.name || "").trim().toLowerCase();
+  });
+  return canonical || sortedNewestFirst[0] || null;
+}
+
+function collapseLikelySequenceVariants(sequences) {
+  const grouped = new Map();
+  for (const item of Array.isArray(sequences) ? sequences : []) {
+    const sequence = normalizeSequenceListItem(item);
+    if (!sequence.id) {
+      continue;
+    }
+    const base = stripLikelySequenceVariantSuffix(sequence.name) || sequence.name;
+    const key = base.toLowerCase();
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(sequence);
+  }
+
+  const out = [];
+  for (const items of grouped.values()) {
+    const hasVariant = items.some((item) => {
+      const base = stripLikelySequenceVariantSuffix(item?.name);
+      return base && base.toLowerCase() !== String(item?.name || "").trim().toLowerCase();
+    });
+    if (!hasVariant) {
+      out.push(...items);
+      continue;
+    }
+    const representative = choosePreferredSequenceRepresentative(items);
+    if (representative?.id) {
+      out.push(representative);
+    }
+  }
+  return out;
+}
+
 async function listSequences(payload, audit) {
   const requestedLimitRaw = Number(payload.limit);
   const requestedLimit =
@@ -2329,12 +2462,7 @@ async function listSequences(payload, audit) {
 
   const seen = new Set();
   let normalized = aggregated
-    .map((sequence) => ({
-      id: String(sequence.id || ""),
-      name: String(sequence.name || ""),
-      userId: String(sequence.user_id || sequence.userId || ""),
-      createdAt: String(sequence.created_at || sequence.createdAt || sequence.created || "")
-    }))
+    .map((sequence) => normalizeSequenceListItem(sequence))
     .filter((sequence) => {
       if (!sequence.id || seen.has(sequence.id)) {
         return false;
@@ -2348,11 +2476,18 @@ async function listSequences(payload, audit) {
     normalized = normalized.filter((sequence) => sequence.name.toLowerCase().includes(lower));
   }
 
+  const rawCount = normalized.length;
+  normalized = collapseLikelySequenceVariants(normalized);
+
   if (requestedLimit > 0) {
     normalized = normalized.slice(0, requestedLimit);
   }
 
-  return { sequences: normalized };
+  return {
+    sequences: normalized,
+    rawCount,
+    variantCollapseApplied: true
+  };
 }
 
 async function listUsers(payload, audit) {

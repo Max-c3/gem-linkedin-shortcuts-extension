@@ -116,49 +116,16 @@
     }
   }
 
-  function normalizeLinkedInIdentifier(value) {
-    const raw = String(value || "")
-      .trim()
-      .replace(/^@/, "")
-      .replace(/\/+$/, "");
-    if (!raw) {
-      return "";
-    }
-    try {
-      return decodeURIComponent(raw);
-    } catch (_error) {
-      return raw;
-    }
+  function getLinkedInIdentityHelpers() {
+    return window.__GLS_LINKEDIN_IDENTITY_HELPERS__ || {};
   }
 
   function toCanonicalLinkedInPublicProfileUrl(rawUrl) {
-    const input = String(rawUrl || "").trim();
-    if (!input) {
-      return "";
-    }
-    try {
-      const parsed = new URL(input, window.location.origin);
-      if (!isLinkedInHost(parsed.hostname) || !isLinkedInPublicProfilePath(parsed.pathname)) {
-        return "";
-      }
-      parsed.protocol = "https:";
-      parsed.hostname = "www.linkedin.com";
-      parsed.search = "";
-      parsed.hash = "";
-      return parsed.toString().replace(/\/$/, "");
-    } catch (_error) {
-      return "";
-    }
+    return getLinkedInIdentityHelpers().toCanonicalPublicProfileUrl?.(rawUrl, window.location.origin) || "";
   }
 
   function getLinkedInHandle(url) {
-    try {
-      const parsed = new URL(url, window.location.origin);
-      const match = parsed.pathname.match(/^\/(?:in|pub)\/([^/]+)/i);
-      return match ? decodeURIComponent(match[1]) : "";
-    } catch (_error) {
-      return "";
-    }
+    return getLinkedInIdentityHelpers().getLinkedInHandle?.(url, window.location.origin) || "";
   }
 
   function getProfileName() {
@@ -167,82 +134,30 @@
   }
 
   function findLinkedInPublicProfileUrlInInlineScripts() {
-    const scripts = Array.from(document.scripts || [])
-      .filter((script) => script && !script.src)
-      .slice(0, INLINE_SCRIPT_MAX_COUNT);
-    const profileUrlPattern = /https?:\/\/(?:www\.)?linkedin\.com\/(?:in|pub)\/[A-Za-z0-9%._-]+/i;
-    const identifierPatterns = [
-      /"publicIdentifier"\s*:\s*"([^"]+)"/i,
-      /"public_identifier"\s*:\s*"([^"]+)"/i,
-      /"vanityName"\s*:\s*"([^"]+)"/i
-    ];
-
-    for (const script of scripts) {
-      const text = String(script?.textContent || "");
-      if (!text || text.length > INLINE_SCRIPT_MAX_TEXT_LENGTH) {
-        continue;
-      }
-      if (!/(linkedin\.com\/(?:in|pub)\/|publicIdentifier|public_identifier|vanityName)/i.test(text)) {
-        continue;
-      }
-      const normalized = text.replace(/\\\//g, "/");
-      const profileUrlMatch = normalized.match(profileUrlPattern);
-      if (profileUrlMatch?.[0]) {
-        return profileUrlMatch[0];
-      }
-      for (const pattern of identifierPatterns) {
-        const identifierMatch = normalized.match(pattern);
-        if (!identifierMatch?.[1]) {
-          continue;
-        }
-        const identifier = normalizeLinkedInIdentifier(identifierMatch[1]);
-        if (identifier) {
-          return `https://www.linkedin.com/in/${encodeURIComponent(identifier)}`;
-        }
-      }
-    }
-    return "";
+    return getLinkedInIdentityHelpers().findLinkedInPublicProfileUrlInInlineScripts?.({
+      document,
+      urlBase: window.location.origin,
+      maxScriptTextLength: INLINE_SCRIPT_MAX_TEXT_LENGTH,
+      maxScriptCount: INLINE_SCRIPT_MAX_COUNT,
+      requireSignalPattern: true
+    }) || "";
   }
 
   function findLinkedInPublicProfileUrlInDom(options = {}) {
-    const allowInlineScript = options.allowInlineScript !== false;
-    const allowAnchorScan = options.allowAnchorScan !== false;
-    const currentUrl = String(window.location.href || "").trim();
-    const canonicalHref = String(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "").trim();
-    const ogUrl = String(
-      document.querySelector("meta[property='og:url'], meta[name='og:url']")?.getAttribute("content") || ""
-    ).trim();
-    const candidates = [currentUrl, canonicalHref, ogUrl];
-
-    for (const candidate of candidates) {
-      const canonical = toCanonicalLinkedInPublicProfileUrl(candidate);
-      if (canonical) {
-        return canonical;
+    return getLinkedInIdentityHelpers().findLinkedInPublicProfileUrlInDom?.({
+      document,
+      locationHref: window.location.href,
+      urlBase: window.location.origin,
+      allowInlineScript: options.allowInlineScript !== false,
+      allowAnchorScan: options.allowAnchorScan !== false,
+      anchorScanLimit: ANCHOR_SCAN_LIMIT,
+      inlineScriptOrder: "afterAnchors",
+      inlineScriptOptions: {
+        maxScriptTextLength: INLINE_SCRIPT_MAX_TEXT_LENGTH,
+        maxScriptCount: INLINE_SCRIPT_MAX_COUNT,
+        requireSignalPattern: true
       }
-    }
-
-    if (allowAnchorScan) {
-      const anchors = Array.from(
-        document.querySelectorAll("a[href*='/in/'], a[href*='linkedin.com/in/'], a[href*='/pub/'], a[href*='linkedin.com/pub/']")
-      ).slice(0, ANCHOR_SCAN_LIMIT);
-      for (const anchor of anchors) {
-        const href = String(anchor.getAttribute("href") || anchor.href || "").trim();
-        const canonical = toCanonicalLinkedInPublicProfileUrl(href);
-        if (canonical) {
-          return canonical;
-        }
-      }
-    }
-
-    if (allowInlineScript) {
-      const inlineScriptUrl = findLinkedInPublicProfileUrlInInlineScripts();
-      const canonical = toCanonicalLinkedInPublicProfileUrl(inlineScriptUrl);
-      if (canonical) {
-        return canonical;
-      }
-    }
-
-    return "";
+    }) || "";
   }
 
   function buildLinkedInContext(options = {}) {

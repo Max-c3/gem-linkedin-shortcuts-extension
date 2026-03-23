@@ -633,10 +633,13 @@ function isCustomFieldCacheFresh(entry) {
 }
 
 function normalizeCustomFieldCacheEntry(entry) {
+  const customFields = Array.isArray(entry?.customFields) ? entry.customFields : [];
+  const explicitStatusLabels = normalizePassiveStatusLabels(entry?.statusLabels);
   return {
     fetchedAt: Number(entry?.fetchedAt) || 0,
     candidateId: String(entry?.candidateId || ""),
-    customFields: Array.isArray(entry?.customFields) ? entry.customFields : []
+    customFields,
+    statusLabels: explicitStatusLabels.length > 0 ? explicitStatusLabels : getPassiveGemStatusLabels(customFields)
   };
 }
 
@@ -672,16 +675,19 @@ async function getCachedCustomFieldsForContext(context) {
   return { key: keys[0] || "", entry: null, isFresh: false };
 }
 
-async function setCachedCustomFieldsForContext(context, candidateId, customFields) {
+async function setCachedCustomFieldsForContext(context, candidateId, customFields, options = {}) {
   const keys = getCustomFieldCacheKeys(context, candidateId);
   if (keys.length === 0) {
     return;
   }
+  const normalizedCustomFields = Array.isArray(customFields) ? customFields : [];
+  const explicitStatusLabels = normalizePassiveStatusLabels(options?.statusLabels);
   const store = await getCustomFieldCacheStore();
   const nextEntry = {
     fetchedAt: Date.now(),
     candidateId: String(candidateId || ""),
-    customFields: Array.isArray(customFields) ? customFields : []
+    customFields: normalizedCustomFields,
+    statusLabels: explicitStatusLabels.length > 0 ? explicitStatusLabels : getPassiveGemStatusLabels(normalizedCustomFields)
   };
   keys.forEach((key) => {
     store[key] = nextEntry;
@@ -703,6 +709,12 @@ function normalizePassiveStatusToken(value) {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function normalizePassiveStatusLabels(labels) {
+  return Array.isArray(labels)
+    ? labels.map((label) => String(label || "").trim()).filter(Boolean)
+    : [];
 }
 
 function normalizePassiveCustomFields(fields) {
@@ -746,9 +758,7 @@ function findPassiveGemStatusField(customFields) {
 
 function getPassiveGemStatusLabels(customFields) {
   const statusField = findPassiveGemStatusField(customFields);
-  return Array.isArray(statusField?.currentValueLabels)
-    ? statusField.currentValueLabels.map((label) => String(label || "").trim()).filter(Boolean)
-    : [];
+  return normalizePassiveStatusLabels(statusField?.currentValueLabels);
 }
 
 function normalizeCustomFieldSelectionLabels(selection, field = null) {
@@ -842,7 +852,10 @@ async function patchCachedCustomFieldSelectionForContext(context, candidateId, s
   await setCachedCustomFieldsForContext(
     context,
     String(candidateId || cached.entry.candidateId || "").trim(),
-    patched.customFields
+    patched.customFields,
+    {
+      statusLabels: getPassiveGemStatusLabels(patched.customFields)
+    }
   );
   return true;
 }
@@ -1692,7 +1705,9 @@ async function refreshSequencesFromBackend(settings, runId, limit = SEQUENCE_CAC
     { actionId, runId, step: "listSequences" }
   );
   const rawSequences = Array.isArray(data?.sequences) ? data.sequences.map(normalizeSequence).filter(Boolean) : [];
-  const sequences = collapseLikelySequenceVariants(rawSequences);
+  const variantCollapseApplied = data?.variantCollapseApplied === true;
+  const sequences = variantCollapseApplied ? rawSequences : collapseLikelySequenceVariants(rawSequences);
+  const rawCount = Number.isFinite(Number(data?.rawCount)) ? Number(data.rawCount) : rawSequences.length;
   await setSequenceCache(sequences, { isComplete: normalizedLimit === 0 });
   logEvent(settings, {
     event: "sequences.cache.refreshed",
@@ -1703,8 +1718,9 @@ async function refreshSequencesFromBackend(settings, runId, limit = SEQUENCE_CAC
       limit: normalizedLimit,
       userId,
       userEmail,
-      rawCount: rawSequences.length,
-      dedupedCount: sequences.length
+      rawCount,
+      dedupedCount: sequences.length,
+      variantCollapseApplied
     }
   });
   return sequences;
@@ -2978,6 +2994,7 @@ async function refreshCustomFieldsForContext(settings, context, runId, options =
     return {
       candidateId: prefetched.candidateId,
       customFields: prefetched.customFields,
+      statusLabels: prefetched.statusLabels,
       fromCache: false,
       stale: false
     };
@@ -2996,7 +3013,11 @@ async function refreshCustomFieldsForContext(settings, context, runId, options =
     { actionId, runId, step: "listCustomFields" }
   );
   const customFields = Array.isArray(data?.customFields) ? data.customFields : [];
-  await setCachedCustomFieldsForContext(context, candidate.id, customFields);
+  const statusLabels = (() => {
+    const explicit = normalizePassiveStatusLabels(data?.statusLabels);
+    return explicit.length > 0 ? explicit : getPassiveGemStatusLabels(customFields);
+  })();
+  await setCachedCustomFieldsForContext(context, candidate.id, customFields, { statusLabels });
   logEvent(settings, {
     event: "custom_fields.cache.refreshed",
     actionId,
@@ -3009,6 +3030,7 @@ async function refreshCustomFieldsForContext(settings, context, runId, options =
   return {
     candidateId: candidate.id,
     customFields,
+    statusLabels,
     fromCache: false,
     stale: false
   };
@@ -3034,10 +3056,11 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
     } catch (_error) {
       // Best-effort warm-up only. The interactive load path will still fetch on demand.
     }
-    await setCachedCustomFieldsForContext(context, "", []);
+    await setCachedCustomFieldsForContext(context, "", [], { statusLabels: [] });
     return {
       candidateId: "",
-      customFields: []
+      customFields: [],
+      statusLabels: []
     };
   }
 
@@ -3051,7 +3074,11 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
     { ...audit, step: "prefetchCustomFields" }
   );
   const customFields = Array.isArray(data?.customFields) ? data.customFields : [];
-  await setCachedCustomFieldsForContext(context, candidateId, customFields);
+  const statusLabels = (() => {
+    const explicit = normalizePassiveStatusLabels(data?.statusLabels);
+    return explicit.length > 0 ? explicit : getPassiveGemStatusLabels(customFields);
+  })();
+  await setCachedCustomFieldsForContext(context, candidateId, customFields, { statusLabels });
 
   logEvent(settings, {
     event: "custom_fields.cache.prefetched",
@@ -3065,7 +3092,8 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
 
   return {
     candidateId,
-    customFields
+    customFields,
+    statusLabels
   };
 }
 
@@ -3114,6 +3142,7 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
     return {
       candidateId: cachedCandidateId,
       customFields: cached.entry.customFields,
+      statusLabels: normalizePassiveStatusLabels(cached.entry.statusLabels),
       fromCache: true,
       stale: !cached.isFresh
     };
@@ -3148,7 +3177,7 @@ async function getPassiveGemStatusForContext(settings, context, runId, options =
   const candidateId = String(data?.candidateId || "").trim();
   return {
     candidateId,
-    statusLabels: getPassiveGemStatusLabels(data?.customFields),
+    statusLabels: normalizePassiveStatusLabels(data?.statusLabels),
     hasCandidate: Boolean(candidateId),
     fromCache: Boolean(data?.fromCache),
     stale: Boolean(data?.stale),
@@ -3838,6 +3867,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           runId,
           candidateId: data.candidateId,
           customFields: data.customFields,
+          statusLabels: normalizePassiveStatusLabels(data.statusLabels),
           fromCache: Boolean(data.fromCache),
           stale: Boolean(data.stale)
         });
