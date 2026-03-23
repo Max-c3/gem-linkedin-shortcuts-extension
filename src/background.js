@@ -31,6 +31,24 @@ const CANDIDATE_RESOLUTION_TTL_MS = 2 * 60 * 1000;
 const CANDIDATE_RESOLUTION_NEGATIVE_TTL_MS = 5 * 60 * 1000;
 const CANDIDATE_RESOLUTION_CACHE_LIMIT = 300;
 const ORG_DEFAULTS_PATH = "src/org-defaults.json";
+const DO_NOT_CONTACT_PROJECT_URL = "https://www.gem.com/projects/DO-NOT-CONTACT--UHJvamVjdDoxMzc2Mjcw";
+const DO_NOT_CONTACT_PROJECT_ID = (() => {
+  try {
+    const parsed = new URL(DO_NOT_CONTACT_PROJECT_URL);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments[0] !== "projects") {
+      return "";
+    }
+    const rawSegment = String(segments[1] || "").trim();
+    if (!rawSegment) {
+      return "";
+    }
+    const parts = rawSegment.split("--");
+    return String(parts[parts.length - 1] || "").trim();
+  } catch (_error) {
+    return "";
+  }
+})();
 const ORG_DEFAULT_SETTINGS_KEYS = [
   "backendBaseUrl",
   "backendSharedToken",
@@ -632,6 +650,12 @@ function isCustomFieldCacheFresh(entry) {
   return Date.now() - Number(entry.fetchedAt) <= CUSTOM_FIELD_CACHE_TTL_MS;
 }
 
+function normalizeCandidateProjectIds(projectIds) {
+  return Array.isArray(projectIds)
+    ? Array.from(new Set(projectIds.map((projectId) => String(projectId || "").trim()).filter(Boolean)))
+    : [];
+}
+
 function normalizeCustomFieldCacheEntry(entry) {
   const customFields = Array.isArray(entry?.customFields) ? entry.customFields : [];
   const explicitStatusLabels = normalizePassiveStatusLabels(entry?.statusLabels);
@@ -639,7 +663,8 @@ function normalizeCustomFieldCacheEntry(entry) {
     fetchedAt: Number(entry?.fetchedAt) || 0,
     candidateId: String(entry?.candidateId || ""),
     customFields,
-    statusLabels: explicitStatusLabels.length > 0 ? explicitStatusLabels : getPassiveGemStatusLabels(customFields)
+    statusLabels: explicitStatusLabels.length > 0 ? explicitStatusLabels : getPassiveGemStatusLabels(customFields),
+    candidateProjectIds: normalizeCandidateProjectIds(entry?.candidateProjectIds)
   };
 }
 
@@ -682,12 +707,14 @@ async function setCachedCustomFieldsForContext(context, candidateId, customField
   }
   const normalizedCustomFields = Array.isArray(customFields) ? customFields : [];
   const explicitStatusLabels = normalizePassiveStatusLabels(options?.statusLabels);
+  const candidateProjectIds = normalizeCandidateProjectIds(options?.candidateProjectIds);
   const store = await getCustomFieldCacheStore();
   const nextEntry = {
     fetchedAt: Date.now(),
     candidateId: String(candidateId || ""),
     customFields: normalizedCustomFields,
-    statusLabels: explicitStatusLabels.length > 0 ? explicitStatusLabels : getPassiveGemStatusLabels(normalizedCustomFields)
+    statusLabels: explicitStatusLabels.length > 0 ? explicitStatusLabels : getPassiveGemStatusLabels(normalizedCustomFields),
+    candidateProjectIds
   };
   keys.forEach((key) => {
     store[key] = nextEntry;
@@ -759,6 +786,13 @@ function findPassiveGemStatusField(customFields) {
 function getPassiveGemStatusLabels(customFields) {
   const statusField = findPassiveGemStatusField(customFields);
   return normalizePassiveStatusLabels(statusField?.currentValueLabels);
+}
+
+function isCandidateInDoNotContactProject(candidateProjectIds) {
+  if (!DO_NOT_CONTACT_PROJECT_ID) {
+    return false;
+  }
+  return normalizeCandidateProjectIds(candidateProjectIds).includes(DO_NOT_CONTACT_PROJECT_ID);
 }
 
 function normalizeCustomFieldSelectionLabels(selection, field = null) {
@@ -854,7 +888,8 @@ async function patchCachedCustomFieldSelectionForContext(context, candidateId, s
     String(candidateId || cached.entry.candidateId || "").trim(),
     patched.customFields,
     {
-      statusLabels: getPassiveGemStatusLabels(patched.customFields)
+      statusLabels: getPassiveGemStatusLabels(patched.customFields),
+      candidateProjectIds: cached.entry.candidateProjectIds
     }
   );
   return true;
@@ -2708,6 +2743,7 @@ async function runAction(actionId, context, settings, meta = {}) {
       { ...audit, step: "addToProject" }
     );
     await touchProjectRecentUsage(projectId, context.projectName || "");
+    notifyLinkedInStatusChanged({ ...context, gemCandidateId: candidate.id }, runId);
     const message = `Candidate added to project ${projectId}.`;
     logEvent(settings, {
       event: "action.succeeded",
@@ -2994,7 +3030,8 @@ async function refreshCustomFieldsForContext(settings, context, runId, options =
     return {
       candidateId: prefetched.candidateId,
       customFields: prefetched.customFields,
-      statusLabels: prefetched.statusLabels,
+      statusLabels: normalizePassiveStatusLabels(prefetched.statusLabels),
+      candidateProjectIds: normalizeCandidateProjectIds(prefetched.candidateProjectIds),
       fromCache: false,
       stale: false
     };
@@ -3013,11 +3050,15 @@ async function refreshCustomFieldsForContext(settings, context, runId, options =
     { actionId, runId, step: "listCustomFields" }
   );
   const customFields = Array.isArray(data?.customFields) ? data.customFields : [];
+  const candidateProjectIds = normalizeCandidateProjectIds(data?.candidateProjectIds);
   const statusLabels = (() => {
     const explicit = normalizePassiveStatusLabels(data?.statusLabels);
     return explicit.length > 0 ? explicit : getPassiveGemStatusLabels(customFields);
   })();
-  await setCachedCustomFieldsForContext(context, candidate.id, customFields, { statusLabels });
+  await setCachedCustomFieldsForContext(context, candidate.id, customFields, {
+    statusLabels,
+    candidateProjectIds
+  });
   logEvent(settings, {
     event: "custom_fields.cache.refreshed",
     actionId,
@@ -3031,6 +3072,7 @@ async function refreshCustomFieldsForContext(settings, context, runId, options =
     candidateId: candidate.id,
     customFields,
     statusLabels,
+    candidateProjectIds,
     fromCache: false,
     stale: false
   };
@@ -3056,11 +3098,12 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
     } catch (_error) {
       // Best-effort warm-up only. The interactive load path will still fetch on demand.
     }
-    await setCachedCustomFieldsForContext(context, "", [], { statusLabels: [] });
+    await setCachedCustomFieldsForContext(context, "", [], { candidateProjectIds: [] });
     return {
       candidateId: "",
       customFields: [],
-      statusLabels: []
+      statusLabels: [],
+      candidateProjectIds: []
     };
   }
 
@@ -3074,11 +3117,15 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
     { ...audit, step: "prefetchCustomFields" }
   );
   const customFields = Array.isArray(data?.customFields) ? data.customFields : [];
+  const candidateProjectIds = normalizeCandidateProjectIds(data?.candidateProjectIds);
   const statusLabels = (() => {
     const explicit = normalizePassiveStatusLabels(data?.statusLabels);
     return explicit.length > 0 ? explicit : getPassiveGemStatusLabels(customFields);
   })();
-  await setCachedCustomFieldsForContext(context, candidateId, customFields, { statusLabels });
+  await setCachedCustomFieldsForContext(context, candidateId, customFields, {
+    statusLabels,
+    candidateProjectIds
+  });
 
   logEvent(settings, {
     event: "custom_fields.cache.prefetched",
@@ -3093,7 +3140,8 @@ async function prefetchCustomFieldsForContext(settings, context, runId, options 
   return {
     candidateId,
     customFields,
-    statusLabels
+    statusLabels,
+    candidateProjectIds
   };
 }
 
@@ -3143,6 +3191,7 @@ async function listCustomFieldsForContext(settings, context, runId, options = {}
       candidateId: cachedCandidateId,
       customFields: cached.entry.customFields,
       statusLabels: normalizePassiveStatusLabels(cached.entry.statusLabels),
+      candidateProjectIds: normalizeCandidateProjectIds(cached.entry.candidateProjectIds),
       fromCache: true,
       stale: !cached.isFresh
     };
@@ -3178,6 +3227,7 @@ async function getPassiveGemStatusForContext(settings, context, runId, options =
   return {
     candidateId,
     statusLabels: normalizePassiveStatusLabels(data?.statusLabels),
+    isDoNotContact: Boolean(candidateId) && isCandidateInDoNotContactProject(data?.candidateProjectIds),
     hasCandidate: Boolean(candidateId),
     fromCache: Boolean(data?.fromCache),
     stale: Boolean(data?.stale),
@@ -3916,6 +3966,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           runId,
           candidateId: data.candidateId,
           statusLabels: data.statusLabels,
+          isDoNotContact: Boolean(data.isDoNotContact),
           hasCandidate: data.hasCandidate,
           fromCache: data.fromCache,
           stale: data.stale,

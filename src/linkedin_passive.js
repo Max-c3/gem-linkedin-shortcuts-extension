@@ -552,6 +552,7 @@
         z-index: 2147483000;
         --gls-status-banner-gap: 14px;
         --gls-status-card-top: 74px;
+        --gls-status-stack-gap: 8px;
         --gls-status-accent: #ff5f67;
         --gls-status-secondary: #ffb4bc;
         --gls-status-accent-soft: rgba(255, 95, 103, 0.72);
@@ -566,13 +567,22 @@
       #gls-linkedin-passive-status-signal[hidden] {
         display: none !important;
       }
-      .gls-linkedin-passive-status-card {
+      .gls-linkedin-passive-status-stack {
         position: fixed;
         top: var(--gls-status-card-top);
         left: var(--gls-status-banner-gap);
         z-index: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--gls-status-stack-gap);
+        width: min(460px, calc(100vw - (var(--gls-status-banner-gap) * 2)));
+      }
+      .gls-linkedin-passive-status-card {
+        position: relative;
         transform: none;
-        max-width: min(460px, calc(100vw - (var(--gls-status-banner-gap) * 2)));
+        width: fit-content;
+        max-width: 100%;
         padding: 7px 12px;
         border-radius: 12px;
         border: 1px solid rgba(255, 255, 255, 0.26);
@@ -597,6 +607,33 @@
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
       }
+      .gls-linkedin-passive-dnc-card {
+        position: relative;
+        width: fit-content;
+        max-width: 100%;
+        padding: 8px 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 228, 232, 0.34);
+        background:
+          linear-gradient(124deg, rgba(255, 102, 120, 0.98) 0%, rgba(123, 10, 27, 0.98) 58%, rgba(255, 190, 198, 0.94) 100%);
+        color: #fff7f8;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.18),
+          inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+          0 10px 24px rgba(126, 14, 29, 0.34),
+          0 0 0 1px rgba(255, 255, 255, 0.08),
+          0 0 26px rgba(255, 102, 120, 0.22);
+        overflow: hidden;
+      }
+      .gls-linkedin-passive-dnc-card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(112deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.06) 34%, transparent 62%),
+          radial-gradient(circle at right center, rgba(255, 235, 239, 0.18), transparent 42%);
+        pointer-events: none;
+      }
       .gls-linkedin-passive-status-card::before {
         content: none;
       }
@@ -616,13 +653,33 @@
           0 0 10px var(--gls-status-accent-soft),
           0 0 14px var(--gls-status-secondary-soft);
       }
+      .gls-linkedin-passive-dnc-value {
+        position: relative;
+        max-width: 100%;
+        font-size: clamp(14px, 0.96vw, 17px);
+        line-height: 1.1;
+        font-weight: 810;
+        letter-spacing: 0.015em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 0 10px rgba(255, 215, 220, 0.22);
+      }
       @media (max-width: 900px) {
+        .gls-linkedin-passive-status-stack {
+          width: min(360px, calc(100vw - (var(--gls-status-banner-gap) * 2)));
+        }
         .gls-linkedin-passive-status-card {
-          max-width: min(360px, calc(100vw - (var(--gls-status-banner-gap) * 2)));
           padding: 6px 10px;
+        }
+        .gls-linkedin-passive-dnc-card {
+          padding: 7px 11px;
         }
         .gls-linkedin-passive-status-value {
           font-size: clamp(13px, 3.5vw, 16px);
+        }
+        .gls-linkedin-passive-dnc-value {
+          font-size: clamp(12px, 3.2vw, 14px);
         }
       }
     `;
@@ -666,10 +723,12 @@
       return;
     }
     const gap = window.innerWidth <= 900 ? 8 : 10;
+    const stackGap = window.innerWidth <= 900 ? 6 : 8;
     const headerBounds = getHeaderBounds();
     const cardTop = headerBounds.top + gap;
     state.indicatorElements.root.style.setProperty("--gls-status-banner-gap", `${gap}px`);
     state.indicatorElements.root.style.setProperty("--gls-status-card-top", `${cardTop}px`);
+    state.indicatorElements.root.style.setProperty("--gls-status-stack-gap", `${stackGap}px`);
   }
 
   function ensureIndicatorElements() {
@@ -681,18 +740,32 @@
     root.id = "gls-linkedin-passive-status-signal";
     root.hidden = true;
 
-    const card = document.createElement("div");
-    card.className = "gls-linkedin-passive-status-card";
-    card.setAttribute("role", "status");
-    card.setAttribute("aria-live", "polite");
+    const stack = document.createElement("div");
+    stack.className = "gls-linkedin-passive-status-stack";
 
-    const value = document.createElement("div");
-    value.className = "gls-linkedin-passive-status-value";
+    const statusCard = document.createElement("div");
+    statusCard.className = "gls-linkedin-passive-status-card";
+    statusCard.setAttribute("role", "status");
+    statusCard.setAttribute("aria-live", "polite");
 
-    card.appendChild(value);
-    root.appendChild(card);
+    const statusValue = document.createElement("div");
+    statusValue.className = "gls-linkedin-passive-status-value";
+
+    const dncCard = document.createElement("div");
+    dncCard.className = "gls-linkedin-passive-dnc-card";
+    dncCard.hidden = true;
+
+    const dncValue = document.createElement("div");
+    dncValue.className = "gls-linkedin-passive-dnc-value";
+    dncValue.textContent = "Do not contact";
+
+    statusCard.appendChild(statusValue);
+    dncCard.appendChild(dncValue);
+    stack.appendChild(statusCard);
+    stack.appendChild(dncCard);
+    root.appendChild(stack);
     (document.body || document.documentElement).appendChild(root);
-    state.indicatorElements = { root, card, value };
+    state.indicatorElements = { root, stack, statusCard, statusValue, dncCard, dncValue };
 
     window.addEventListener(
       "resize",
@@ -714,7 +787,7 @@
     }
   }
 
-  function renderIndicator(statusLabels) {
+  function renderIndicator(statusLabels, isDoNotContact = false) {
     const labels = Array.isArray(statusLabels) ? statusLabels : [];
     const hasValue = labels.length > 0;
     const statusText = hasValue ? summarizeStatusLabels(labels, 3) : "Not set";
@@ -731,7 +804,8 @@
     elements.root.style.setProperty("--gls-status-text", palette.text);
     elements.root.style.setProperty("--gls-status-frame-opacity", palette.frameOpacity);
     applyIndicatorLayout();
-    elements.value.textContent = statusText;
+    elements.statusValue.textContent = statusText;
+    elements.dncCard.hidden = !Boolean(isDoNotContact);
     elements.root.hidden = false;
   }
 
@@ -840,7 +914,7 @@
         return;
       }
       if (String(status.candidateId || "").trim()) {
-        renderIndicator(status.statusLabels);
+        renderIndicator(status.statusLabels, Boolean(status.isDoNotContact));
       } else {
         hideIndicator();
       }
