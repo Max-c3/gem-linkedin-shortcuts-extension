@@ -11403,6 +11403,22 @@ function isInsideRecommendationModule(element) {
   return false;
 }
 
+function isInsideLinkedInActivitySection(element) {
+  if (!element) {
+    return false;
+  }
+  let cursor = element.closest("section");
+  while (cursor) {
+    const heading = cursor.querySelector("h1, h2, h3, h4");
+    const headingText = normalizeProfileActionLabel(heading?.textContent || "");
+    if (headingText === "activity" || headingText.startsWith("activity ")) {
+      return true;
+    }
+    cursor = cursor.parentElement?.closest("section") || null;
+  }
+  return false;
+}
+
 function findVisibleProfileActionControl(root = document, options = {}) {
   if (!root || typeof root.querySelectorAll !== "function") {
     return null;
@@ -12135,6 +12151,9 @@ function findVisibleEllipsisMoreControls(root = document) {
       continue;
     }
     if (isInsideRecommendationModule(candidate)) {
+      continue;
+    }
+    if (isInsideLinkedInActivitySection(candidate)) {
       continue;
     }
     const labels = [
