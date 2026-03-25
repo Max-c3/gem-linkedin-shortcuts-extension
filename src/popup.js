@@ -4,6 +4,7 @@ const enabledCheckbox = document.getElementById("enabled");
 const gemStatusDisplayModeSelect = document.getElementById("gemStatusDisplayMode");
 const statusEl = document.getElementById("status");
 const optionsBtn = document.getElementById("open-options");
+const actionButtons = Array.from(document.querySelectorAll("button[data-action]"));
 const LINKEDIN_BOOTSTRAP_FILES = ["src/shared.js", "src/content_bootstrap.js"];
 const FULL_RUNTIME_FILES = ["src/shared.js", "src/content.js"];
 const SUPPORTED_TAB_PATTERNS = [
@@ -47,6 +48,20 @@ function isLinkedInTabUrl(url) {
     /^https:\/\/www\.linkedin\.com\/(?:in|pub)\//i.test(value) ||
     /^https:\/\/www\.linkedin\.com\/talent(?:\/[^/]+)?\/profile\//i.test(value)
   );
+}
+
+function isGmailTabUrl(url) {
+  return /^https:\/\/mail\.google\.com\/mail\//i.test(String(url || "").trim());
+}
+
+function syncActionButtonLabels() {
+  actionButtons.forEach((button) => {
+    const actionId = String(button.getAttribute("data-action") || "").trim();
+    const label = ACTION_LABELS[actionId];
+    if (label) {
+      button.textContent = label;
+    }
+  });
 }
 
 function sendRuntimeMessage(payload) {
@@ -190,7 +205,10 @@ async function waitForCurrentRuntime(tabId, attempts = 30, delayMs = 150, tab = 
 }
 
 function getContentScriptFilesForTab(tab) {
-  return isLinkedInTabUrl(tab?.url || "") ? LINKEDIN_BOOTSTRAP_FILES : FULL_RUNTIME_FILES;
+  if (isLinkedInTabUrl(tab?.url || "")) {
+    return LINKEDIN_BOOTSTRAP_FILES;
+  }
+  return FULL_RUNTIME_FILES;
 }
 
 function injectContentScripts(tabId, tab) {
@@ -257,6 +275,37 @@ async function sendActionToContent(tabId, actionId) {
   return response;
 }
 
+async function getActionContextFromTab(tabId) {
+  const response = await sendTabMessage(tabId, { type: "GET_ACTION_CONTEXT" });
+  if (!response?.ok) {
+    throw new Error(response?.message || "Could not read the current tab context.");
+  }
+  return response.context && typeof response.context === "object" ? response.context : {};
+}
+
+async function runActionDirect(actionId, context) {
+  const response = await sendRuntimeMessage({
+    type: "RUN_ACTION",
+    actionId,
+    context,
+    meta: {
+      source: "popup",
+      runId: generateRunId()
+    }
+  });
+  if (!response || typeof response !== "object") {
+    return { ok: false, message: "The background action did not return a result." };
+  }
+  return response;
+}
+
+function shouldRunDirectGmailPopupAction(tab, actionId) {
+  if (!isGmailTabUrl(tab?.url || "")) {
+    return false;
+  }
+  return actionId === ACTIONS.OPEN_ACTIVITY || actionId === ACTIONS.OPEN_ASHBY_PROFILE;
+}
+
 async function loadActiveTabContextStatus() {
   const activeTab = await getCurrentTab();
   if (!activeTab || !isSupportedTabUrl(activeTab.url || "")) {
@@ -302,10 +351,7 @@ async function loadState() {
   }
   const settings = deepMerge(DEFAULT_SETTINGS, response.settings || {});
   enabledCheckbox.checked = !!settings.enabled;
-  gemStatusDisplayModeSelect.value = normalizeGemStatusDisplayMode(
-    settings.gemStatusDisplayMode,
-    settings.showGemStatusBadge !== false
-  );
+  gemStatusDisplayModeSelect.value = getGemStatusDisplayModeFromSettings(settings, true);
 }
 
 async function updateSettingsPatch(patch, successMessage, successEvent, failureEvent) {
@@ -316,11 +362,7 @@ async function updateSettingsPatch(patch, successMessage, successEvent, failureE
     }
     const settings = deepMerge(DEFAULT_SETTINGS, response.settings || {});
     Object.assign(settings, patch || {});
-    settings.gemStatusDisplayMode = normalizeGemStatusDisplayMode(
-      settings.gemStatusDisplayMode,
-      settings.showGemStatusBadge !== false
-    );
-    settings.showGemStatusBadge = isGemStatusDisplayEnabled(settings.gemStatusDisplayMode);
+    settings.gemStatusDisplayMode = getGemStatusDisplayModeFromSettings(settings, true);
     const saveResponse = await sendRuntimeMessage({ type: "SAVE_SETTINGS", settings });
     if (!saveResponse?.ok) {
       throw new Error(saveResponse?.message || "Could not save settings");
@@ -361,17 +403,14 @@ enabledCheckbox.addEventListener("change", async () => {
 gemStatusDisplayModeSelect.addEventListener("change", async () => {
   const nextMode = normalizeGemStatusDisplayMode(gemStatusDisplayModeSelect.value, true);
   await updateSettingsPatch(
-    {
-      gemStatusDisplayMode: nextMode,
-      showGemStatusBadge: isGemStatusDisplayEnabled(nextMode)
-    },
+    { gemStatusDisplayMode: nextMode },
     `Gem status display: ${formatGemStatusDisplayModeLabel(nextMode)}.`,
     "popup.status_badge_toggled",
     "popup.status_badge_toggle_failed"
   );
 });
 
-document.querySelectorAll("button[data-action]").forEach((button) => {
+actionButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const actionId = button.getAttribute("data-action");
     try {
@@ -379,7 +418,13 @@ document.querySelectorAll("button[data-action]").forEach((button) => {
       setStatus("Running action...");
       await ensureContentScriptReady(activeTab);
       const tabId = Number(activeTab?.id);
-      const response = await sendActionToContent(tabId, actionId);
+      const response = shouldRunDirectGmailPopupAction(activeTab, actionId)
+        ? await runActionDirect(actionId, {
+            ...(await getActionContextFromTab(tabId)),
+            source: "popup",
+            runId: generateRunId()
+          })
+        : await sendActionToContent(tabId, actionId);
       const status = formatActionResultStatus(response);
       setStatus(status.message, status.isError);
     } catch (error) {
@@ -406,6 +451,8 @@ document.querySelectorAll("button[data-action]").forEach((button) => {
 optionsBtn.addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
 });
+
+syncActionButtonLabels();
 
 loadState()
   .then(async () => {

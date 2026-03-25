@@ -5,76 +5,25 @@
     return;
   }
 
-  const FALLBACK_ACTIONS = Object.freeze({
-    GEM_ACTIONS: "gemActions",
-    ADD_PROSPECT: "addProspect",
-    ADD_TO_PROJECT: "addToProject",
-    ADD_NOTE_TO_CANDIDATE: "addNoteToCandidate",
-    MANAGE_EMAILS: "manageEmails",
-    UPLOAD_TO_ASHBY: "uploadToAshby",
-    OPEN_ASHBY_PROFILE: "openAshbyProfile",
-    OPEN_ACTIVITY: "openActivity",
-    SET_CUSTOM_FIELD: "setCustomField",
-    SET_REMINDER: "setReminder",
-    SEND_SEQUENCE: "sendSequence",
-    EDIT_SEQUENCE: "editSequence"
-  });
-  const FALLBACK_LINKEDIN_NATIVE_SHORTCUT_IDS = Object.freeze([
-    "linkedinConnect",
-    "linkedinInviteSendWithoutNote",
-    "linkedinInviteAddNote",
-    "linkedinViewInRecruiter",
-    "linkedinMessageProfile",
-    "linkedinContactInfo",
-    "linkedinExpandSeeMore",
-    "linkedinRecruiterTemplate",
-    "linkedinRecruiterSend"
-  ]);
-  const FALLBACK_GEM_STATUS_DISPLAY_MODES = Object.freeze({
-    STATUS_ONLY: "statusOnly",
-    OFF: "off"
-  });
-  const FALLBACK_DEFAULT_SETTINGS = Object.freeze({
-    enabled: true,
-    showGemStatusBadge: true,
-    gemStatusDisplayMode: FALLBACK_GEM_STATUS_DISPLAY_MODES.STATUS_ONLY,
-    shortcuts: {
-      gemActions: "Cmd+K",
-      addProspect: "Cmd+Option+1",
-      addToProject: "Cmd+Option+2",
-      uploadToAshby: "Cmd+Option+3",
-      openAshbyProfile: "Cmd+Option+4",
-      openActivity: "Cmd+Option+5",
-      setCustomField: "Cmd+Option+6",
-      addNoteToCandidate: "Cmd+Option+7",
-      manageEmails: "Cmd+Option+8",
-      setReminder: "Cmd+Option+9",
-      sendSequence: "Cmd+Option+0",
-      editSequence: "Cmd+Control+Option+1",
-      linkedinConnect: "Cmd+Option+Z",
-      linkedinInviteSendWithoutNote: "W",
-      linkedinInviteAddNote: "N",
-      linkedinViewInRecruiter: "R",
-      linkedinMessageProfile: "M",
-      linkedinContactInfo: "C",
-      linkedinExpandSeeMore: "Option+A",
-      linkedinRecruiterTemplate: "T",
-      linkedinRecruiterSend: "Option+S",
-      cycleGemStatusDisplayMode: "Cmd+Control+Option+S"
-    }
-  });
-  const BOOTSTRAP_ACTIONS = typeof ACTIONS !== "undefined" ? ACTIONS : FALLBACK_ACTIONS;
-  const BOOTSTRAP_LINKEDIN_NATIVE_SHORTCUT_IDS =
-    typeof LINKEDIN_NATIVE_SHORTCUT_IDS !== "undefined"
-      ? LINKEDIN_NATIVE_SHORTCUT_IDS
-      : FALLBACK_LINKEDIN_NATIVE_SHORTCUT_IDS;
-  const BOOTSTRAP_GEM_STATUS_DISPLAY_MODES =
-    typeof GEM_STATUS_DISPLAY_MODES !== "undefined"
-      ? GEM_STATUS_DISPLAY_MODES
-      : FALLBACK_GEM_STATUS_DISPLAY_MODES;
-  const BOOTSTRAP_DEFAULT_SETTINGS =
-    typeof DEFAULT_SETTINGS !== "undefined" ? DEFAULT_SETTINGS : FALLBACK_DEFAULT_SETTINGS;
-  const GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID = "cycleGemStatusDisplayMode";
+  if (
+    typeof ACTIONS === "undefined" ||
+    typeof ACTION_IDS === "undefined" ||
+    typeof DEFAULT_SETTINGS === "undefined" ||
+    typeof DEFAULT_SHORTCUTS === "undefined" ||
+    typeof GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID === "undefined" ||
+    typeof LINKEDIN_NATIVE_SHORTCUT_IDS === "undefined" ||
+    typeof normalizeShortcut !== "function" ||
+    typeof keyboardEventToShortcut !== "function" ||
+    typeof normalizeGemStatusDisplayMode !== "function" ||
+    typeof getGemStatusDisplayModeFromSettings !== "function" ||
+    typeof isGemStatusDisplayEnabled !== "function" ||
+    typeof cycleGemStatusDisplayMode !== "function" ||
+    typeof formatShortcutForMac !== "function" ||
+    typeof deepMerge !== "function"
+  ) {
+    throw new Error("[GLS] shared.js must load before content_bootstrap.js");
+  }
+
   const PAGE_CHANGE_FORWARD_DELAY_MS = 650;
   const PAGE_CHANGE_POLL_INTERVAL_MS = 300;
   const INVITE_DECISION_TIMEOUT_MS = 1200;
@@ -146,207 +95,26 @@
     state.pageChangeTimerId = 0;
   }
 
-  function bootstrapIsPlainObject(value) {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-  }
-
-  function bootstrapDeepMerge(base, override) {
-    if (!bootstrapIsPlainObject(base)) {
-      return override;
-    }
-    const output = { ...base };
-    if (!bootstrapIsPlainObject(override)) {
-      return output;
-    }
-    for (const [key, value] of Object.entries(override)) {
-      if (bootstrapIsPlainObject(value) && bootstrapIsPlainObject(output[key])) {
-        output[key] = bootstrapDeepMerge(output[key], value);
-        continue;
-      }
-      output[key] = value;
-    }
-    return output;
-  }
-
-  function bootstrapNormalizeShortcut(raw) {
-    if (typeof normalizeShortcut === "function") {
-      return normalizeShortcut(raw);
-    }
-    if (!raw || typeof raw !== "string") {
-      return "";
-    }
-
-    const tokens = raw
-      .split("+")
-      .map((token) => token.trim())
-      .filter(Boolean);
-    const flags = {
-      Ctrl: false,
-      Alt: false,
-      Shift: false,
-      Meta: false
-    };
-    let key = "";
-
-    for (const token of tokens) {
-      const lower = token.toLowerCase();
-      if (lower === "ctrl" || lower === "control") {
-        flags.Ctrl = true;
-        continue;
-      }
-      if (lower === "alt" || lower === "option" || lower === "opt") {
-        flags.Alt = true;
-        continue;
-      }
-      if (lower === "shift") {
-        flags.Shift = true;
-        continue;
-      }
-      if (lower === "meta" || lower === "cmd" || lower === "command" || lower === "⌘") {
-        flags.Meta = true;
-        continue;
-      }
-      if (lower === "space" || lower === "spacebar") {
-        key = "Space";
-        continue;
-      }
-      if (lower === "escape" || lower === "esc") {
-        key = "Escape";
-        continue;
-      }
-      if (lower === "return") {
-        key = "Enter";
-        continue;
-      }
-      key = token.length === 1 ? token.toUpperCase() : token;
-    }
-
-    const ordered = [];
-    if (flags.Meta) {
-      ordered.push("Meta");
-    }
-    if (flags.Ctrl) {
-      ordered.push("Ctrl");
-    }
-    if (flags.Shift) {
-      ordered.push("Shift");
-    }
-    if (flags.Alt) {
-      ordered.push("Alt");
-    }
-    if (key) {
-      ordered.push(key);
-    }
-    return ordered.join("+");
-  }
-
-  function bootstrapKeyboardEventToShortcut(event, options = {}) {
-    if (typeof keyboardEventToShortcut === "function") {
-      return keyboardEventToShortcut(event, options);
-    }
-    if (!event) {
-      return "";
-    }
-    const parts = [];
-    if (event.metaKey) {
-      parts.push("Meta");
-    }
-    if (event.ctrlKey) {
-      parts.push("Ctrl");
-    }
-    if (event.shiftKey) {
-      parts.push("Shift");
-    }
-    if (event.altKey) {
-      parts.push("Alt");
-    }
-
-    const preferLegacyCode = Boolean(options.preferLegacyCode);
-    let key = "";
-    if (preferLegacyCode) {
-      const code = String(event.code || "");
-      if (/^Key[A-Z]$/.test(code)) {
-        key = code.slice(3);
-      } else if (/^Digit[0-9]$/.test(code)) {
-        key = code.slice(5);
-      } else if (code === "Space") {
-        key = "Space";
-      } else {
-        key = String(event.key || "").trim();
-      }
-    } else {
-      key = String(event.key || "").trim();
-    }
-    if (!key) {
-      return "";
-    }
-    if (key === " ") {
-      key = "Space";
-    } else if (key.length === 1) {
-      key = key.toUpperCase();
-    }
-    parts.push(key);
-    return parts.join("+");
-  }
-
   function getBootstrapEventShortcutCandidates(event) {
     const candidates = [];
-    const primaryShortcut = bootstrapNormalizeShortcut(bootstrapKeyboardEventToShortcut(event));
+    const primaryShortcut = normalizeShortcut(keyboardEventToShortcut(event));
     if (primaryShortcut) {
       candidates.push(primaryShortcut);
     }
-    const legacyShortcut = bootstrapNormalizeShortcut(
-      bootstrapKeyboardEventToShortcut(event, { preferLegacyCode: true })
-    );
+    const legacyShortcut = normalizeShortcut(keyboardEventToShortcut(event, { preferLegacyCode: true }));
     if (legacyShortcut && !candidates.includes(legacyShortcut)) {
       candidates.push(legacyShortcut);
     }
     return candidates;
   }
 
-  function bootstrapNormalizeGemStatusDisplayMode(rawValue, fallbackEnabled = true) {
-    if (typeof normalizeGemStatusDisplayMode === "function") {
-      return normalizeGemStatusDisplayMode(rawValue, fallbackEnabled);
-    }
-    const value = String(rawValue || "").trim();
-    if (value === BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.STATUS_ONLY || value === "frameAndStatus") {
-      return BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.STATUS_ONLY;
-    }
-    if (value === BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.OFF) {
-      return BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.OFF;
-    }
-    if (rawValue === false) {
-      return BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.OFF;
-    }
-    return fallbackEnabled ? BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.STATUS_ONLY : BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.OFF;
-  }
-
-  function bootstrapIsGemStatusDisplayEnabled(mode, fallbackEnabled = true) {
-    if (typeof isGemStatusDisplayEnabled === "function") {
-      return isGemStatusDisplayEnabled(mode, fallbackEnabled);
-    }
-    return bootstrapNormalizeGemStatusDisplayMode(mode, fallbackEnabled) !== BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.OFF;
-  }
-
-  function bootstrapCycleGemStatusDisplayMode(mode, fallbackEnabled = true) {
-    if (typeof cycleGemStatusDisplayMode === "function") {
-      return cycleGemStatusDisplayMode(mode, fallbackEnabled);
-    }
-    const normalized = bootstrapNormalizeGemStatusDisplayMode(mode, fallbackEnabled);
-    return normalized === BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.STATUS_ONLY
-      ? BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.OFF
-      : BOOTSTRAP_GEM_STATUS_DISPLAY_MODES.STATUS_ONLY;
-  }
-
-  function bootstrapFormatShortcutForMac(shortcut) {
-    if (typeof formatShortcutForMac === "function") {
-      return formatShortcutForMac(shortcut);
-    }
-    return String(shortcut || "");
-  }
-
   function normalizeSettings(settings) {
-    return bootstrapDeepMerge(BOOTSTRAP_DEFAULT_SETTINGS, settings || {});
+    const normalized = deepMerge(DEFAULT_SETTINGS, settings || {});
+    const { showGemStatusBadge: _legacyShowGemStatusBadge, ...rest } = normalized;
+    return {
+      ...rest,
+      gemStatusDisplayMode: getGemStatusDisplayModeFromSettings(settings, true)
+    };
   }
 
   function isLinkedInPublicProfilePath(pathname) {
@@ -504,16 +272,12 @@
     }
   }
 
-  function getCurrentGemStatusDisplayMode(settings = state.cachedSettings || BOOTSTRAP_DEFAULT_SETTINGS) {
-    const baseline = settings || {};
-    return bootstrapNormalizeGemStatusDisplayMode(
-      baseline.gemStatusDisplayMode,
-      baseline.showGemStatusBadge !== false
-    );
+  function getCurrentGemStatusDisplayMode(settings = state.cachedSettings || DEFAULT_SETTINGS) {
+    return getGemStatusDisplayModeFromSettings(settings, true);
   }
 
-  function isCurrentGemStatusDisplayEnabled(settings = state.cachedSettings || BOOTSTRAP_DEFAULT_SETTINGS) {
-    return bootstrapIsGemStatusDisplayEnabled(getCurrentGemStatusDisplayMode(settings));
+  function isCurrentGemStatusDisplayEnabled(settings = state.cachedSettings || DEFAULT_SETTINGS) {
+    return isGemStatusDisplayEnabled(getCurrentGemStatusDisplayMode(settings));
   }
 
   function sendRuntimeMessage(payload) {
@@ -574,11 +338,11 @@
   }
 
   function getConfiguredShortcut(shortcutId) {
-    const configured = bootstrapNormalizeShortcut(state.cachedSettings?.shortcuts?.[shortcutId] || "");
+    const configured = normalizeShortcut(state.cachedSettings?.shortcuts?.[shortcutId] || "");
     if (configured) {
       return configured;
     }
-    return bootstrapNormalizeShortcut(BOOTSTRAP_DEFAULT_SETTINGS?.shortcuts?.[shortcutId] || "");
+    return normalizeShortcut(DEFAULT_SHORTCUTS[shortcutId] || "");
   }
 
   function isConfiguredShortcut(event, shortcutId) {
@@ -598,10 +362,10 @@
 
   function findActionByShortcut(shortcut) {
     const mapping = state.cachedSettings?.shortcuts || {};
-    const validActionIds = new Set(Object.values(BOOTSTRAP_ACTIONS));
+    const validActionIds = new Set(ACTION_IDS);
     return (
       Object.keys(mapping).find(
-        (actionId) => validActionIds.has(actionId) && bootstrapNormalizeShortcut(mapping[actionId]) === shortcut
+        (actionId) => validActionIds.has(actionId) && normalizeShortcut(mapping[actionId]) === shortcut
       ) || ""
     );
   }
@@ -987,7 +751,7 @@
         }
         state.passiveRuntimeEnsured = true;
         dispatchDeferredRuntimeEvent("gls:settings-updated", {
-          settings: state.cachedSettings || BOOTSTRAP_DEFAULT_SETTINGS
+          settings: state.cachedSettings || DEFAULT_SETTINGS
         });
         dispatchDeferredRuntimeEvent("gls:linkedin-page-changed", {
           reason: reason || "passive-runtime-ensured",
@@ -1075,23 +839,18 @@
   async function cycleGemStatusDisplayModeSetting() {
     const currentSettings = state.cachedSettings || (await getSettings());
     const nextSettings = normalizeSettings(currentSettings || {});
-    const nextMode = bootstrapCycleGemStatusDisplayMode(getCurrentGemStatusDisplayMode(currentSettings));
+    const nextMode = cycleGemStatusDisplayMode(getCurrentGemStatusDisplayMode(currentSettings));
     nextSettings.gemStatusDisplayMode = nextMode;
-    nextSettings.showGemStatusBadge = bootstrapIsGemStatusDisplayEnabled(nextMode);
     await saveSettings(nextSettings);
-    showToast(
-      bootstrapIsGemStatusDisplayEnabled(nextMode)
-        ? "Gem status banner enabled."
-        : "Gem status banner hidden."
-    );
+    showToast(isGemStatusDisplayEnabled(nextMode) ? "Gem status banner enabled." : "Gem status banner hidden.");
 
-    if (nextSettings.enabled && bootstrapIsGemStatusDisplayEnabled(nextMode)) {
+    if (nextSettings.enabled && isGemStatusDisplayEnabled(nextMode)) {
       scheduleBannerRuntimeEnsure("cycle-status-display");
     }
 
     dispatchDeferredRuntimeEvent("gls:settings-updated", {
       settings: nextSettings,
-      shortcut: bootstrapFormatShortcutForMac(getConfiguredShortcut(GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID))
+      shortcut: formatShortcutForMac(getConfiguredShortcut(GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID))
     });
   }
 
@@ -1119,8 +878,8 @@
       return;
     }
 
-    const linkedInShortcutId = BOOTSTRAP_LINKEDIN_NATIVE_SHORTCUT_IDS.find(
-      (shortcutId) => actualShortcuts.includes(bootstrapNormalizeShortcut(getConfiguredShortcut(shortcutId)))
+    const linkedInShortcutId = LINKEDIN_NATIVE_SHORTCUT_IDS.find(
+      (shortcutId) => actualShortcuts.includes(normalizeShortcut(getConfiguredShortcut(shortcutId)))
     );
     const actionId = findActionByShortcutCandidates(actualShortcuts);
     if (!linkedInShortcutId && !actionId) {

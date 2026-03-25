@@ -14,7 +14,6 @@ const PINNED_CUSTOM_FIELD_NAMES = Object.freeze(["priority", "expertise", "statu
 const PINNED_CUSTOM_FIELD_RANK = new Map(PINNED_CUSTOM_FIELD_NAMES.map((name, index) => [name, index]));
 const SEQUENCE_PICKER_KEYS_PER_PAGE = 26;
 const SEQUENCE_PICKER_SHORTCUT_KEYS = "abcdefghijklmnopqrstuvwxyz".split("");
-const ACTIVITY_FEED_LIMIT = 150;
 const LINKEDIN_SHORTCUT_IDS = {
   CONNECT: "linkedinConnect",
   INVITE_SEND_WITHOUT_NOTE: "linkedinInviteSendWithoutNote",
@@ -26,7 +25,6 @@ const LINKEDIN_SHORTCUT_IDS = {
   RECRUITER_TEMPLATE: "linkedinRecruiterTemplate",
   RECRUITER_SEND: "linkedinRecruiterSend"
 };
-const GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID = "cycleGemStatusDisplayMode";
 const LINKEDIN_EXPAND_MORE_MAX_PASSES = 6;
 const LINKEDIN_EXPAND_MORE_PASS_DELAY_MS = 110;
 const LINKEDIN_INVITE_DECISION_TIMEOUT_MS = 1200;
@@ -3485,39 +3483,6 @@ function startProfileUrlPrefetchWatcher() {
   }, PROFILE_URL_POLL_INTERVAL_MS);
 }
 
-function listActivityFeedForContext(context, runId, limit = ACTIVITY_FEED_LIMIT) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(
-      {
-        type: "LIST_ACTIVITY_FEED_FOR_CONTEXT",
-        context,
-        runId: runId || "",
-        limit
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          const msg = chrome.runtime.lastError.message || "Runtime message failed.";
-          if (isContextInvalidatedError(msg)) {
-            triggerContextRecovery(msg);
-            reject(new Error("Extension updated. Reloading page."));
-            return;
-          }
-          reject(new Error(msg));
-          return;
-        }
-        if (!response?.ok) {
-          reject(new Error(response?.message || "Could not load activity feed"));
-          return;
-        }
-        resolve({
-          candidate: response.candidate && typeof response.candidate === "object" ? response.candidate : {},
-          activities: Array.isArray(response.activities) ? response.activities : []
-        });
-      }
-    );
-  });
-}
-
 function logEvent(payload) {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "LOG_EVENT", payload }, () => {
@@ -3540,11 +3505,7 @@ async function refreshSettings() {
 }
 
 function getCurrentGemStatusDisplayMode(settings = cachedSettings || DEFAULT_SETTINGS) {
-  const baseline = settings || {};
-  return normalizeGemStatusDisplayMode(
-    baseline.gemStatusDisplayMode,
-    baseline.showGemStatusBadge !== false
-  );
+  return getGemStatusDisplayModeFromSettings(settings, true);
 }
 
 function isCurrentGemStatusDisplayEnabled(settings = cachedSettings || DEFAULT_SETTINGS) {
@@ -3557,7 +3518,7 @@ function findActionByShortcut(shortcut) {
     return "";
   }
   const mapping = cachedSettings.shortcuts || {};
-  const validActionIds = new Set(Object.values(ACTIONS));
+  const validActionIds = new Set(ACTION_IDS);
   return (
     Object.keys(mapping).find(
       (actionId) => validActionIds.has(actionId) && normalizeShortcut(mapping[actionId]) === shortcut
@@ -5120,131 +5081,6 @@ function createEmailPickerStyles() {
       border-color: #1e69d2;
       background: #1e69d2;
       color: #fff;
-    }
-  `;
-  document.documentElement.appendChild(style);
-}
-
-function createActivityFeedStyles() {
-  if (document.getElementById("gem-activity-feed-style")) {
-    return;
-  }
-  const style = document.createElement("style");
-  style.id = "gem-activity-feed-style";
-  style.textContent = `
-    #gem-activity-feed-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.45);
-      z-index: 2147483647;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-    }
-    #gem-activity-feed-modal {
-      width: min(920px, 100%);
-      max-height: min(82vh, 920px);
-      background: #fff;
-      border-radius: 12px;
-      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
-      padding: 16px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-      color: #1f2328;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    #gem-activity-feed-header {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-start;
-    }
-    #gem-activity-feed-title {
-      font-size: 20px;
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-    #gem-activity-feed-subtitle {
-      font-size: 13px;
-      color: #4f5358;
-      margin-bottom: 4px;
-    }
-    #gem-activity-feed-candidate {
-      font-size: 13px;
-      color: #2f3a4b;
-    }
-    #gem-activity-feed-open {
-      border: 1px solid #1e69d2;
-      border-radius: 8px;
-      background: #fff;
-      color: #1e69d2;
-      font-size: 13px;
-      font-weight: 600;
-      padding: 8px 10px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    #gem-activity-feed-open[disabled] {
-      opacity: 0.5;
-      cursor: default;
-    }
-    #gem-activity-feed-list {
-      border: 1px solid #d4dae3;
-      border-radius: 8px;
-      background: #fff;
-      overflow: auto;
-      padding: 8px;
-      min-height: 120px;
-      flex: 1;
-    }
-    .gem-activity-feed-item {
-      border: 1px solid #e7ebf2;
-      border-radius: 8px;
-      background: #fbfcff;
-      padding: 10px 12px;
-      margin-bottom: 8px;
-    }
-    .gem-activity-feed-item:last-child {
-      margin-bottom: 0;
-    }
-    .gem-activity-feed-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: baseline;
-      margin-bottom: 4px;
-    }
-    .gem-activity-feed-item-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #1f2328;
-    }
-    .gem-activity-feed-item-time {
-      font-size: 12px;
-      color: #5b6168;
-      white-space: nowrap;
-    }
-    .gem-activity-feed-item-subtitle {
-      font-size: 12px;
-      color: #4f5358;
-      margin-bottom: 6px;
-    }
-    .gem-activity-feed-item-content {
-      font-size: 13px;
-      color: #1f2328;
-      line-height: 1.45;
-      white-space: pre-wrap;
-    }
-    .gem-activity-feed-empty {
-      padding: 12px;
-      font-size: 13px;
-      color: #5b6168;
-    }
-    #gem-activity-feed-hint {
-      font-size: 12px;
-      color: #5b6168;
     }
   `;
   document.documentElement.appendChild(style);
@@ -8985,255 +8821,6 @@ async function handleGemActionsShortcut(source = "keyboard", runId = "") {
   }
 }
 
-function formatActivityTimestamp(value) {
-  if (!value) {
-    return "";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-  return date.toLocaleString();
-}
-
-async function showActivityFeed(runId, context) {
-  createActivityFeedStyles();
-  const linkedinUrl = context.linkedinUrl || window.location.href;
-
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.id = "gem-activity-feed-overlay";
-
-    const modal = document.createElement("div");
-    modal.id = "gem-activity-feed-modal";
-
-    const header = document.createElement("div");
-    header.id = "gem-activity-feed-header";
-
-    const titleWrap = document.createElement("div");
-    const title = document.createElement("div");
-    title.id = "gem-activity-feed-title";
-    title.textContent = "Activity Feed";
-    const subtitle = document.createElement("div");
-    subtitle.id = "gem-activity-feed-subtitle";
-    subtitle.textContent = "Loading Gem activity for this profile...";
-    const candidateLabel = document.createElement("div");
-    candidateLabel.id = "gem-activity-feed-candidate";
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(subtitle);
-    titleWrap.appendChild(candidateLabel);
-
-    const openInGemBtn = document.createElement("button");
-    openInGemBtn.id = "gem-activity-feed-open";
-    openInGemBtn.type = "button";
-    openInGemBtn.textContent = "Open Profile in Gem";
-    openInGemBtn.disabled = true;
-
-    header.appendChild(titleWrap);
-    header.appendChild(openInGemBtn);
-
-    const list = document.createElement("div");
-    list.id = "gem-activity-feed-list";
-
-    const hint = document.createElement("div");
-    hint.id = "gem-activity-feed-hint";
-    hint.textContent = "Esc to close.";
-
-    modal.appendChild(header);
-    modal.appendChild(list);
-    modal.appendChild(hint);
-    overlay.appendChild(modal);
-    document.documentElement.appendChild(overlay);
-
-    let active = true;
-    let profileLink = "";
-
-    function close() {
-      if (!active) {
-        return;
-      }
-      active = false;
-      overlay.remove();
-      resolve();
-    }
-
-    function renderLoading() {
-      list.innerHTML = "";
-      const row = document.createElement("div");
-      row.className = "gem-activity-feed-empty";
-      row.textContent = "Loading activity feed...";
-      list.appendChild(row);
-    }
-
-    function renderError(message) {
-      list.innerHTML = "";
-      const row = document.createElement("div");
-      row.className = "gem-activity-feed-empty";
-      row.textContent = `Could not load activity feed: ${message}`;
-      list.appendChild(row);
-    }
-
-    function renderActivities(candidate, activities) {
-      list.innerHTML = "";
-      const safeCandidate = candidate && typeof candidate === "object" ? candidate : {};
-      const safeActivities = Array.isArray(activities) ? activities : [];
-
-      const candidateName = String(safeCandidate.name || "").trim();
-      const headline = [safeCandidate.title || "", safeCandidate.company || ""].filter(Boolean).join(" at ");
-      candidateLabel.textContent = [candidateName || "Candidate", headline || "", safeCandidate.location || ""]
-        .filter(Boolean)
-        .join(" · ");
-
-      profileLink = String(safeCandidate.weblink || "");
-      openInGemBtn.disabled = !profileLink;
-
-      if (safeActivities.length === 0) {
-        const row = document.createElement("div");
-        row.className = "gem-activity-feed-empty";
-        row.textContent = "No activity found yet for this candidate.";
-        list.appendChild(row);
-        return;
-      }
-
-      for (const activity of safeActivities) {
-        const item = document.createElement("div");
-        item.className = "gem-activity-feed-item";
-
-        const head = document.createElement("div");
-        head.className = "gem-activity-feed-head";
-
-        const itemTitle = document.createElement("div");
-        itemTitle.className = "gem-activity-feed-item-title";
-        itemTitle.textContent = activity.title || "Activity";
-
-        const itemTime = document.createElement("div");
-        itemTime.className = "gem-activity-feed-item-time";
-        itemTime.textContent = formatActivityTimestamp(activity.timestamp);
-
-        head.appendChild(itemTitle);
-        head.appendChild(itemTime);
-        item.appendChild(head);
-
-        if (activity.subtitle) {
-          const sub = document.createElement("div");
-          sub.className = "gem-activity-feed-item-subtitle";
-          sub.textContent = activity.subtitle;
-          item.appendChild(sub);
-        }
-
-        if (activity.content) {
-          const content = document.createElement("div");
-          content.className = "gem-activity-feed-item-content";
-          content.textContent = activity.content;
-          item.appendChild(content);
-        }
-
-        list.appendChild(item);
-      }
-    }
-
-    renderLoading();
-    modal.tabIndex = -1;
-    modal.focus();
-
-    openInGemBtn.addEventListener("click", () => {
-      if (!profileLink) {
-        return;
-      }
-      window.open(profileLink, "_blank", "noopener,noreferrer");
-      logEvent({
-        source: "extension.content",
-        event: "activity_feed.open_profile_clicked",
-        actionId: ACTIONS.VIEW_ACTIVITY_FEED,
-        runId,
-        message: "Clicked Open Profile in Gem from activity feed.",
-        link: profileLink
-      });
-    });
-
-    overlay.addEventListener("click", (event) => {
-      if (event.target !== overlay) {
-        return;
-      }
-      logEvent({
-        source: "extension.content",
-        event: "activity_feed.closed",
-        actionId: ACTIONS.VIEW_ACTIVITY_FEED,
-        runId,
-        message: "Activity feed closed by outside click.",
-        link: linkedinUrl
-      });
-      close();
-    });
-
-    overlay.addEventListener(
-      "keydown",
-      (event) => {
-        if (event.key !== "Escape") {
-          return;
-        }
-        event.preventDefault();
-        logEvent({
-          source: "extension.content",
-          event: "activity_feed.closed",
-          actionId: ACTIONS.VIEW_ACTIVITY_FEED,
-          runId,
-          message: "Activity feed closed by Escape key.",
-          link: linkedinUrl
-        });
-        close();
-      },
-      true
-    );
-
-    logEvent({
-      source: "extension.content",
-      event: "activity_feed.opened",
-      actionId: ACTIONS.VIEW_ACTIVITY_FEED,
-      runId,
-      message: "Activity feed view opened.",
-      link: linkedinUrl
-    });
-
-    listActivityFeedForContext(context, runId, ACTIVITY_FEED_LIMIT)
-      .then(async (data) => {
-        if (!active) {
-          return;
-        }
-        subtitle.textContent = "Gem activity for this person (latest first).";
-        renderActivities(data.candidate, data.activities);
-        await logEvent({
-          source: "extension.content",
-          event: "activity_feed.loaded",
-          actionId: ACTIONS.VIEW_ACTIVITY_FEED,
-          runId,
-          message: `Loaded ${(data.activities || []).length} activity entries.`,
-          link: data?.candidate?.weblink || linkedinUrl,
-          details: {
-            candidateId: data?.candidate?.id || ""
-          }
-        });
-      })
-      .catch(async (error) => {
-        if (!active) {
-          return;
-        }
-        subtitle.textContent = "Gem activity for this person.";
-        renderError(error.message || "Failed to load activity feed.");
-        showToast(error.message || "Failed to load activity feed.", true);
-        await logEvent({
-          source: "extension.content",
-          level: "error",
-          event: "activity_feed.load_failed",
-          actionId: ACTIONS.VIEW_ACTIVITY_FEED,
-          runId,
-          message: error.message || "Failed to load activity feed.",
-          link: linkedinUrl
-        });
-      });
-  });
-}
-
 async function showProjectPicker(runId, linkedinUrl) {
   createProjectPickerStyles();
 
@@ -10528,25 +10115,6 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       return { ok: false, message: missingIdentityMessage, runId: effectiveRunId, debugSummary: contextSignalSummary };
     }
 
-    if (actionId === "viewActivityFeed") {
-      const message = "View Activity Feed is retired for now.";
-      showToast(message, true);
-      await logEvent({
-        source: "extension.content",
-        level: "warn",
-        event: "action.retired",
-        actionId,
-        runId: effectiveRunId,
-        message,
-        link: initialLink
-      });
-      // Retired branch kept for future restore:
-      // if (actionId === ACTIONS.VIEW_ACTIVITY_FEED) {
-      //   await showActivityFeed(effectiveRunId, initialContext);
-      // }
-      return { ok: false, message, runId: effectiveRunId, debugSummary: contextSignalSummary };
-    }
-
     if (actionId === ACTIONS.MANAGE_EMAILS) {
       const result = await showEmailPicker(effectiveRunId, initialContext);
       if (!result) {
@@ -10833,7 +10401,6 @@ async function cycleGemStatusDisplayModeSetting(
   const nextMode = cycleGemStatusDisplayMode(currentMode);
   const nextSettings = deepMerge(DEFAULT_SETTINGS, currentSettings || {});
   nextSettings.gemStatusDisplayMode = nextMode;
-  nextSettings.showGemStatusBadge = isGemStatusDisplayEnabled(nextMode);
 
   cachedSettings = deepMerge(DEFAULT_SETTINGS, nextSettings);
   applyGemStatusDisplayModeLocally(nextMode, runId);

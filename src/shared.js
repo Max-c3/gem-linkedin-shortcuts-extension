@@ -3,7 +3,7 @@
 globalThis.__GLS_SHARED_RUNTIME_READY__ = true;
 const CONTENT_RUNTIME_VERSION = "2026-03-25-1";
 
-const ACTIONS = {
+const ACTIONS = Object.freeze({
   GEM_ACTIONS: "gemActions",
   ADD_PROSPECT: "addProspect",
   ADD_TO_PROJECT: "addToProject",
@@ -16,21 +16,109 @@ const ACTIONS = {
   SET_REMINDER: "setReminder",
   SEND_SEQUENCE: "sendSequence",
   EDIT_SEQUENCE: "editSequence"
-  // Retired for now:
-  // VIEW_ACTIVITY_FEED: "viewActivityFeed"
-};
+});
 
-const LINKEDIN_NATIVE_SHORTCUT_IDS = [
-  "linkedinConnect",
-  "linkedinInviteSendWithoutNote",
-  "linkedinInviteAddNote",
-  "linkedinViewInRecruiter",
-  "linkedinMessageProfile",
-  "linkedinContactInfo",
-  "linkedinExpandSeeMore",
-  "linkedinRecruiterTemplate",
-  "linkedinRecruiterSend"
-];
+const GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID = "cycleGemStatusDisplayMode";
+
+const ACTION_DEFINITIONS = Object.freeze([
+  Object.freeze({ id: ACTIONS.GEM_ACTIONS, label: "Gem actions", defaultShortcut: "Cmd+K" }),
+  Object.freeze({ id: ACTIONS.ADD_PROSPECT, label: "Add Prospect", defaultShortcut: "Cmd+Option+1" }),
+  Object.freeze({ id: ACTIONS.ADD_TO_PROJECT, label: "Add to Project", defaultShortcut: "Cmd+Option+2" }),
+  Object.freeze({ id: ACTIONS.UPLOAD_TO_ASHBY, label: "Upload to Ashby", defaultShortcut: "Cmd+Option+3" }),
+  Object.freeze({ id: ACTIONS.OPEN_ASHBY_PROFILE, label: "Open Profile in Ashby", defaultShortcut: "Cmd+Option+4" }),
+  Object.freeze({ id: ACTIONS.OPEN_ACTIVITY, label: "Open Profile in Gem", defaultShortcut: "Cmd+Option+5" }),
+  Object.freeze({ id: ACTIONS.SET_CUSTOM_FIELD, label: "Set Custom Field", defaultShortcut: "Cmd+Option+6" }),
+  Object.freeze({
+    id: ACTIONS.ADD_NOTE_TO_CANDIDATE,
+    label: "Add Note to Candidate",
+    defaultShortcut: "Cmd+Option+7"
+  }),
+  Object.freeze({ id: ACTIONS.MANAGE_EMAILS, label: "Manage Emails", defaultShortcut: "Cmd+Option+8" }),
+  Object.freeze({ id: ACTIONS.SET_REMINDER, label: "Set Reminder", defaultShortcut: "Cmd+Option+9" }),
+  Object.freeze({ id: ACTIONS.SEND_SEQUENCE, label: "Open Sequence", defaultShortcut: "Cmd+Option+0" }),
+  Object.freeze({ id: ACTIONS.EDIT_SEQUENCE, label: "Edit Sequence", defaultShortcut: "Cmd+Control+Option+1" })
+]);
+
+const SETTING_SHORTCUT_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: GEM_STATUS_DISPLAY_MODE_SHORTCUT_ID,
+    label: "Toggle Gem status banner",
+    defaultShortcut: "Cmd+Control+Option+S"
+  })
+]);
+
+const LINKEDIN_NATIVE_SHORTCUT_DEFINITIONS = Object.freeze([
+  Object.freeze({ id: "linkedinConnect", label: "LinkedIn: Connect", defaultShortcut: "Cmd+Option+Z", native: true }),
+  Object.freeze({
+    id: "linkedinInviteSendWithoutNote",
+    label: "LinkedIn: Send without note",
+    defaultShortcut: "W",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinInviteAddNote",
+    label: "LinkedIn: Add note",
+    defaultShortcut: "N",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinViewInRecruiter",
+    label: "LinkedIn: View in Recruiter",
+    defaultShortcut: "R",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinMessageProfile",
+    label: "LinkedIn: Message",
+    defaultShortcut: "M",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinContactInfo",
+    label: "LinkedIn: Contact info",
+    defaultShortcut: "C",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinExpandSeeMore",
+    label: "LinkedIn: Expand ...see more",
+    defaultShortcut: "Option+A",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinRecruiterTemplate",
+    label: "LinkedIn Recruiter: Template textbox",
+    defaultShortcut: "T",
+    native: true
+  }),
+  Object.freeze({
+    id: "linkedinRecruiterSend",
+    label: "LinkedIn Recruiter: Send",
+    defaultShortcut: "Option+S",
+    native: true
+  })
+]);
+
+const SHORTCUT_DEFINITIONS = Object.freeze([
+  ...ACTION_DEFINITIONS,
+  ...SETTING_SHORTCUT_DEFINITIONS,
+  ...LINKEDIN_NATIVE_SHORTCUT_DEFINITIONS
+]);
+
+const ACTION_IDS = Object.freeze(ACTION_DEFINITIONS.map((definition) => definition.id));
+const SHORTCUT_IDS = Object.freeze(SHORTCUT_DEFINITIONS.map((definition) => definition.id));
+const ACTION_LABELS = Object.freeze(
+  Object.fromEntries(ACTION_DEFINITIONS.map((definition) => [definition.id, definition.label]))
+);
+const SHORTCUT_LABELS = Object.freeze(
+  Object.fromEntries(SHORTCUT_DEFINITIONS.map((definition) => [definition.id, definition.label]))
+);
+const DEFAULT_SHORTCUTS = Object.freeze(
+  Object.fromEntries(SHORTCUT_DEFINITIONS.map((definition) => [definition.id, definition.defaultShortcut]))
+);
+const LINKEDIN_NATIVE_SHORTCUT_IDS = Object.freeze(
+  LINKEDIN_NATIVE_SHORTCUT_DEFINITIONS.map((definition) => definition.id)
+);
 
 const ALLOWED_BACKEND_ORIGINS = Object.freeze([
   "https://gem-linkedin-shortcuts-extension.onrender.com",
@@ -47,7 +135,6 @@ const GEM_STATUS_DISPLAY_MODES = Object.freeze({
 
 const DEFAULT_SETTINGS = {
   enabled: true,
-  showGemStatusBadge: true,
   gemStatusDisplayMode: GEM_STATUS_DISPLAY_MODES.STATUS_ONLY,
   backendBaseUrl: "http://localhost:8787",
   backendSharedToken: "",
@@ -59,32 +146,7 @@ const DEFAULT_SETTINGS = {
   customFieldValue: "",
   activityUrlTemplate: "",
   sequenceComposeUrlTemplate: "https://www.gem.com/sequence/{{sequenceId}}/edit/stages",
-  shortcuts: {
-    gemActions: "Cmd+K",
-    addProspect: "Cmd+Option+1",
-    addToProject: "Cmd+Option+2",
-    uploadToAshby: "Cmd+Option+3",
-    openAshbyProfile: "Cmd+Option+4",
-    openActivity: "Cmd+Option+5",
-    setCustomField: "Cmd+Option+6",
-    addNoteToCandidate: "Cmd+Option+7",
-    manageEmails: "Cmd+Option+8",
-    // Retired for now:
-    // viewActivityFeed: "<unassigned>",
-    setReminder: "Cmd+Option+9",
-    sendSequence: "Cmd+Option+0",
-    editSequence: "Cmd+Control+Option+1",
-    linkedinConnect: "Cmd+Option+Z",
-    linkedinInviteSendWithoutNote: "W",
-    linkedinInviteAddNote: "N",
-    linkedinViewInRecruiter: "R",
-    linkedinMessageProfile: "M",
-    linkedinContactInfo: "C",
-    linkedinExpandSeeMore: "Option+A",
-    linkedinRecruiterTemplate: "T",
-    linkedinRecruiterSend: "Option+S",
-    cycleGemStatusDisplayMode: "Cmd+Control+Option+S"
-  }
+  shortcuts: { ...DEFAULT_SHORTCUTS }
 };
 
 let cachedKeyboardLayoutMap = null;
@@ -102,6 +164,15 @@ function normalizeGemStatusDisplayMode(rawValue, fallbackEnabled = true) {
     return GEM_STATUS_DISPLAY_MODES.OFF;
   }
   return fallbackEnabled ? GEM_STATUS_DISPLAY_MODES.STATUS_ONLY : GEM_STATUS_DISPLAY_MODES.OFF;
+}
+
+function getGemStatusDisplayModeFromSettings(settings = {}, fallbackEnabled = true) {
+  const baseline = isPlainObject(settings) ? settings : {};
+  const hasExplicitMode = Object.prototype.hasOwnProperty.call(baseline, "gemStatusDisplayMode");
+  const legacyFallbackEnabled = Object.prototype.hasOwnProperty.call(baseline, "showGemStatusBadge")
+    ? baseline.showGemStatusBadge !== false
+    : fallbackEnabled;
+  return normalizeGemStatusDisplayMode(hasExplicitMode ? baseline.gemStatusDisplayMode : undefined, legacyFallbackEnabled);
 }
 
 function isGemStatusDisplayEnabled(mode, fallbackEnabled = true) {

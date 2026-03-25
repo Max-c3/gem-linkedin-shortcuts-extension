@@ -36,7 +36,15 @@
 
   function normalizeSettings(settings) {
     if (typeof deepMerge === "function" && typeof DEFAULT_SETTINGS !== "undefined") {
-      return deepMerge(DEFAULT_SETTINGS, settings || {});
+      const normalized = deepMerge(DEFAULT_SETTINGS, settings || {});
+      const { showGemStatusBadge: _legacyShowGemStatusBadge, ...rest } = normalized;
+      return {
+        ...rest,
+        gemStatusDisplayMode:
+          typeof getGemStatusDisplayModeFromSettings === "function"
+            ? getGemStatusDisplayModeFromSettings(settings, true)
+            : String(normalized.gemStatusDisplayMode || "")
+      };
     }
     return settings && typeof settings === "object" ? { ...settings } : {};
   }
@@ -318,11 +326,8 @@
   }
 
   function getCurrentDisplayMode() {
-    if (typeof normalizeGemStatusDisplayMode === "function") {
-      return normalizeGemStatusDisplayMode(
-        state.cachedSettings?.gemStatusDisplayMode,
-        state.cachedSettings?.showGemStatusBadge !== false
-      );
+    if (typeof getGemStatusDisplayModeFromSettings === "function") {
+      return getGemStatusDisplayModeFromSettings(state.cachedSettings, true);
     }
     return String(state.cachedSettings?.gemStatusDisplayMode || "off");
   }

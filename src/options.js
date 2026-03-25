@@ -19,33 +19,6 @@ let activeShortcutEditor = null;
 let latestRenderedLogs = [];
 let gemUsersLoaded = false;
 
-const SHORTCUT_LABELS = {
-  gemActions: "Gem actions",
-  cycleGemStatusDisplayMode: "Cycle Gem status display mode",
-  addProspect: "Add Prospect",
-  addToProject: "Add to Project",
-  uploadToAshby: "Upload to Ashby",
-  openAshbyProfile: "Open Profile in Ashby",
-  openActivity: "Open Profile in Gem",
-  setCustomField: "Set Custom Field",
-  addNoteToCandidate: "Add Note to Candidate",
-  manageEmails: "Manage Emails",
-  setReminder: "Set Reminder",
-  sendSequence: "Open Sequence",
-  editSequence: "Edit Sequence",
-  linkedinConnect: "LinkedIn: Connect",
-  linkedinInviteSendWithoutNote: "LinkedIn: Send without note",
-  linkedinInviteAddNote: "LinkedIn: Add note",
-  linkedinViewInRecruiter: "LinkedIn: View in Recruiter",
-  linkedinMessageProfile: "LinkedIn: Message",
-  linkedinContactInfo: "LinkedIn: Contact info",
-  linkedinExpandSeeMore: "LinkedIn: Expand ...see more",
-  linkedinRecruiterTemplate: "LinkedIn Recruiter: Template textbox",
-  linkedinRecruiterSend: "LinkedIn Recruiter: Send"
-  // Retired for now:
-  // viewActivityFeed: "View Activity Feed"
-};
-
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.style.color = isError ? "#a61d24" : "#196c2e";
@@ -67,15 +40,23 @@ function getShortcutValue(shortcutId) {
   return normalizeShortcut(input.dataset.shortcut || input.value || "");
 }
 
+function syncShortcutUiLabels() {
+  document.querySelectorAll(".shortcut-edit").forEach((button) => {
+    const shortcutId = String(button.dataset.shortcutId || "").trim();
+    const label = SHORTCUT_LABELS[shortcutId];
+    const rowLabel = button.closest(".shortcut-control")?.previousElementSibling;
+    if (label && rowLabel) {
+      rowLabel.textContent = label;
+    }
+  });
+}
+
 function readInputs() {
-  const gemStatusDisplayMode = normalizeGemStatusDisplayMode(
-    document.getElementById("gemStatusDisplayMode").value,
-    true
-  );
+  const gemStatusDisplayMode = normalizeGemStatusDisplayMode(document.getElementById("gemStatusDisplayMode").value, true);
+  const shortcuts = Object.fromEntries(SHORTCUT_IDS.map((shortcutId) => [shortcutId, getShortcutValue(shortcutId)]));
   return {
     enabled: document.getElementById("enabled").checked,
     gemStatusDisplayMode,
-    showGemStatusBadge: isGemStatusDisplayEnabled(gemStatusDisplayMode),
     backendBaseUrl: document.getElementById("backendBaseUrl").value.trim(),
     backendSharedToken: document.getElementById("backendSharedToken").value.trim(),
     createdByUserId: document.getElementById("createdByUserId").value.trim(),
@@ -86,41 +67,13 @@ function readInputs() {
     customFieldValue: document.getElementById("customFieldValue").value.trim(),
     activityUrlTemplate: document.getElementById("activityUrlTemplate").value.trim(),
     sequenceComposeUrlTemplate: document.getElementById("sequenceComposeUrlTemplate").value.trim(),
-    shortcuts: {
-      gemActions: getShortcutValue("gemActions"),
-      cycleGemStatusDisplayMode: getShortcutValue("cycleGemStatusDisplayMode"),
-      addProspect: getShortcutValue("addProspect"),
-      addToProject: getShortcutValue("addToProject"),
-      uploadToAshby: getShortcutValue("uploadToAshby"),
-      openAshbyProfile: getShortcutValue("openAshbyProfile"),
-      openActivity: getShortcutValue("openActivity"),
-      setCustomField: getShortcutValue("setCustomField"),
-      addNoteToCandidate: getShortcutValue("addNoteToCandidate"),
-      manageEmails: getShortcutValue("manageEmails"),
-      setReminder: getShortcutValue("setReminder"),
-      sendSequence: getShortcutValue("sendSequence"),
-      editSequence: getShortcutValue("editSequence"),
-      linkedinConnect: getShortcutValue("linkedinConnect"),
-      linkedinInviteSendWithoutNote: getShortcutValue("linkedinInviteSendWithoutNote"),
-      linkedinInviteAddNote: getShortcutValue("linkedinInviteAddNote"),
-      linkedinViewInRecruiter: getShortcutValue("linkedinViewInRecruiter"),
-      linkedinMessageProfile: getShortcutValue("linkedinMessageProfile"),
-      linkedinContactInfo: getShortcutValue("linkedinContactInfo"),
-      linkedinExpandSeeMore: getShortcutValue("linkedinExpandSeeMore"),
-      linkedinRecruiterTemplate: getShortcutValue("linkedinRecruiterTemplate"),
-      linkedinRecruiterSend: getShortcutValue("linkedinRecruiterSend")
-      // Retired for now:
-      // viewActivityFeed: getShortcutValue("viewActivityFeed")
-    }
+    shortcuts
   };
 }
 
 function writeInputs(settings) {
   document.getElementById("enabled").checked = !!settings.enabled;
-  const normalizedMode = normalizeGemStatusDisplayMode(
-    settings.gemStatusDisplayMode,
-    settings.showGemStatusBadge !== false
-  );
+  const normalizedMode = getGemStatusDisplayModeFromSettings(settings, true);
   document.getElementById("gemStatusDisplayMode").value = normalizedMode;
   document.getElementById("gemStatusDisplayMode").dataset.current = normalizedMode;
   document.getElementById("backendBaseUrl").value = settings.backendBaseUrl || "";
@@ -134,30 +87,9 @@ function writeInputs(settings) {
   document.getElementById("activityUrlTemplate").value = settings.activityUrlTemplate || "";
   document.getElementById("sequenceComposeUrlTemplate").value = settings.sequenceComposeUrlTemplate || "";
 
-  setShortcutValue("gemActions", settings.shortcuts.gemActions || "");
-  setShortcutValue("cycleGemStatusDisplayMode", settings.shortcuts.cycleGemStatusDisplayMode || "");
-  setShortcutValue("addProspect", settings.shortcuts.addProspect || "");
-  setShortcutValue("addToProject", settings.shortcuts.addToProject || "");
-  setShortcutValue("uploadToAshby", settings.shortcuts.uploadToAshby || "");
-  setShortcutValue("openAshbyProfile", settings.shortcuts.openAshbyProfile || "");
-  setShortcutValue("openActivity", settings.shortcuts.openActivity || "");
-  setShortcutValue("setCustomField", settings.shortcuts.setCustomField || "");
-  setShortcutValue("addNoteToCandidate", settings.shortcuts.addNoteToCandidate || "");
-  setShortcutValue("manageEmails", settings.shortcuts.manageEmails || "");
-  setShortcutValue("setReminder", settings.shortcuts.setReminder || "");
-  setShortcutValue("sendSequence", settings.shortcuts.sendSequence || "");
-  setShortcutValue("editSequence", settings.shortcuts.editSequence || "");
-  setShortcutValue("linkedinConnect", settings.shortcuts.linkedinConnect || "");
-  setShortcutValue("linkedinInviteSendWithoutNote", settings.shortcuts.linkedinInviteSendWithoutNote || "");
-  setShortcutValue("linkedinInviteAddNote", settings.shortcuts.linkedinInviteAddNote || "");
-  setShortcutValue("linkedinViewInRecruiter", settings.shortcuts.linkedinViewInRecruiter || "");
-  setShortcutValue("linkedinMessageProfile", settings.shortcuts.linkedinMessageProfile || "");
-  setShortcutValue("linkedinContactInfo", settings.shortcuts.linkedinContactInfo || "");
-  setShortcutValue("linkedinExpandSeeMore", settings.shortcuts.linkedinExpandSeeMore || "");
-  setShortcutValue("linkedinRecruiterTemplate", settings.shortcuts.linkedinRecruiterTemplate || "");
-  setShortcutValue("linkedinRecruiterSend", settings.shortcuts.linkedinRecruiterSend || "");
-  // Retired for now:
-  // setShortcutValue("viewActivityFeed", settings.shortcuts.viewActivityFeed || "");
+  SHORTCUT_IDS.forEach((shortcutId) => {
+    setShortcutValue(shortcutId, settings.shortcuts?.[shortcutId] || "");
+  });
   syncUserPickerFromCurrentIdentity();
 }
 
@@ -169,7 +101,6 @@ async function saveGemStatusDisplayModeImmediately(rawMode) {
   }
   const settings = deepMerge(DEFAULT_SETTINGS, response.settings || {});
   settings.gemStatusDisplayMode = nextMode;
-  settings.showGemStatusBadge = isGemStatusDisplayEnabled(nextMode);
   const saveResponse = await sendRuntimeMessage({ type: "SAVE_SETTINGS", settings });
   if (!saveResponse?.ok) {
     throw new Error(saveResponse?.message || "Could not save settings");
@@ -546,7 +477,7 @@ function startShortcutRecording(shortcutId, button) {
   activeShortcutEditor = { shortcutId, button };
   button.classList.add("recording");
   button.textContent = "Recording...";
-  setStatus(`Press new keys for "${SHORTCUT_LABELS[shortcutId]}". Press Escape to cancel.`);
+  setStatus(`Press new keys for "${SHORTCUT_LABELS[shortcutId] || shortcutId}". Press Escape to cancel.`);
 }
 
 async function saveShortcutImmediately(shortcutId, shortcut) {
@@ -585,7 +516,7 @@ async function handleShortcutRecord(event) {
   }
 
   const oldShortcut = getShortcutValue(shortcutId);
-  const label = SHORTCUT_LABELS[shortcutId];
+  const label = SHORTCUT_LABELS[shortcutId] || shortcutId;
   setShortcutValue(shortcutId, shortcut);
   stopShortcutRecording();
   setStatus(`Saving "${label}"...`);
@@ -658,6 +589,7 @@ gemStatusDisplayModeSelect.addEventListener("change", () => {
 });
 
 document.addEventListener("keydown", handleShortcutRecord, true);
+syncShortcutUiLabels();
 
 form.addEventListener("submit", (event) => {
   saveSettings(event).catch((error) => setStatus(error.message, true));

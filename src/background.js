@@ -25,6 +25,11 @@ const CUSTOM_FIELD_CACHE_LIMIT = 200;
 const CANDIDATE_EMAIL_CACHE_KEY = "candidateEmailPickerCache";
 const CANDIDATE_EMAIL_CACHE_TTL_MS = 10 * 60 * 1000;
 const CANDIDATE_EMAIL_CACHE_LIMIT = 200;
+const BACKEND_REQUEST_TIMEOUT_MS = 25 * 1000;
+const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
+const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_THREAD_SEARCH_MAX_RESULTS = 8;
+const GMAIL_SYSTEM_EMAILS = new Set(["no-reply@gem.com", "noreply@gem.com"]);
 const SHARED_RUNTIME_FILE = "src/shared.js";
 const CONTENT_RUNTIME_FILES = Object.freeze(["src/content.js"]);
 const CANDIDATE_RESOLUTION_TTL_MS = 2 * 60 * 1000;
@@ -75,7 +80,7 @@ let cachedSettingsPromise = null;
 let localLogsCache = null;
 
 function cloneSettingsForReturn(settings) {
-  return normalizeSettings(deepMerge(DEFAULT_SETTINGS, settings || {}));
+  return normalizeSettings(settings || {});
 }
 
 function setSettingsCache(settings) {
@@ -133,7 +138,7 @@ async function getSettings() {
   if (!cachedSettingsPromise) {
     cachedSettingsPromise = new Promise((resolve) => {
       chrome.storage.sync.get("settings", (data) => {
-        const normalized = normalizeSettings(deepMerge(DEFAULT_SETTINGS, data.settings || {}));
+        const normalized = normalizeSettings(data.settings || {});
         cachedSettingsValue = normalized;
         resolve(normalized);
       });
@@ -223,7 +228,7 @@ function normalizeOrgDefaults(raw) {
 
   const inputShortcuts = raw.shortcuts && typeof raw.shortcuts === "object" ? raw.shortcuts : {};
   const normalizedShortcuts = {};
-  for (const actionId of Object.keys(DEFAULT_SETTINGS.shortcuts || {})) {
+  for (const actionId of SHORTCUT_IDS) {
     const shortcut = normalizeShortcut(inputShortcuts[actionId] || "");
     if (shortcut) {
       normalizedShortcuts[actionId] = shortcut;
@@ -292,13 +297,13 @@ function mergeSettingsWithOrgDefaults(settings, orgDefaults, storedSettings = {}
 
   const orgShortcuts = orgDefaults.shortcuts && typeof orgDefaults.shortcuts === "object" ? orgDefaults.shortcuts : {};
   const mergedShortcuts = { ...(next.shortcuts || {}) };
-  for (const actionId of Object.keys(DEFAULT_SETTINGS.shortcuts || {})) {
+  for (const actionId of SHORTCUT_IDS) {
     const orgShortcut = normalizeShortcut(orgShortcuts[actionId] || "");
     if (!orgShortcut) {
       continue;
     }
     const currentShortcut = normalizeShortcut(mergedShortcuts[actionId] || "");
-    const defaultShortcut = normalizeShortcut(DEFAULT_SETTINGS.shortcuts[actionId] || "");
+    const defaultShortcut = normalizeShortcut(DEFAULT_SHORTCUTS[actionId] || "");
     if (!currentShortcut || currentShortcut === defaultShortcut) {
       if (currentShortcut !== orgShortcut) {
         mergedShortcuts[actionId] = orgShortcut;
@@ -321,7 +326,7 @@ async function bootstrapOrgDefaults(reason = "runtime") {
   }
   const stored = await getStoredSyncSettings();
   const storedSettings = stored && typeof stored === "object" ? stored : {};
-  const current = normalizeSettings(deepMerge(DEFAULT_SETTINGS, storedSettings));
+  const current = normalizeSettings(storedSettings);
   const merged = mergeSettingsWithOrgDefaults(current, orgDefaults, storedSettings);
   if (!merged.changed) {
     return { applied: false, reason: "already_configured" };
@@ -372,19 +377,14 @@ function ensureOrgDefaultsBootstrapped(reason = "runtime") {
 function normalizeSettings(input) {
   const merged = deepMerge(DEFAULT_SETTINGS, input || {});
   const rawInput = input && typeof input === "object" ? input : {};
-  const hasExplicitGemStatusDisplayMode = Object.prototype.hasOwnProperty.call(rawInput, "gemStatusDisplayMode");
   const normalizedShortcuts = {};
-  const shortcutKeys = Object.keys(DEFAULT_SETTINGS.shortcuts || {});
-  for (const key of shortcutKeys) {
-    normalizedShortcuts[key] = normalizeShortcut(merged.shortcuts?.[key] || DEFAULT_SETTINGS.shortcuts[key]);
+  for (const key of SHORTCUT_IDS) {
+    normalizedShortcuts[key] = normalizeShortcut(merged.shortcuts?.[key] || DEFAULT_SHORTCUTS[key]);
   }
-  const normalizedGemStatusDisplayMode = normalizeGemStatusDisplayMode(
-    hasExplicitGemStatusDisplayMode ? merged.gemStatusDisplayMode : undefined,
-    merged.showGemStatusBadge !== false
-  );
+  const { showGemStatusBadge: _legacyShowGemStatusBadge, ...rest } = merged;
+  const normalizedGemStatusDisplayMode = getGemStatusDisplayModeFromSettings(rawInput, true);
   return {
-    ...merged,
-    showGemStatusBadge: isGemStatusDisplayEnabled(normalizedGemStatusDisplayMode),
+    ...rest,
     gemStatusDisplayMode: normalizedGemStatusDisplayMode,
     shortcuts: normalizedShortcuts
   };
@@ -1403,6 +1403,428 @@ function collectContextEmails(context = {}) {
   return emails;
 }
 
+function collectGmailAccountEmails(context = {}) {
+  const emails = [];
+  const seen = new Set();
+  const add = (value) => {
+    const email = normalizeContextEmail(value);
+    if (!email || seen.has(email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return;
+    }
+    seen.add(email);
+    emails.push(email);
+  };
+  if (Array.isArray(context.gmailAccountEmails)) {
+    context.gmailAccountEmails.forEach((email) => add(email));
+  }
+  add(context.gmailMailboxEmail);
+  return emails;
+}
+
+function normalizeGmailSubjectForMatch(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/^(?:(?:re|fw|fwd|aw)\s*:\s*)+/i, "")
+    .trim()
+    .toLowerCase();
+}
+
+function escapeGmailSearchPhrase(value) {
+  return String(value || "")
+    .replace(/["\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getGmailOauthClientId() {
+  return String(chrome.runtime.getManifest()?.oauth2?.client_id || "").trim();
+}
+
+function hasConfiguredGmailOauth() {
+  return Boolean(getGmailOauthClientId());
+}
+
+function getGmailAuthToken(options = {}) {
+  return new Promise((resolve, reject) => {
+    if (!chrome.identity || typeof chrome.identity.getAuthToken !== "function") {
+      reject(new Error("Chrome identity API is not available."));
+      return;
+    }
+    if (!hasConfiguredGmailOauth()) {
+      reject(new Error("Gmail OAuth is not configured in manifest.json."));
+      return;
+    }
+    chrome.identity.getAuthToken(
+      {
+        interactive: Boolean(options.interactive),
+        enableGranularPermissions: true,
+        scopes: [GMAIL_READONLY_SCOPE]
+      },
+      (tokenOrResult, grantedScopes) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "Could not authorize Gmail access."));
+          return;
+        }
+        const token =
+          typeof tokenOrResult === "string"
+            ? tokenOrResult
+            : String(tokenOrResult?.token || "").trim();
+        const scopes = Array.isArray(grantedScopes)
+          ? grantedScopes
+          : Array.isArray(tokenOrResult?.grantedScopes)
+            ? tokenOrResult.grantedScopes
+            : [];
+        if (!token) {
+          reject(new Error("Google auth did not return an access token."));
+          return;
+        }
+        resolve({ token, grantedScopes: scopes });
+      }
+    );
+  });
+}
+
+function removeCachedGoogleAuthToken(token) {
+  return new Promise((resolve, reject) => {
+    if (!chrome.identity || typeof chrome.identity.removeCachedAuthToken !== "function") {
+      resolve();
+      return;
+    }
+    chrome.identity.removeCachedAuthToken({ token }, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message || "Could not clear cached Google token."));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function ensureGmailAuthToken() {
+  try {
+    return await getGmailAuthToken({ interactive: false });
+  } catch (_error) {
+    return getGmailAuthToken({ interactive: true });
+  }
+}
+
+async function fetchGmailJson(path, token, options = {}) {
+  const url = new URL(`${GMAIL_API_BASE_URL}${path}`);
+  const query = options.query && typeof options.query === "object" ? options.query : {};
+  Object.entries(query).forEach(([key, rawValue]) => {
+    if (Array.isArray(rawValue)) {
+      rawValue.forEach((value) => {
+        const normalized = String(value || "").trim();
+        if (normalized) {
+          url.searchParams.append(key, normalized);
+        }
+      });
+      return;
+    }
+    const normalized = String(rawValue || "").trim();
+    if (normalized) {
+      url.searchParams.set(key, normalized);
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  if (response.status === 401 && options.retryOnUnauthorized !== false) {
+    await removeCachedGoogleAuthToken(token).catch(() => {});
+    const refreshed = await getGmailAuthToken({ interactive: false }).catch(() => null);
+    if (refreshed?.token) {
+      return fetchGmailJson(path, refreshed.token, { ...options, retryOnUnauthorized: false });
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(`Gmail API request failed (${response.status}).`);
+  }
+
+  if (response.status === 204) {
+    return {};
+  }
+  return response.json();
+}
+
+function parseHeaderEmailEntries(value) {
+  const text = String(value || "");
+  const entries = [];
+  const seen = new Set();
+  const add = (emailValue, displayNameValue = "") => {
+    const email = normalizeContextEmail(emailValue);
+    if (!email || seen.has(email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return;
+    }
+    seen.add(email);
+    const displayName = String(displayNameValue || "")
+      .replace(/^["']+|["']+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    entries.push({
+      email,
+      displayName: displayName && !/@/.test(displayName) ? displayName : ""
+    });
+  };
+
+  const anglePattern = /(?:"?([^"<]*)"?\s*)?<([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})>/gi;
+  let angleMatch = null;
+  while ((angleMatch = anglePattern.exec(text))) {
+    add(angleMatch[2], angleMatch[1] || "");
+  }
+
+  const barePattern = /(^|[\s,(;])([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?=$|[\s),;])/gi;
+  let bareMatch = null;
+  while ((bareMatch = barePattern.exec(text))) {
+    add(bareMatch[2], "");
+  }
+
+  return entries;
+}
+
+function getGmailHeaderValues(headers, name) {
+  const target = String(name || "").trim().toLowerCase();
+  if (!target || !Array.isArray(headers)) {
+    return [];
+  }
+  return headers
+    .filter((header) => String(header?.name || "").trim().toLowerCase() === target)
+    .map((header) => String(header?.value || "").trim())
+    .filter(Boolean);
+}
+
+function getGmailThreadSubject(thread = {}) {
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  for (const message of messages) {
+    const headers = Array.isArray(message?.payload?.headers) ? message.payload.headers : [];
+    const subject = getGmailHeaderValues(headers, "Subject")[0] || "";
+    if (subject) {
+      return subject;
+    }
+  }
+  return "";
+}
+
+function collectGmailThreadParticipants(thread = {}) {
+  const participantMap = new Map();
+  const add = (entry) => {
+    if (!entry || typeof entry !== "object" || !entry.email) {
+      return;
+    }
+    const email = normalizeContextEmail(entry.email);
+    if (!email) {
+      return;
+    }
+    const existing = participantMap.get(email) || {
+      email,
+      displayName: "",
+      count: 0
+    };
+    existing.count += 1;
+    if (!existing.displayName && String(entry.displayName || "").trim()) {
+      existing.displayName = String(entry.displayName || "").trim();
+    }
+    participantMap.set(email, existing);
+  };
+
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  messages.forEach((message) => {
+    const headers = Array.isArray(message?.payload?.headers) ? message.payload.headers : [];
+    ["From", "To", "Cc", "Reply-To", "Delivered-To"].forEach((headerName) => {
+      getGmailHeaderValues(headers, headerName).forEach((value) => {
+        parseHeaderEmailEntries(value).forEach((entry) => add(entry));
+      });
+    });
+  });
+
+  return Array.from(participantMap.values()).sort((left, right) => {
+    if (left.count !== right.count) {
+      return right.count - left.count;
+    }
+    return left.email.localeCompare(right.email);
+  });
+}
+
+function buildGmailThreadSearchQuery(context = {}) {
+  const terms = [];
+  const subject = escapeGmailSearchPhrase(context.gmailSubject);
+  const emails = collectContextEmails(context).slice(0, 3);
+
+  if (subject) {
+    terms.push(`subject:"${subject}"`);
+  }
+  if (emails.length > 0) {
+    terms.push(`(${emails.map((email) => `from:${email} OR to:${email} OR cc:${email}`).join(" OR ")})`);
+  }
+
+  return terms.join(" ").trim();
+}
+
+function scoreGmailThreadMatch(thread, context, mailboxEmail = "") {
+  let score = 0;
+  const wantedSubject = normalizeGmailSubjectForMatch(context.gmailSubject);
+  const actualSubject = normalizeGmailSubjectForMatch(getGmailThreadSubject(thread));
+  if (wantedSubject && actualSubject) {
+    if (wantedSubject === actualSubject) {
+      score += 6;
+    } else if (actualSubject.includes(wantedSubject) || wantedSubject.includes(actualSubject)) {
+      score += 3;
+    }
+  }
+
+  const wantedEmails = new Set(collectContextEmails(context));
+  collectGmailThreadParticipants(thread).forEach((entry) => {
+    if (wantedEmails.has(entry.email)) {
+      score += 4;
+    }
+    if (mailboxEmail && entry.email === normalizeContextEmail(mailboxEmail)) {
+      score += 1;
+    }
+  });
+
+  return score;
+}
+
+function collectFallbackGmailCandidateEmails(context = {}, settings = {}, mailboxEmail = "") {
+  const ignored = new Set([
+    ...collectGmailAccountEmails(context),
+    normalizeContextEmail(mailboxEmail),
+    normalizeContextEmail(settings?.createdByUserEmail || ""),
+    ...GMAIL_SYSTEM_EMAILS
+  ]);
+  return collectContextEmails(context).filter((email) => !ignored.has(normalizeContextEmail(email)));
+}
+
+async function resolveGmailThreadParticipantsViaApi(context = {}) {
+  if (!hasConfiguredGmailOauth()) {
+    return null;
+  }
+
+  const { token } = await ensureGmailAuthToken();
+  const profile = await fetchGmailJson("/users/me/profile", token);
+  const mailboxEmail = normalizeContextEmail(profile?.emailAddress || "");
+  const query = buildGmailThreadSearchQuery(context);
+  if (!query) {
+    return {
+      mailboxEmail,
+      emails: [],
+      participantName: "",
+      threadId: ""
+    };
+  }
+
+  const list = await fetchGmailJson("/users/me/threads", token, {
+    query: {
+      q: query,
+      maxResults: String(GMAIL_THREAD_SEARCH_MAX_RESULTS)
+    }
+  });
+  const threadRefs = Array.isArray(list?.threads) ? list.threads.slice(0, GMAIL_THREAD_SEARCH_MAX_RESULTS) : [];
+  if (threadRefs.length === 0) {
+    return {
+      mailboxEmail,
+      emails: [],
+      participantName: "",
+      threadId: ""
+    };
+  }
+
+  let bestThread = null;
+  let bestScore = -1;
+  for (const threadRef of threadRefs) {
+    const threadId = String(threadRef?.id || "").trim();
+    if (!threadId) {
+      continue;
+    }
+    const thread = await fetchGmailJson(`/users/me/threads/${encodeURIComponent(threadId)}`, token, {
+      query: {
+        format: "metadata",
+        metadataHeaders: ["Subject", "From", "To", "Cc", "Reply-To", "Delivered-To"]
+      }
+    });
+    const score = scoreGmailThreadMatch(thread, context, mailboxEmail);
+    if (score > bestScore) {
+      bestScore = score;
+      bestThread = thread;
+    }
+  }
+
+  if (!bestThread) {
+    return {
+      mailboxEmail,
+      emails: [],
+      participantName: "",
+      threadId: ""
+    };
+  }
+
+  const ignored = new Set([
+    ...collectGmailAccountEmails(context),
+    mailboxEmail,
+    ...GMAIL_SYSTEM_EMAILS
+  ]);
+  const externalParticipants = collectGmailThreadParticipants(bestThread).filter(
+    (entry) => !ignored.has(normalizeContextEmail(entry.email))
+  );
+
+  return {
+    mailboxEmail,
+    emails: externalParticipants.map((entry) => entry.email),
+    participantName: String(externalParticipants.find((entry) => entry.displayName)?.displayName || "").trim(),
+    threadId: String(bestThread?.id || "").trim()
+  };
+}
+
+async function enrichGmailContext(settings, context, audit) {
+  if (String(context?.sourcePlatform || "").trim().toLowerCase() !== "gmail") {
+    return context;
+  }
+  if (context && typeof context === "object" && context._gmailContextEnriched) {
+    return context;
+  }
+
+  let resolved = null;
+  try {
+    resolved = await resolveGmailThreadParticipantsViaApi(context);
+  } catch (error) {
+    context.gmailResolutionError = error.message || "Gmail API lookup failed.";
+  }
+
+  const mergedEmails = [];
+  const seen = new Set();
+  const add = (value) => {
+    const email = normalizeContextEmail(value);
+    if (!email || seen.has(email)) {
+      return;
+    }
+    seen.add(email);
+    mergedEmails.push(email);
+  };
+
+  const fallbackWithMailboxFilter = collectFallbackGmailCandidateEmails(context, settings, resolved?.mailboxEmail || "");
+  (Array.isArray(resolved?.emails) ? resolved.emails : []).forEach((email) => add(email));
+  fallbackWithMailboxFilter.forEach((email) => add(email));
+
+  context.contactEmails = mergedEmails;
+  context.contactEmail = mergedEmails[0] || "";
+  if (!String(context.profileName || "").trim() && String(resolved?.participantName || "").trim()) {
+    context.profileName = String(resolved.participantName || "").trim();
+  }
+  if (String(resolved?.mailboxEmail || "").trim()) {
+    context.gmailMailboxEmail = String(resolved.mailboxEmail || "").trim();
+  }
+  if (String(resolved?.threadId || "").trim()) {
+    context.gmailApiThreadId = String(resolved.threadId || "").trim();
+  }
+  context.gmailResolutionMode = Array.isArray(resolved?.emails) && resolved.emails.length > 0 ? "gmailApi" : "visibleEmails";
+  context._gmailContextEnriched = true;
+  return context;
+}
+
 function normalizeProfileUrlForLookup(rawUrl) {
   const value = String(rawUrl || "").trim();
   if (!value) {
@@ -1458,6 +1880,8 @@ function getContextLink(context = {}) {
     String(context.profileUrl || "").trim() ||
     String(context.githubUrl || "").trim() ||
     String(context.gemProfileUrl || "").trim() ||
+    String(context.gmailThreadUrl || "").trim() ||
+    String(context.pageUrl || "").trim() ||
     ""
   );
 }
@@ -1533,6 +1957,13 @@ function clearCandidateResolution(context = {}) {
 }
 
 function contextHasCandidateIdentity(context = {}) {
+  if (String(context?.sourcePlatform || "").trim().toLowerCase() === "gmail") {
+    return Boolean(
+      String(context.gmailThreadToken || "").trim() ||
+        String(context.gmailSubject || "").trim() ||
+        collectContextEmails(context).length > 0
+    );
+  }
   return Boolean(
     String(context.gemCandidateId || "").trim() ||
       String(context.linkedinUrl || "").trim() ||
@@ -2127,11 +2558,46 @@ function pingTabContentRuntime(tabId) {
   });
 }
 
+async function probeTabContentRuntime(tabId) {
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (expectedVersion) => {
+        const globalReady =
+          Boolean(globalThis.__GLS_UNIFIED_CONTENT_RUNTIME_READY__) &&
+          globalThis.__GLS_UNIFIED_CONTENT_RUNTIME_VERSION__ === expectedVersion;
+        const markerReady = document.documentElement?.getAttribute("data-gls-content-runtime") === "ready";
+        return globalReady || markerReady;
+      },
+      args: [CONTENT_RUNTIME_VERSION]
+    });
+    return Array.isArray(result) && result[0] ? Boolean(result[0].result) : false;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function delayMilliseconds(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForTabContentRuntime(tabId, attempts = 24, delayMs = 100) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if ((await pingTabContentRuntime(tabId)) || (await probeTabContentRuntime(tabId))) {
+      return true;
+    }
+    if (attempt < attempts - 1) {
+      await delayMilliseconds(delayMs);
+    }
+  }
+  return false;
+}
+
 async function ensureContentRuntimeInTab(tabId, files = CONTENT_RUNTIME_FILES) {
   if (!Number.isInteger(tabId) || tabId < 0) {
     throw new Error("No active tab available for runtime injection.");
   }
-  const ready = await pingTabContentRuntime(tabId);
+  const ready = await waitForTabContentRuntime(tabId, 2, 40);
   if (ready) {
     return { injected: false };
   }
@@ -2150,7 +2616,7 @@ async function ensureContentRuntimeInTab(tabId, files = CONTENT_RUNTIME_FILES) {
     target: { tabId },
     files: Array.isArray(files) && files.length > 0 ? files : CONTENT_RUNTIME_FILES
   });
-  const readyAfterInject = await pingTabContentRuntime(tabId);
+  const readyAfterInject = await waitForTabContentRuntime(tabId);
   if (!readyAfterInject && (!Array.isArray(files) || files.includes("src/content.js"))) {
     throw new Error("Could not initialize the current page helper. Reload the tab and retry.");
   }
@@ -2165,6 +2631,12 @@ async function callBackend(path, payload, settings, audit = {}) {
 
   const startedAt = Date.now();
   let response;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => {
+        controller.abort(new Error("Backend request timed out."));
+      }, BACKEND_REQUEST_TIMEOUT_MS)
+    : 0;
   try {
     response = await fetch(`${base}${path}`, {
       method: "POST",
@@ -2172,6 +2644,7 @@ async function callBackend(path, payload, settings, audit = {}) {
         "Content-Type": "application/json",
         ...(settings.backendSharedToken ? { "X-Backend-Token": settings.backendSharedToken } : {})
       },
+      signal: controller?.signal,
       body: JSON.stringify({
         ...(payload || {}),
         runId: audit.runId || "",
@@ -2179,11 +2652,16 @@ async function callBackend(path, payload, settings, audit = {}) {
       })
     });
   } catch (error) {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
     const durationMs = Date.now() - startedAt;
-    const message =
-      `Could not reach backend (${base}). ` +
-      "If this org uses a hosted backend, verify backend URL/service health. " +
-      "For local development, start backend with: cd /Users/maximilian/coding/gem-linkedin-shortcuts-extension/backend && npm start";
+    const isTimeout = String(error?.name || "").toLowerCase() === "aborterror";
+    const message = isTimeout
+      ? `Backend request timed out after ${Math.round(BACKEND_REQUEST_TIMEOUT_MS / 1000)}s (${base}).`
+      : `Could not reach backend (${base}). ` +
+        "If this org uses a hosted backend, verify backend URL/service health. " +
+        "For local development, start backend with: cd /Users/maximilian/coding/gem-linkedin-shortcuts-extension/backend && npm start";
     logEvent(settings, {
       level: "error",
       event: "backend.call.error",
@@ -2198,6 +2676,9 @@ async function callBackend(path, payload, settings, audit = {}) {
       }
     });
     throw new Error(message);
+  }
+  if (timeoutId) {
+    clearTimeout(timeoutId);
   }
 
   const text = await response.text();
@@ -2713,6 +3194,28 @@ async function runAction(actionId, context, settings, meta = {}) {
     return { ok: true, message, runId, link: candidateLink || "", candidateId };
   }
 
+  if (actionId === ACTIONS.OPEN_ACTIVITY) {
+    const directGemProfileUrl = normalizeGemHost(String(context.gemProfileUrl || "").trim());
+    if (directGemProfileUrl) {
+      const navigation = await openGemNavigationTarget(directGemProfileUrl, meta);
+      const message = "Opened profile in Gem.";
+      logEvent(settings, {
+        event: "action.succeeded",
+        actionId,
+        runId,
+        source: `extension.${source}`,
+        message,
+        link: navigation.url,
+        details: {
+          candidateId: String(context.gemCandidateId || "").trim(),
+          mode: navigation.mode,
+          resolvedFrom: "context.gemProfileUrl"
+        }
+      });
+      return { ok: true, message, runId, link: navigation.url };
+    }
+  }
+
   const candidate = await ensureCandidate(settings, context, audit);
 
   if (actionId === ACTIONS.ADD_TO_PROJECT) {
@@ -2790,7 +3293,7 @@ async function runAction(actionId, context, settings, meta = {}) {
         runId
       };
     }
-    await chrome.tabs.create(buildAdjacentTabOptions(url, meta));
+    const navigation = await openGemNavigationTarget(url, meta);
     const message = "Opened profile in Gem.";
     logEvent(settings, {
       event: "action.succeeded",
@@ -2798,10 +3301,14 @@ async function runAction(actionId, context, settings, meta = {}) {
       runId,
       source: `extension.${source}`,
       message,
-      link: url,
-      details: { candidateId: candidate.id }
+      link: navigation.url,
+      details: {
+        candidateId: candidate.id,
+        mode: navigation.mode,
+        resolvedFrom: directLink ? "candidate.weblink" : "activityUrlTemplate"
+      }
     });
-    return { ok: true, message, runId, link: url };
+    return { ok: true, message, runId, link: navigation.url };
   }
 
   if (actionId === ACTIONS.ADD_NOTE_TO_CANDIDATE) {
@@ -3417,44 +3924,6 @@ async function setCandidatePrimaryEmailForContext(settings, context, runId, emai
   };
 }
 
-/*
-async function listActivityFeedForContext(settings, context, runId, limit = 120) {
-  const actionId = ACTIONS.VIEW_ACTIVITY_FEED;
-  const audit = { actionId, runId };
-  const candidate = await ensureCandidate(settings, context, audit);
-  const normalizedLimit = Math.max(1, Math.min(Number(limit) || 120, 500));
-  const data = await callBackend(
-    "/api/candidates/activity-feed",
-    {
-      candidateId: candidate.id,
-      limit: normalizedLimit
-    },
-    settings,
-    { ...audit, step: "listActivityFeed" }
-  );
-
-  const activities = Array.isArray(data?.activities) ? data.activities : [];
-  const candidateData = data?.candidate && typeof data.candidate === "object" ? data.candidate : candidate;
-  logEvent(settings, {
-    event: "candidate.activity_feed.loaded",
-    actionId,
-    runId,
-    message: `Loaded ${activities.length} activity items for candidate.`,
-    details: {
-      candidateId: candidate.id
-    }
-  });
-  return {
-    candidate: candidateData,
-    activities
-  };
-}
-*/
-
-async function listActivityFeedForContext() {
-  throw new Error("View Activity Feed is retired for now.");
-}
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) {
     return false;
@@ -3490,7 +3959,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getSettings()
       .then(async (settings) => {
         const shortcutId = String(message.shortcutId || "").trim();
-        const validIds = Object.keys(DEFAULT_SETTINGS.shortcuts || {});
+        const validIds = SHORTCUT_IDS;
         if (!validIds.includes(shortcutId)) {
           throw new Error("Unknown shortcut action.");
         }
@@ -3772,7 +4241,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(async (settings) => {
         const runId = message.runId || generateId();
         const requestedActionId = String(message.actionId || "").trim();
-        const validActionIds = Object.values(ACTIONS);
+        const validActionIds = ACTION_IDS;
         const actionId = validActionIds.includes(requestedActionId) ? requestedActionId : ACTIONS.SEND_SEQUENCE;
         const query = String(message.query || "").trim();
         const limit = normalizeSequenceLimit(message.limit);
@@ -4012,25 +4481,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       })
       .catch((error) => sendResponse({ ok: false, message: error.message }));
-    return true;
-  }
-
-  if (message.type === "LIST_ACTIVITY_FEED_FOR_CONTEXT") {
-    // Retired for now:
-    // getSettings()
-    //   .then(async (settings) => {
-    //     const runId = message.runId || generateId();
-    //     const context = message.context || {};
-    //     const data = await listActivityFeedForContext(settings, context, runId, message.limit);
-    //     sendResponse({
-    //       ok: true,
-    //       runId,
-    //       candidate: data.candidate,
-    //       activities: data.activities
-    //     });
-    //   })
-    //   .catch((error) => sendResponse({ ok: false, message: error.message }));
-    sendResponse({ ok: false, message: "View Activity Feed is retired for now." });
     return true;
   }
 
