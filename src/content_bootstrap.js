@@ -28,7 +28,6 @@
     throw new Error("[GLS] shared.js must load before content_bootstrap.js");
   }
 
-  const PAGE_CHANGE_FORWARD_DELAY_MS = 650;
   const PAGE_CHANGE_POLL_INTERVAL_MS = 300;
   const INVITE_DECISION_TIMEOUT_MS = 1200;
   const INVITE_DECISION_POLL_INTERVAL_MS = 50;
@@ -689,18 +688,27 @@
     return state.passiveRuntimeEnsurePromise;
   }
 
-  function scheduleBannerRuntimeEnsure(reason) {
-    if (!state.cachedSettings?.enabled || !isCurrentGemStatusDisplayEnabled(state.cachedSettings)) {
+  function shouldEnsureBannerRuntime() {
+    return Boolean(
+      state.cachedSettings?.enabled &&
+      isCurrentGemStatusDisplayEnabled(state.cachedSettings) &&
+      glsIsLinkedInProfilePage()
+    );
+  }
+
+  function scheduleBannerRuntimeEnsure(reason, options = {}) {
+    if (!shouldEnsureBannerRuntime()) {
       clearPendingPassiveRuntimeEnsure();
       return;
     }
+    const delayMs = Math.max(0, Number(options.delayMs) || 0);
     clearPendingPassiveRuntimeEnsure();
     state.pageChangeTimerId = window.setTimeout(() => {
       state.pageChangeTimerId = 0;
       ensurePassiveRuntime(reason).catch((error) => {
         showToast(error?.message || "Could not load LinkedIn status helper.", true);
       });
-    }, PAGE_CHANGE_FORWARD_DELAY_MS);
+    }, delayMs);
   }
 
   function notifyPageChanged(reason) {
@@ -992,13 +1000,8 @@
       markConfiguredShortcutDiagnosticsForPage();
     }
 
-    if (state.cachedSettings?.enabled && isCurrentGemStatusDisplayEnabled(state.cachedSettings) && glsIsLinkedInProfilePage()) {
-      const scheduleInitialEnsure = () => scheduleBannerRuntimeEnsure("initial-status");
-      if (document.readyState === "complete") {
-        scheduleInitialEnsure();
-      } else {
-        window.addEventListener("load", scheduleInitialEnsure, { passive: true, once: true });
-      }
+    if (shouldEnsureBannerRuntime()) {
+      scheduleBannerRuntimeEnsure("initial-status");
     }
   }
 

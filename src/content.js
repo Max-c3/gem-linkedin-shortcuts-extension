@@ -2958,6 +2958,10 @@ function findGemStatusField(customFields) {
 }
 
 function renderGemStatusIndicator(context, data) {
+  if (isBootstrapManagedLinkedInPage()) {
+    hideGemStatusIndicator();
+    return;
+  }
   const displayMode = getCurrentGemStatusDisplayMode();
   if (!isGemStatusDisplayEnabled(displayMode)) {
     hideGemStatusIndicator();
@@ -2993,6 +2997,10 @@ function renderGemStatusIndicator(context, data) {
 }
 
 async function refreshGemStatusIndicator(options = {}) {
+  if (isBootstrapManagedLinkedInPage()) {
+    hideGemStatusIndicator();
+    return;
+  }
   const settings = cachedSettings || DEFAULT_SETTINGS;
   const context = applyGemCandidateHintToContext(options.context || getProfileContext());
   const isStatusEnabled = Boolean(settings.enabled) && isCurrentGemStatusDisplayEnabled(settings);
@@ -3168,6 +3176,10 @@ function warmCandidateEmailsForContext(context, runId, options = {}) {
 }
 
 function syncLinkedInGemStatusForCurrentPage(options = {}) {
+  if (isBootstrapManagedLinkedInPage()) {
+    hideGemStatusIndicator();
+    return;
+  }
   const settings = cachedSettings;
   if (!settings?.enabled || !isLinkedInProfilePage()) {
     resetGemStatusIndicator();
@@ -10280,6 +10292,10 @@ function isCycleGemStatusDisplayModeShortcut(event) {
 }
 
 function applyGemStatusDisplayModeLocally(mode, runId = "") {
+  if (isBootstrapManagedLinkedInPage()) {
+    hideGemStatusIndicator();
+    return;
+  }
   const nextMode = normalizeGemStatusDisplayMode(mode, true);
   if (!isGemStatusDisplayEnabled(nextMode)) {
     resetGemStatusIndicator();
@@ -12490,6 +12506,7 @@ async function init() {
   }
 
   if (bootstrapManagedLinkedIn && isLinkedInProfilePage()) {
+    resetGemStatusIndicator();
     return;
   }
 

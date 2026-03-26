@@ -1,0 +1,15 @@
+{
+  "name": "gem-linkedin-shortcuts-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "harness:doctor": "node scripts/live_harness.mjs doctor",
+    "harness:bootstrap": "node scripts/live_harness.mjs bootstrap",
+    "harness:open": "node scripts/live_harness.mjs open",
+    "harness:smoke": "node scripts/live_harness.mjs smoke",
+    "harness:loop": "node scripts/live_harness.mjs loop"
+  },
+  "devDependencies": {
+    "playwright": "^1.54.2"
+  }
+}

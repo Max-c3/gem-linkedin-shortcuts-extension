@@ -18,7 +18,7 @@
   }
 
   const VISIBLE_REFRESH_MS = 60 * 1000;
-  const PAGE_CHANGE_REFRESH_DELAY_MS = 700;
+  const PAGE_CHANGE_IDLE_TIMEOUT_MS = 420;
   const FOCUS_REFRESH_DELAY_MS = 220;
   const VISIBILITY_REFRESH_DELAY_MS = 160;
   const SETTINGS_REFRESH_DELAY_MS = 120;
@@ -29,10 +29,16 @@
   const ANCHOR_SCAN_LIMIT = 60;
   const IDENTITY_RETRY_DELAYS_MS = [900, 2400];
   const HEADER_SELECTORS = ["#global-nav", ".global-nav", "header.global-nav", "header[role='banner']"];
+  const INDICATOR_VIEW_STATES = Object.freeze({
+    HIDDEN: "hidden",
+    READY: "ready",
+    EMPTY: "empty"
+  });
 
   const state = {
     cachedSettings: null,
     indicatorElements: null,
+    indicatorViewState: INDICATOR_VIEW_STATES.HIDDEN,
     refreshTimerId: 0,
     deferredRefreshTimerId: 0,
     deferredRefreshIdleId: 0,
@@ -723,15 +729,25 @@
   function hideIndicator() {
     if (state.indicatorElements?.root) {
       state.indicatorElements.root.hidden = true;
+      state.indicatorElements.root.setAttribute("data-gls-status-state", INDICATOR_VIEW_STATES.HIDDEN);
+    }
+    state.indicatorViewState = INDICATOR_VIEW_STATES.HIDDEN;
+    try {
+      const root = document.documentElement;
+      if (!root) {
+        return;
+      }
+      root.setAttribute("data-gls-passive-status-state", INDICATOR_VIEW_STATES.HIDDEN);
+      root.setAttribute("data-gls-passive-status-text", "");
+    } catch (_error) {
+      // Ignore marker failures.
     }
   }
 
-  function renderIndicator(statusLabels, isDoNotContact = false) {
-    const labels = Array.isArray(statusLabels) ? statusLabels : [];
-    const hasValue = labels.length > 0;
-    const statusText = hasValue ? summarizeStatusLabels(labels, 3) : "Not set";
-    const palette = getStatusPalette(statusText, hasValue);
+  function renderIndicatorCard(text, palette, options = {}) {
     const elements = ensureIndicatorElements();
+    const normalizedText = String(text || "").trim() || "Not in Gem";
+    const viewState = String(options.viewState || INDICATOR_VIEW_STATES.READY).trim() || INDICATOR_VIEW_STATES.READY;
     elements.root.style.setProperty("--gls-status-accent", palette.accent);
     elements.root.style.setProperty("--gls-status-secondary", palette.accentSecondary || palette.accent);
     elements.root.style.setProperty("--gls-status-accent-soft", palette.accentSoft);
@@ -743,9 +759,39 @@
     elements.root.style.setProperty("--gls-status-text", palette.text);
     elements.root.style.setProperty("--gls-status-frame-opacity", palette.frameOpacity);
     applyIndicatorLayout();
-    elements.statusValue.textContent = statusText;
-    elements.dncCard.hidden = !Boolean(isDoNotContact);
+    elements.statusValue.textContent = normalizedText;
+    elements.statusCard.setAttribute("aria-busy", "false");
+    elements.dncCard.hidden = !Boolean(options.isDoNotContact);
+    elements.root.setAttribute("data-gls-status-state", viewState);
     elements.root.hidden = false;
+    state.indicatorViewState = viewState;
+    try {
+      const root = document.documentElement;
+      if (!root) {
+        return;
+      }
+      root.setAttribute("data-gls-passive-status-state", viewState);
+      root.setAttribute("data-gls-passive-status-text", normalizedText);
+    } catch (_error) {
+      // Ignore marker failures.
+    }
+  }
+
+  function renderIndicator(statusLabels, isDoNotContact = false) {
+    const labels = Array.isArray(statusLabels) ? statusLabels : [];
+    const hasValue = labels.length > 0;
+    const statusText = hasValue ? summarizeStatusLabels(labels, 3) : "Not set";
+    const palette = getStatusPalette(statusText, hasValue);
+    renderIndicatorCard(statusText, palette, {
+      viewState: INDICATOR_VIEW_STATES.READY,
+      isDoNotContact: Boolean(isDoNotContact)
+    });
+  }
+
+  function renderNotInGemIndicator() {
+    renderIndicatorCard("Not in Gem", getStatusPalette("", false), {
+      viewState: INDICATOR_VIEW_STATES.EMPTY
+    });
   }
 
   function scheduleRefresh(delayMs = VISIBLE_REFRESH_MS) {
@@ -838,7 +884,6 @@
     });
 
     if (!contextHasIdentity(context)) {
-      hideIndicator();
       if (options.scheduleNext !== false) {
         scheduleRefresh(VISIBLE_REFRESH_MS);
       }
@@ -857,11 +902,11 @@
       if (String(status.candidateId || "").trim()) {
         renderIndicator(status.statusLabels, Boolean(status.isDoNotContact));
       } else {
-        hideIndicator();
+        renderNotInGemIndicator();
       }
     } catch (_error) {
-      if (requestId === state.refreshRequestId) {
-        hideIndicator();
+      if (requestId !== state.refreshRequestId) {
+        return;
       }
     } finally {
       if (requestId === state.refreshRequestId && options.scheduleNext !== false) {
@@ -918,25 +963,40 @@
     };
   }
 
-  window.addEventListener("gls:linkedin-page-changed", () => {
+  window.addEventListener("gls:linkedin-page-changed", (event) => {
+    const detail = event?.detail && typeof event.detail === "object" ? event.detail : {};
+    const nextPageUrl = glsNormalizePageUrl(detail.pageUrl || window.location.href);
+    const previousPageUrl = glsNormalizePageUrl(state.contextCache.pageUrl || "");
+    const didNavigateToDifferentProfile =
+      Boolean(nextPageUrl) && Boolean(previousPageUrl) && previousPageUrl !== nextPageUrl;
+
     invalidatePendingRefreshRequests();
     clearPendingWork();
-    resetContextCache();
-    hideIndicator();
     if (!glsIsLinkedInProfilePage()) {
+      resetContextCache();
+      hideIndicator();
       return;
     }
+
+    if (didNavigateToDifferentProfile) {
+      resetContextCache();
+      hideIndicator();
+    } else if (nextPageUrl) {
+      state.contextCache.pageUrl = nextPageUrl;
+    }
+
     scheduleDeferredRefresh(
       {
-        forceRefresh: true,
+        forceRefresh: didNavigateToDifferentProfile || Boolean(detail.forceRefresh),
         allowInlineScript: false,
         allowAnchorScan: true,
         scheduleNext: true,
         scheduleRetry: true
       },
       {
-        delayMs: PAGE_CHANGE_REFRESH_DELAY_MS,
-        preferIdle: true
+        preferIdle: true,
+        idleTimeoutMs: PAGE_CHANGE_IDLE_TIMEOUT_MS,
+        fallbackDelayMs: 120
       }
     );
   });
@@ -1022,7 +1082,26 @@
       state.cachedSettings = normalizeSettings(settings || {});
       if (!isStatusEnabled()) {
         hideIndicator();
+        return;
       }
+      if (!glsIsLinkedInProfilePage()) {
+        hideIndicator();
+        return;
+      }
+      scheduleDeferredRefresh(
+        {
+          forceRefresh: false,
+          allowInlineScript: false,
+          allowAnchorScan: true,
+          scheduleNext: true,
+          scheduleRetry: true
+        },
+        {
+          preferIdle: true,
+          idleTimeoutMs: PAGE_CHANGE_IDLE_TIMEOUT_MS,
+          fallbackDelayMs: 120
+        }
+      );
     })
     .catch(() => {});
 })();
