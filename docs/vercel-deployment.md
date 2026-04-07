@@ -30,11 +30,15 @@ If you intentionally use a different production domain, update all of these toge
    - `ALLOWED_EXTENSION_ORIGINS=chrome-extension://<published_extension_id>` for Chrome Web Store builds
    - `BACKEND_SHARED_TOKEN=<token>` only for private/manual installs where users enter the same token in extension options
    - optional defaults: `GEM_DEFAULT_USER_ID`, `GEM_DEFAULT_USER_EMAIL`, `ASHBY_CREDITED_TO_USER_ID`, `ASHBY_CREDITED_TO_USER_EMAIL`
+   - recommended cache tuning for the hosted picker path:
+     - `GEM_CUSTOM_FIELDS_CACHE_TTL_MS=1800000`
+     - `GEM_CUSTOM_FIELD_CANDIDATE_CONTEXT_TTL_MS=120000`
 4. Deploy to production.
 
 ## Runtime notes
 
 - The backend is serverless on Vercel. In-memory caches may disappear on cold start or scale-out.
+- `GEM_CUSTOM_FIELDS_CACHE_TTL_MS` keeps the shared field catalog warm; `GEM_CUSTOM_FIELD_CANDIDATE_CONTEXT_TTL_MS` keeps candidate-specific project/custom-field context warm for a short period.
 - Backend log files are written best-effort to `/tmp` on Vercel, so `/api/logs/recent` is not durable history.
 - Use Vercel Function/Runtime Logs as the durable backend debugging source.
 - The packaged extension should only use the stable production backend origin. Preview deployments are out of scope.

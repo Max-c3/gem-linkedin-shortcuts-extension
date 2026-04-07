@@ -71,6 +71,9 @@ const ASHBY_JOBS_SCAN_MAX = Number(process.env.ASHBY_JOBS_SCAN_MAX || 5000);
 const ASHBY_CANDIDATES_SCAN_MAX = Number(process.env.ASHBY_CANDIDATES_SCAN_MAX || 100000);
 const GEM_CANDIDATE_LOOKUP_SCAN_MAX = Number(process.env.GEM_CANDIDATE_LOOKUP_SCAN_MAX || 5000);
 const GEM_CUSTOM_FIELDS_CACHE_TTL_MS = Number(process.env.GEM_CUSTOM_FIELDS_CACHE_TTL_MS || 10 * 60 * 1000);
+const GEM_CUSTOM_FIELD_CANDIDATE_CONTEXT_TTL_MS = Number(
+  process.env.GEM_CUSTOM_FIELD_CANDIDATE_CONTEXT_TTL_MS || 2 * 60 * 1000
+);
 const GEM_LINKEDIN_URL_LOOKUP_TTL_MS = Number(process.env.GEM_LINKEDIN_URL_LOOKUP_TTL_MS || 10 * 60 * 1000);
 const GEM_CANDIDATE_SEARCH_SCAN_MAX = Number(process.env.GEM_CANDIDATE_SEARCH_SCAN_MAX || 50000);
 const GEM_CANDIDATE_SEARCH_TTL_MS = Number(process.env.GEM_CANDIDATE_SEARCH_TTL_MS || 15 * 60 * 1000);
@@ -142,6 +145,7 @@ let gemCustomFieldCatalogCache = {
   fields: []
 };
 let gemCustomFieldCatalogRefreshPromise = null;
+const gemCustomFieldCandidateContextCache = new Map();
 const gemCandidateSearchProbeHistory = new Map();
 
 function generateId() {
@@ -1519,6 +1523,7 @@ async function addCandidateToProject(payload, audit) {
       },
       audit
     );
+    invalidateGemCustomFieldCandidateContext(candidateId);
     return { projectId, candidateId, userId: "" };
   }
 
@@ -1534,6 +1539,7 @@ async function addCandidateToProject(payload, audit) {
       },
       audit
     );
+    invalidateGemCustomFieldCandidateContext(candidateId);
     return { projectId, candidateId, userId };
   } catch (error) {
     const message = String(error?.data?.message || error?.message || "");
@@ -1566,6 +1572,7 @@ async function addCandidateToProject(payload, audit) {
       },
       audit
     );
+    invalidateGemCustomFieldCandidateContext(candidateId);
     return { projectId, candidateId, userId: "" };
   }
 }
@@ -1722,6 +1729,103 @@ function getGemCustomFieldCatalogAgeMs(cache = gemCustomFieldCatalogCache) {
 
 function isGemCustomFieldCatalogFresh(cache = gemCustomFieldCatalogCache) {
   return getGemCustomFieldCatalogAgeMs(cache) <= GEM_CUSTOM_FIELDS_CACHE_TTL_MS;
+}
+
+function normalizeGemCandidateProjectIds(projectIds) {
+  return Array.isArray(projectIds)
+    ? projectIds.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+}
+
+function cloneCandidateCustomFieldMembershipById(memberships) {
+  const clone = new Map();
+  if (!(memberships instanceof Map)) {
+    return clone;
+  }
+  memberships.forEach((membership, fieldId) => {
+    const normalizedFieldId = String(fieldId || "").trim();
+    if (!normalizedFieldId) {
+      return;
+    }
+    const rawValue = membership?.value;
+    clone.set(normalizedFieldId, {
+      value: Array.isArray(rawValue)
+        ? rawValue.map((value) => String(value || "").trim()).filter(Boolean)
+        : rawValue === undefined || rawValue === null
+          ? rawValue ?? null
+          : String(rawValue),
+      valueOptionIds: Array.isArray(membership?.valueOptionIds)
+        ? membership.valueOptionIds.map((id) => String(id || "").trim()).filter(Boolean)
+        : []
+    });
+  });
+  return clone;
+}
+
+function getGemCustomFieldCandidateContextAgeMs(entry) {
+  if (!entry?.fetchedAtMs) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Date.now() - Number(entry.fetchedAtMs);
+}
+
+function isGemCustomFieldCandidateContextFresh(entry) {
+  return getGemCustomFieldCandidateContextAgeMs(entry) <= GEM_CUSTOM_FIELD_CANDIDATE_CONTEXT_TTL_MS;
+}
+
+function setGemCustomFieldCandidateContext(candidateId, candidateContext) {
+  const normalizedCandidateId = String(candidateId || "").trim();
+  if (!normalizedCandidateId) {
+    return null;
+  }
+  const entry = {
+    fetchedAtMs: Date.now(),
+    candidateProjectIds: normalizeGemCandidateProjectIds(candidateContext?.candidateProjectIds),
+    candidateCustomFieldMembershipById: cloneCandidateCustomFieldMembershipById(
+      candidateContext?.candidateCustomFieldMembershipById
+    )
+  };
+  gemCustomFieldCandidateContextCache.set(normalizedCandidateId, entry);
+  return entry;
+}
+
+function getGemCustomFieldCandidateContext(candidateId) {
+  const normalizedCandidateId = String(candidateId || "").trim();
+  if (!normalizedCandidateId) {
+    return null;
+  }
+  const entry = gemCustomFieldCandidateContextCache.get(normalizedCandidateId) || null;
+  if (!entry) {
+    return null;
+  }
+  if (!isGemCustomFieldCandidateContextFresh(entry)) {
+    gemCustomFieldCandidateContextCache.delete(normalizedCandidateId);
+    return null;
+  }
+  return {
+    candidateId: normalizedCandidateId,
+    candidateProjectIds: normalizeGemCandidateProjectIds(entry.candidateProjectIds),
+    candidateCustomFieldMembershipById: cloneCandidateCustomFieldMembershipById(entry.candidateCustomFieldMembershipById)
+  };
+}
+
+function invalidateGemCustomFieldCandidateContext(candidateId) {
+  const normalizedCandidateId = String(candidateId || "").trim();
+  if (!normalizedCandidateId) {
+    return;
+  }
+  gemCustomFieldCandidateContextCache.delete(normalizedCandidateId);
+}
+
+function rememberGemCustomFieldCandidateContextFromCandidate(candidate) {
+  const normalizedCandidateId = String(candidate?.id || "").trim();
+  if (!normalizedCandidateId) {
+    return null;
+  }
+  return setGemCustomFieldCandidateContext(normalizedCandidateId, {
+    candidateProjectIds: normalizeGemCandidateProjectIds(candidate?.project_ids),
+    candidateCustomFieldMembershipById: buildCandidateCustomFieldMembershipById(candidate?.custom_fields)
+  });
 }
 
 function normalizeGemCustomFieldCatalog(fields) {
@@ -1885,42 +1989,70 @@ function getDerivedGemStatusLabels(customFields) {
     : [];
 }
 
-async function resolveCustomFieldCandidateContext(payload, audit) {
+async function resolveCustomFieldCandidateContext(payload, audit, options = {}) {
   const candidateId = String(payload.candidateId || "").trim();
   if (!candidateId) {
     return {
       candidateId: "",
       candidateProjectIds: [],
-      candidateCustomFieldMembershipById: new Map()
+      candidateCustomFieldMembershipById: new Map(),
+      cacheStatus: "skipped",
+      fetchDurationMs: 0
     };
   }
 
+  if (!options.forceRefresh) {
+    const cachedContext = getGemCustomFieldCandidateContext(candidateId);
+    if (cachedContext) {
+      return {
+        ...cachedContext,
+        cacheStatus: "hit",
+        fetchDurationMs: 0
+      };
+    }
+  }
+
+  const startedAt = Date.now();
   const candidate = await gemRequest(`/v0/candidates/${candidateId}`, {}, audit);
-  return {
+  const candidateContext = {
     candidateId,
-    candidateProjectIds: Array.isArray(candidate?.project_ids) ? candidate.project_ids.map((id) => String(id || "")) : [],
+    candidateProjectIds: normalizeGemCandidateProjectIds(candidate?.project_ids),
     candidateCustomFieldMembershipById: buildCandidateCustomFieldMembershipById(candidate?.custom_fields)
+  };
+  setGemCustomFieldCandidateContext(candidateId, candidateContext);
+  return {
+    ...candidateContext,
+    cacheStatus: options.forceRefresh ? "refreshed" : "miss",
+    fetchDurationMs: Date.now() - startedAt
   };
 }
 
 async function listCustomFields(payload, audit) {
+  const startedAt = Date.now();
   const requestedLimitRaw = Number(payload.limit);
   const requestedLimit =
     Number.isFinite(requestedLimitRaw) && requestedLimitRaw > 0
       ? Math.max(1, Math.min(requestedLimitRaw, CUSTOM_FIELDS_SCAN_MAX))
       : 0;
-  if (Boolean(payload.catalogOnly)) {
-    await ensureGemCustomFieldCatalog(audit, { forceRefresh: Boolean(payload.forceRefresh) });
-    return {
-      candidateId: String(payload.candidateId || "").trim(),
-      customFields: [],
-      statusLabels: [],
-      candidateProjectIds: []
-    };
-  }
+  const catalogOnly = Boolean(payload.catalogOnly);
+  const forceRefresh = Boolean(payload.forceRefresh);
+  const catalogCacheStatus =
+    !forceRefresh && isGemCustomFieldCatalogFresh(gemCustomFieldCatalogCache) && Array.isArray(gemCustomFieldCatalogCache.fields)
+      ? "hit"
+      : forceRefresh
+        ? "refreshed"
+        : "miss";
   const [catalog, candidateContext] = await Promise.all([
-    ensureGemCustomFieldCatalog(audit, { forceRefresh: Boolean(payload.forceRefresh) }),
-    resolveCustomFieldCandidateContext(payload, audit)
+    ensureGemCustomFieldCatalog(audit, { forceRefresh }),
+    catalogOnly
+      ? Promise.resolve({
+          candidateId: String(payload.candidateId || "").trim(),
+          candidateProjectIds: [],
+          candidateCustomFieldMembershipById: new Map(),
+          cacheStatus: "skipped",
+          fetchDurationMs: 0
+        })
+      : resolveCustomFieldCandidateContext(payload, audit, { forceRefresh })
   ]);
 
   const candidateProjectIds = Array.isArray(candidateContext.candidateProjectIds) ? candidateContext.candidateProjectIds : [];
@@ -1933,7 +2065,7 @@ async function listCustomFields(payload, audit) {
   let customFields = (Array.isArray(catalog?.fields) ? catalog.fields : [])
     .filter((field) => {
       if (field.scope === "project") {
-        return Boolean(field.projectId) && candidateProjectIds.includes(field.projectId);
+        return !catalogOnly && Boolean(field.projectId) && candidateProjectIds.includes(field.projectId);
       }
       if (field.scope === "team") {
         return true;
@@ -1984,12 +2116,33 @@ async function listCustomFields(payload, audit) {
     customFields = customFields.slice(0, requestedLimit);
   }
 
-  return {
+  const result = {
     candidateId,
     customFields,
     statusLabels,
     candidateProjectIds
   };
+  logEvent({
+    source: "backend",
+    event: "custom_fields.list.resolved",
+    message: `Resolved ${customFields.length} custom fields.`,
+    requestId: audit.requestId,
+    route: audit.route,
+    runId: audit.runId,
+    actionId: audit.actionId,
+    durationMs: Date.now() - startedAt,
+    details: {
+      candidateId,
+      catalogOnly,
+      forceRefresh,
+      catalogCacheStatus,
+      candidateContextCacheStatus: candidateContext?.cacheStatus || "skipped",
+      candidateFetchDurationMs: Number(candidateContext?.fetchDurationMs) || 0,
+      candidateProjectCount: candidateProjectIds.length,
+      customFieldCount: customFields.length
+    }
+  });
+  return result;
 }
 
 async function setCandidateCustomField(payload, audit) {
@@ -2032,6 +2185,7 @@ async function setCandidateCustomField(payload, audit) {
   };
 
   const candidate = await gemRequest(`/v0/candidates/${candidateId}`, { method: "PUT", body }, audit);
+  rememberGemCustomFieldCandidateContextFromCandidate(candidate);
   return { candidate };
 }
 

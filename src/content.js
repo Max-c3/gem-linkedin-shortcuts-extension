@@ -4612,6 +4612,61 @@ function createCustomFieldPickerStyles() {
       font-size: 12px;
       color: #5b6168;
     }
+    .gem-custom-field-picker-form {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .gem-custom-field-picker-form-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #2a3442;
+    }
+    #gem-custom-field-picker-manual-input {
+      width: 100%;
+      border: 1px solid #ced6e2;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 16px;
+      color: #1f2328;
+      font-family: inherit;
+    }
+    #gem-custom-field-picker-manual-input:focus {
+      outline: 2px solid #8db7ff;
+      outline-offset: 1px;
+      border-color: #1e69d2;
+    }
+    #gem-custom-field-picker-manual-error {
+      min-height: 18px;
+      font-size: 12px;
+      color: #b42318;
+    }
+    #gem-custom-field-picker-manual-error:empty {
+      display: none;
+    }
+    .gem-custom-field-picker-form-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .gem-custom-field-picker-form-btn {
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .gem-custom-field-picker-form-btn.secondary {
+      border-color: #c4cbd7;
+      background: #fff;
+      color: #1f2328;
+    }
+    .gem-custom-field-picker-form-btn.primary {
+      border-color: #1e69d2;
+      background: #1e69d2;
+      color: #fff;
+    }
     #gem-custom-field-picker-confirm-mask {
       position: absolute;
       inset: 0;
@@ -5175,6 +5230,10 @@ async function showCustomFieldPicker(runId, context) {
     let pickerActive = true;
     const startedAt = Date.now();
     let currentCandidateId = hasMemory ? String(initialFieldData?.candidateId || "").trim() : "";
+    let manualEntryInput = null;
+    let manualEntryError = null;
+    let manualEntryDraft = "";
+    const valueRowRefs = [];
 
     function clearPendingMultiSelection() {
       pendingMultiOptionIds.clear();
@@ -5232,6 +5291,32 @@ async function showCustomFieldPicker(runId, context) {
       resolve(selection || null);
     }
 
+    function logSelectionConfirmed(selection, details = {}) {
+      void logEvent({
+        source: "extension.content",
+        event: "custom_field_picker.selection_confirmed",
+        actionId: ACTIONS.SET_CUSTOM_FIELD,
+        runId,
+        message: `Confirmed custom field update for ${selection?.customFieldName || selection?.customFieldId || "field"}.`,
+        link: linkedinUrl,
+        details: {
+          candidateId: selection?.candidateId || currentCandidateId || "",
+          customFieldId: selection?.customFieldId || "",
+          customFieldName: selection?.customFieldName || "",
+          customFieldValueType: selection?.customFieldValueType || "",
+          manualEntry: Boolean(details.manualEntry),
+          multiSelect: Boolean(details.multiSelect),
+          selectedOptionCount: Number(details.selectedOptionCount) || 0,
+          durationMs: Date.now() - startedAt
+        }
+      });
+    }
+
+    function finishWithSelection(selection, details = {}) {
+      logSelectionConfirmed(selection, details);
+      finish(selection);
+    }
+
     function updatePageFields() {
       const start = currentPage * CUSTOM_FIELD_KEYS_PER_PAGE;
       fieldsForPage = allFields.slice(start, start + CUSTOM_FIELD_KEYS_PER_PAGE);
@@ -5264,7 +5349,7 @@ async function showCustomFieldPicker(runId, context) {
     }
 
     function setCurrentValuesBadge(field) {
-      if (!field || step !== "values") {
+      if (!field || (step !== "values" && step !== "manual")) {
         currentValues.classList.remove("visible");
         currentValues.textContent = "";
         return;
@@ -5348,6 +5433,228 @@ async function showCustomFieldPicker(runId, context) {
         setHintText("Esc to go back. Number shortcuts apply immediately. Arrow keys + Enter also work.");
       }
       setCurrentValuesBadge(field);
+    }
+
+    function setManualEntryHeaderForField(field) {
+      title.textContent = `Set ${field.name}`;
+      subtitle.textContent = "Type a custom value, then press Enter to apply it.";
+      setHintText("Enter applies the typed value. Esc returns to the values list.");
+      setCurrentValuesBadge(field);
+    }
+
+    function clearValueRowRefs() {
+      valueRowRefs.length = 0;
+    }
+
+    function syncValueRowSelectionState() {
+      if (step !== "values") {
+        return;
+      }
+      const isMulti = isMultiSelectField(selectedField);
+      const currentOptionIds = getCurrentOptionIdsForField(selectedField, valueChoices);
+      valueRowRefs.forEach((entry, index) => {
+        const optionId = String(entry.optionId || "").trim();
+        const isActive = index === selectedIndex;
+        const isCurrentlySet = optionId ? currentOptionIds.has(optionId) : false;
+        const isSelected = isMulti ? (optionId ? pendingMultiOptionIds.has(optionId) : false) : isCurrentlySet;
+        entry.item.classList.toggle("active", isActive);
+        entry.item.classList.toggle("selected", isSelected);
+      });
+      updateValuesPageInfo();
+    }
+
+    function mountValuesView() {
+      clearValueRowRefs();
+      manualEntryInput = null;
+      manualEntryError = null;
+      results.innerHTML = "";
+      const isMulti = isMultiSelectField(selectedField);
+      const currentOptionIds = getCurrentOptionIdsForField(selectedField, valueChoices);
+      if (valueChoices.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "gem-custom-field-picker-empty";
+        empty.textContent = "No values available for this field.";
+        results.appendChild(empty);
+        updateValuesPageInfo();
+        return;
+      }
+      valueChoices.forEach((option, index) => {
+        const optionId = String(option?.id || "").trim();
+        const item = document.createElement("div");
+        const hotkey = document.createElement("div");
+        hotkey.className = "gem-custom-field-picker-hotkey";
+        hotkey.textContent = isMulti ? CUSTOM_FIELD_SHORTCUT_KEYS[index] || "" : String(index + 1);
+
+        const value = document.createElement("div");
+        value.className = "gem-custom-field-picker-value";
+        value.textContent = option.value || option.id || "";
+
+        item.className = "gem-custom-field-picker-item";
+        item.appendChild(hotkey);
+        item.appendChild(value);
+        if (optionId && currentOptionIds.has(optionId)) {
+          const existingTag = document.createElement("div");
+          existingTag.className = "gem-custom-field-picker-meta";
+          existingTag.textContent = "current";
+          item.appendChild(existingTag);
+        }
+        item.addEventListener("mouseenter", () => {
+          if (selectedIndex === index) {
+            return;
+          }
+          selectedIndex = index;
+          syncValueRowSelectionState();
+        });
+        item.addEventListener("click", () => {
+          selectedIndex = index;
+          syncValueRowSelectionState();
+          if (isMulti) {
+            toggleMultiChoice(option);
+            return;
+          }
+          finishSingleChoice(option);
+        });
+        valueRowRefs.push({ item, optionId });
+        results.appendChild(item);
+      });
+      syncValueRowSelectionState();
+    }
+
+    function setManualEntryError(message) {
+      if (!manualEntryError) {
+        return;
+      }
+      manualEntryError.textContent = String(message || "");
+    }
+
+    function submitManualEntry() {
+      if (!selectedField) {
+        return;
+      }
+      const typed = String(manualEntryInput?.value || manualEntryDraft || "").trim();
+      if (!typed) {
+        setManualEntryError("Enter a value.");
+        if (manualEntryInput) {
+          manualEntryInput.focus();
+          manualEntryInput.select();
+        }
+        return;
+      }
+      manualEntryDraft = typed;
+      finishWithSelection(
+        {
+          candidateId: currentCandidateId,
+          customFieldId: selectedField.id,
+          customFieldName: selectedField.name || "",
+          customFieldValue: typed,
+          customFieldValueLabels: [typed],
+          customFieldOptionId: "",
+          customFieldOptionIds: [],
+          customFieldValueType: selectedField.valueType || "text"
+        },
+        {
+          manualEntry: true,
+          selectedOptionCount: 0
+        }
+      );
+    }
+
+    function renderManualEntryView() {
+      clearValueRowRefs();
+      results.innerHTML = "";
+      setManualEntryHeaderForField(selectedField);
+      pageInfo.textContent = "";
+
+      const container = document.createElement("div");
+      container.className = "gem-custom-field-picker-form";
+
+      const label = document.createElement("label");
+      label.className = "gem-custom-field-picker-form-label";
+      label.setAttribute("for", "gem-custom-field-picker-manual-input");
+      label.textContent = `Value for ${selectedField?.name || "field"}`;
+
+      manualEntryInput = document.createElement("input");
+      manualEntryInput.id = "gem-custom-field-picker-manual-input";
+      manualEntryInput.type = "text";
+      manualEntryInput.autocomplete = "off";
+      manualEntryInput.placeholder = "Enter custom value";
+      manualEntryInput.value = manualEntryDraft;
+      manualEntryInput.addEventListener("input", () => {
+        manualEntryDraft = manualEntryInput.value;
+        setManualEntryError("");
+      });
+
+      manualEntryError = document.createElement("div");
+      manualEntryError.id = "gem-custom-field-picker-manual-error";
+
+      const actions = document.createElement("div");
+      actions.className = "gem-custom-field-picker-form-actions";
+
+      const backBtn = document.createElement("button");
+      backBtn.type = "button";
+      backBtn.className = "gem-custom-field-picker-form-btn secondary";
+      backBtn.textContent = "Back";
+      backBtn.addEventListener("click", () => {
+        goBackToValues();
+      });
+
+      const applyBtn = document.createElement("button");
+      applyBtn.type = "button";
+      applyBtn.className = "gem-custom-field-picker-form-btn primary";
+      applyBtn.textContent = "Apply";
+      applyBtn.addEventListener("click", () => {
+        submitManualEntry();
+      });
+
+      actions.appendChild(backBtn);
+      actions.appendChild(applyBtn);
+      container.appendChild(label);
+      container.appendChild(manualEntryInput);
+      container.appendChild(manualEntryError);
+      container.appendChild(actions);
+      results.appendChild(container);
+
+      window.requestAnimationFrame(() => {
+        if (manualEntryInput) {
+          manualEntryInput.focus();
+          manualEntryInput.select();
+        }
+      });
+    }
+
+    function openManualEntry() {
+      if (!selectedField) {
+        return;
+      }
+      step = "manual";
+      manualEntryDraft = "";
+      renderManualEntryView();
+      void logEvent({
+        source: "extension.content",
+        event: "custom_field_picker.manual_entry_opened",
+        actionId: ACTIONS.SET_CUSTOM_FIELD,
+        runId,
+        message: `Opened manual custom field entry for ${selectedField.name || selectedField.id}.`,
+        link: linkedinUrl,
+        details: {
+          candidateId: currentCandidateId,
+          customFieldId: selectedField.id,
+          customFieldName: selectedField.name || "",
+          durationMs: Date.now() - startedAt
+        }
+      });
+    }
+
+    function goBackToValues() {
+      if (!selectedField) {
+        return;
+      }
+      step = "values";
+      manualEntryInput = null;
+      manualEntryError = null;
+      setValuesHeaderForField(selectedField);
+      mountValuesView();
+      modal.focus();
     }
 
     function renderFields() {
@@ -5441,7 +5748,7 @@ async function showCustomFieldPicker(runId, context) {
         customFields: allFields
       });
 
-      if (step === "values" && selectedField) {
+      if ((step === "values" || step === "manual") && selectedField) {
         const refreshedField = allFields.find((field) => field.id === selectedField.id) || selectedField;
         selectedField = refreshedField;
         const nextChoices = buildValueChoicesForField(refreshedField);
@@ -5468,8 +5775,19 @@ async function showCustomFieldPicker(runId, context) {
             selectedIndex = firstSelectedIndex;
           }
         }
+        if (step === "manual") {
+          const hasManualOption = nextChoices.some((option) => String(option?.id || "").trim() === "__manual__");
+          if (!hasManualOption) {
+            step = "values";
+            setValuesHeaderForField(selectedField);
+            mountValuesView();
+            return;
+          }
+          setManualEntryHeaderForField(selectedField);
+          return;
+        }
         setValuesHeaderForField(selectedField);
-        renderValues();
+        mountValuesView();
         return;
       }
 
@@ -5481,6 +5799,9 @@ async function showCustomFieldPicker(runId, context) {
     function openValuesForField(field) {
       step = "values";
       selectedField = field;
+      manualEntryDraft = "";
+      manualEntryInput = null;
+      manualEntryError = null;
       closeMultiConfirmation();
       hasEditedMultiSelection = false;
       seedPendingMultiSelectionFromExisting(field);
@@ -5498,7 +5819,7 @@ async function showCustomFieldPicker(runId, context) {
         selectedIndex = 0;
       }
       setValuesHeaderForField(field);
-      renderValues();
+      mountValuesView();
       logEvent({
         source: "extension.content",
         event: "custom_field_picker.field_selected",
@@ -5517,33 +5838,27 @@ async function showCustomFieldPicker(runId, context) {
       if (!selectedField) {
         return;
       }
-      if (option.id === "__manual__") {
-        const typed = (window.prompt(`Enter value for "${selectedField.name}":`) || "").trim();
-        if (!typed) {
-          return;
-        }
-        finish({
+      if (String(option?.id || "").trim() === "__manual__") {
+        openManualEntry();
+        return;
+      }
+      finishWithSelection(
+        {
           candidateId: currentCandidateId,
           customFieldId: selectedField.id,
           customFieldName: selectedField.name || "",
-          customFieldValue: typed,
-          customFieldValueLabels: [typed],
-          customFieldOptionId: "",
-          customFieldOptionIds: [],
-          customFieldValueType: selectedField.valueType || "text"
-        });
-        return;
-      }
-      finish({
-        candidateId: currentCandidateId,
-        customFieldId: selectedField.id,
-        customFieldName: selectedField.name || "",
-        customFieldValue: option.value || "",
-        customFieldValueLabels: option.value ? [option.value] : [],
-        customFieldOptionId: option.id || "",
-        customFieldOptionIds: option.id ? [option.id] : [],
-        customFieldValueType: selectedField.valueType || ""
-      });
+          customFieldValue: option.value || "",
+          customFieldValueLabels: option.value ? [option.value] : [],
+          customFieldOptionId: option.id || "",
+          customFieldOptionIds: option.id ? [option.id] : [],
+          customFieldValueType: selectedField.valueType || ""
+        },
+        {
+          manualEntry: false,
+          multiSelect: false,
+          selectedOptionCount: option.id ? 1 : 0
+        }
+      );
     }
 
     function toggleMultiChoice(option) {
@@ -5557,7 +5872,7 @@ async function showCustomFieldPicker(runId, context) {
       } else {
         pendingMultiOptionIds.add(optionId);
       }
-      renderValues();
+      syncValueRowSelectionState();
     }
 
     function buildSelectedMultiOptionIds() {
@@ -5617,16 +5932,23 @@ async function showCustomFieldPicker(runId, context) {
         ? pendingMultiConfirmation.selectedLabels
         : [];
       pendingMultiConfirmation = null;
-      finish({
-        candidateId: currentCandidateId,
-        customFieldId: selectedField.id,
-        customFieldName: selectedField.name || "",
-        customFieldValue: selectionLabels.join(", "),
-        customFieldValueLabels: selectionLabels,
-        customFieldOptionId: selectedOptionIds[0] || "",
-        customFieldOptionIds: selectedOptionIds,
-        customFieldValueType: selectedField.valueType || ""
-      });
+      finishWithSelection(
+        {
+          candidateId: currentCandidateId,
+          customFieldId: selectedField.id,
+          customFieldName: selectedField.name || "",
+          customFieldValue: selectionLabels.join(", "),
+          customFieldValueLabels: selectionLabels,
+          customFieldOptionId: selectedOptionIds[0] || "",
+          customFieldOptionIds: selectedOptionIds,
+          customFieldValueType: selectedField.valueType || ""
+        },
+        {
+          manualEntry: false,
+          multiSelect: true,
+          selectedOptionCount: selectedOptionIds.length
+        }
+      );
     }
 
     function getSingleSelectShortcutIndexFromKey(key) {
@@ -5639,63 +5961,29 @@ async function showCustomFieldPicker(runId, context) {
       return Number(key) - 1;
     }
 
-    function renderValues() {
-      results.innerHTML = "";
-      const isMulti = isMultiSelectField(selectedField);
-      const currentOptionIds = getCurrentOptionIdsForField(selectedField, valueChoices);
-      if (valueChoices.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "gem-custom-field-picker-empty";
-        empty.textContent = "No values available for this field.";
-        results.appendChild(empty);
-        updateValuesPageInfo();
-        return;
+    function handleManualEntryKey(event) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return false;
       }
-      valueChoices.forEach((option, index) => {
-        const item = document.createElement("div");
-        const isActive = index === selectedIndex;
-        const isCurrentlySet = currentOptionIds.has(option.id);
-        const isSelected = isMulti ? pendingMultiOptionIds.has(option.id) : isCurrentlySet;
-        item.className = `gem-custom-field-picker-item${isActive ? " active" : ""}${isSelected ? " selected" : ""}`;
-
-        const hotkey = document.createElement("div");
-        hotkey.className = "gem-custom-field-picker-hotkey";
-        hotkey.textContent = isMulti ? CUSTOM_FIELD_SHORTCUT_KEYS[index] || "" : String(index + 1);
-
-        const value = document.createElement("div");
-        value.className = "gem-custom-field-picker-value";
-        value.textContent = option.value || option.id || "";
-
-        item.appendChild(hotkey);
-        item.appendChild(value);
-        if (isCurrentlySet) {
-          const existingTag = document.createElement("div");
-          existingTag.className = "gem-custom-field-picker-meta";
-          existingTag.textContent = "current";
-          item.appendChild(existingTag);
-        }
-        item.addEventListener("mouseenter", () => {
-          if (selectedIndex === index) {
-            return;
-          }
-          selectedIndex = index;
-          renderValues();
-        });
-        item.addEventListener("click", () => {
-          selectedIndex = index;
-          if (isMulti) {
-            toggleMultiChoice(option);
-            return;
-          }
-          finishSingleChoice(option);
-        });
-        results.appendChild(item);
-      });
-      updateValuesPageInfo();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        goBackToValues();
+        return true;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitManualEntry();
+        return true;
+      }
+      return false;
     }
 
     function goBackToFields() {
       step = "fields";
+      manualEntryDraft = "";
+      manualEntryInput = null;
+      manualEntryError = null;
+      clearValueRowRefs();
       closeMultiConfirmation();
       clearPendingMultiSelection();
       hasEditedMultiSelection = false;
@@ -5798,7 +6086,7 @@ async function showCustomFieldPicker(runId, context) {
         event.preventDefault();
         if (valueChoices.length > 0) {
           selectedIndex = (selectedIndex + 1) % valueChoices.length;
-          renderValues();
+          syncValueRowSelectionState();
         }
         return;
       }
@@ -5806,7 +6094,7 @@ async function showCustomFieldPicker(runId, context) {
         event.preventDefault();
         if (valueChoices.length > 0) {
           selectedIndex = (selectedIndex - 1 + valueChoices.length) % valueChoices.length;
-          renderValues();
+          syncValueRowSelectionState();
         }
         return;
       }
@@ -5856,6 +6144,13 @@ async function showCustomFieldPicker(runId, context) {
             closeMultiConfirmation();
             return;
           }
+        }
+
+        if (step === "manual") {
+          if (handleManualEntryKey(event)) {
+            return;
+          }
+          return;
         }
 
         if (event.key === "Escape") {
