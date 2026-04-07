@@ -19,6 +19,14 @@ let activeShortcutEditor = null;
 let latestRenderedLogs = [];
 let gemUsersLoaded = false;
 
+async function loadOrgDefaultsForReset() {
+  const response = await sendRuntimeMessage({ type: "GET_ORG_DEFAULTS" });
+  if (!response?.ok) {
+    throw new Error(response?.message || "Could not load org defaults.");
+  }
+  return deepMerge(DEFAULT_SETTINGS, response.orgDefaults || {});
+}
+
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.style.color = isError ? "#a61d24" : "#196c2e";
@@ -451,10 +459,11 @@ async function saveSettings(event) {
   setStatus("Saved.");
 }
 
-function resetDefaults() {
+async function resetDefaults() {
   stopShortcutRecording();
-  writeInputs(DEFAULT_SETTINGS);
-  setStatus("Loaded defaults. Save to apply.");
+  const defaults = await loadOrgDefaultsForReset();
+  writeInputs(defaults);
+  setStatus("Loaded shipped defaults. Save to apply.");
 }
 
 function stopShortcutRecording() {
@@ -594,7 +603,9 @@ syncShortcutUiLabels();
 form.addEventListener("submit", (event) => {
   saveSettings(event).catch((error) => setStatus(error.message, true));
 });
-resetBtn.addEventListener("click", resetDefaults);
+resetBtn.addEventListener("click", () => {
+  resetDefaults().catch((error) => setStatus(error.message, true));
+});
 
 Promise.all([loadSettings(), refreshLogs()])
   .then(() => loadGemUsers({ quiet: true }))

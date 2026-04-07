@@ -219,6 +219,7 @@ async function getSettings() {
 function saveSettings(settings) {
   const normalized = normalizeSettings(settings);
   validateBackendBaseUrlOrThrow(normalized.backendBaseUrl);
+  normalized.localDevelopmentMode = isLocalhostBackendUrl(normalized.backendBaseUrl);
   setSettingsCache(normalized);
   return new Promise((resolve) => {
     chrome.storage.sync.set({ settings: normalized }, () => resolve());
@@ -332,12 +333,22 @@ function mergeSettingsWithOrgDefaults(settings, orgDefaults, storedSettings = {}
   }
 
   let changed = false;
+  const storedBackendBaseUrl = String(storedSettings.backendBaseUrl || "").trim();
   const hasStoredBackendBaseUrl =
     Object.prototype.hasOwnProperty.call(storedSettings, "backendBaseUrl") &&
-    String(storedSettings.backendBaseUrl || "").trim() !== "";
+    storedBackendBaseUrl !== "";
+  const shouldReplaceStoredBackendBaseUrl =
+    hasStoredBackendBaseUrl &&
+    (!isAllowedBackendBaseUrl(storedBackendBaseUrl) ||
+      (isLocalhostBackendUrl(storedBackendBaseUrl) && !Boolean(storedSettings.localDevelopmentMode)));
   const orgBackendBaseUrl = String(orgDefaults.backendBaseUrl || "").trim();
-  if (orgBackendBaseUrl && !hasStoredBackendBaseUrl && isLocalhostBackendUrl(next.backendBaseUrl)) {
+  if (
+    orgBackendBaseUrl &&
+    ((shouldReplaceStoredBackendBaseUrl && next.backendBaseUrl !== orgBackendBaseUrl) ||
+      (!hasStoredBackendBaseUrl && isLocalhostBackendUrl(next.backendBaseUrl)))
+  ) {
     next.backendBaseUrl = orgBackendBaseUrl;
+    next.localDevelopmentMode = false;
     changed = true;
   }
 
@@ -4002,6 +4013,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "GET_SETTINGS") {
     getSettings().then((settings) => sendResponse({ ok: true, settings }));
+    return true;
+  }
+
+  if (message.type === "GET_ORG_DEFAULTS") {
+    loadOrgDefaults()
+      .then((orgDefaults) => sendResponse({ ok: true, orgDefaults: orgDefaults || {} }))
+      .catch((error) => sendResponse({ ok: false, message: error.message || "Could not load org defaults." }));
     return true;
   }
 

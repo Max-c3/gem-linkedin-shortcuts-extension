@@ -121,7 +121,7 @@ const LINKEDIN_NATIVE_SHORTCUT_IDS = Object.freeze(
 );
 
 const ALLOWED_BACKEND_ORIGINS = Object.freeze([
-  "https://gem-linkedin-shortcuts-extension.vercel.app",
+  "https://project-ak83q.vercel.app",
   "http://localhost",
   "http://127.0.0.1",
   "https://localhost",

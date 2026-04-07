@@ -4,7 +4,7 @@ Use this when running the hosted backend on Vercel.
 
 ## Production URL
 
-- Default production URL in this repo: `https://gem-linkedin-shortcuts-extension.vercel.app`
+- Default production URL in this repo: `https://project-ak83q.vercel.app`
 - Public routes exposed by the backend:
   - `/api/*`
   - `/health`
@@ -41,8 +41,8 @@ If you intentionally use a different production domain, update all of these toge
 
 ## Verification
 
-1. Check `https://gem-linkedin-shortcuts-extension.vercel.app/health`.
-2. Check `https://gem-linkedin-shortcuts-extension.vercel.app/privacy`.
+1. Check `https://project-ak83q.vercel.app/health`.
+2. Check `https://project-ak83q.vercel.app/privacy`.
 3. Verify the extension can reach:
    - `/api/projects/list`
    - `/api/users/list`

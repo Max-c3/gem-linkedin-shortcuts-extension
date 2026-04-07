@@ -38,7 +38,7 @@ From a supported profile page, the extension can:
 
 This is the easiest path if you want users to click a link, install once, and use immediately:
 
-1. Deploy this repo to Vercel and use the production backend URL (default in this repo: `https://gem-linkedin-shortcuts-extension.vercel.app`).
+1. Deploy this repo to Vercel and use the production backend URL (default in this repo: `https://project-ak83q.vercel.app`).
 2. Configure backend secrets in deployment env vars (`GEM_API_KEY`, `ASHBY_API_KEY`, etc).
    - Leave `GEM_DEFAULT_USER_ID` and `GEM_DEFAULT_USER_EMAIL` empty for multi-user org setup.
    - Each user selects themselves in extension Options using the built-in "Load Users" picker.
@@ -52,7 +52,7 @@ This is the easiest path if you want users to click a link, install once, and us
    - optional defaults for project/sequence/custom field IDs
 4. Ensure `manifest.json` includes your backend origin in `host_permissions` before packaging if you change away from the default Vercel backend or localhost dev origins.
 5. Publish in Chrome Web Store as unlisted/private and share the install link.
-6. Use `https://gem-linkedin-shortcuts-extension.vercel.app/privacy` as Chrome Web Store privacy policy URL, unless you intentionally change the production backend domain.
+6. Use `https://project-ak83q.vercel.app/privacy` as Chrome Web Store privacy policy URL, unless you intentionally change the production backend domain.
 
 The extension now auto-applies `src/org-defaults.json` on install/startup, so users do not need to open options or use terminal.
 
@@ -60,7 +60,7 @@ The extension now auto-applies `src/org-defaults.json` on install/startup, so us
 
 The backend now targets Vercel production by default:
 
-- Production backend URL: `https://gem-linkedin-shortcuts-extension.vercel.app`
+- Production backend URL: `https://project-ak83q.vercel.app`
 - Stable public routes remain the same: `/api/*`, `/health`, and `/privacy`
 - Chrome Web Store builds should only allow the stable production URL, not Vercel preview URLs
 - On Vercel, backend file logs are best-effort and live under `/tmp`, so durable debugging should come from Vercel Function/Runtime Logs
@@ -76,8 +76,8 @@ Deployment checklist:
    - optional manual-install fallback: `BACKEND_SHARED_TOKEN`
 3. Deploy to production.
 4. Verify:
-   - `https://gem-linkedin-shortcuts-extension.vercel.app/health`
-   - `https://gem-linkedin-shortcuts-extension.vercel.app/privacy`
+   - `https://project-ak83q.vercel.app/health`
+   - `https://project-ak83q.vercel.app/privacy`
 5. Load the unpacked extension or package a release and confirm action flows hit the Vercel backend.
 
 For a fuller deployment checklist, see `docs/vercel-deployment.md`.

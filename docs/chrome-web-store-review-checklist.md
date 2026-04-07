@@ -4,11 +4,11 @@ Use this before uploading a new package.
 
 ## Backend
 
-1. Deploy the backend to the HTTPS origin used in `src/org-defaults.json` (default: `https://gem-linkedin-shortcuts-extension.vercel.app`), or update both `src/org-defaults.json` and `manifest.json` before packaging.
+1. Deploy the backend to the HTTPS origin used in `src/org-defaults.json` (default: `https://project-ak83q.vercel.app`), or update both `src/org-defaults.json` and `manifest.json` before packaging.
 2. Set `ALLOWED_EXTENSION_ORIGINS=chrome-extension://<published_extension_id>` on the backend for the published Chrome Web Store item.
 3. Leave `src/org-defaults.json` with an empty `backendSharedToken`.
 4. If `BACKEND_SHARED_TOKEN` was ever used in production or committed during development, rotate it before the next release.
-5. Confirm the privacy policy is reachable at `https://gem-linkedin-shortcuts-extension.vercel.app/privacy`, unless you intentionally changed the production backend domain.
+5. Confirm the privacy policy is reachable at `https://project-ak83q.vercel.app/privacy`, unless you intentionally changed the production backend domain.
 6. Do not point the packaged extension at a Vercel preview deployment.
 
 ## Extension package
