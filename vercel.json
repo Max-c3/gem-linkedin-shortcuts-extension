@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/[[...route]].js": {
+    "api/router.js": {
       "maxDuration": 300
     }
   },
@@ -13,6 +13,10 @@
     {
       "source": "/privacy",
       "destination": "/api/privacy"
+    },
+    {
+      "source": "/api/:route*",
+      "destination": "/api/router?route=:route*"
     }
   ]
 }
