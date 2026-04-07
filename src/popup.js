@@ -95,6 +95,12 @@ function formatActionResultStatus(result) {
       isError: true
     };
   }
+  if (result.suppressed) {
+    return {
+      message: String(result.message || "").trim() || "Another Gem action is already open in this tab.",
+      isError: false
+    };
+  }
   const message = String(result.message || "").trim() || (result.ok ? "Action completed." : "Action failed.");
   const debugSummary = String(result.debugSummary || "").trim();
   if (!debugSummary) {

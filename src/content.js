@@ -68,6 +68,21 @@ const GEM_ACTION_MENU_OPTIONS = [
 ];
 const GEM_ACTION_PEOPLE_SEARCH_DEBOUNCE_MS = 140;
 const GEM_ACTION_PEOPLE_SEARCH_LIMIT = 20;
+const ACTION_LOCK_ATTR = "data-gls-action-lock";
+const ACTION_LOCK_OWNER_ATTR = "data-gls-action-lock-owner";
+const ACTION_LOCK_AT_ATTR = "data-gls-action-lock-at";
+const ACTION_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
+const SHARED_ACTION_OVERLAY_IDS = Object.freeze([
+  "gem-custom-field-picker-overlay",
+  "gem-reminder-picker-overlay",
+  "gem-email-picker-overlay",
+  "gem-sequence-picker-overlay",
+  "gem-actions-overlay",
+  "gem-project-picker-overlay",
+  "gem-ashby-job-picker-overlay",
+  "gem-candidate-note-picker-overlay"
+]);
+const CONTENT_RUNTIME_INSTANCE_ID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const customFieldMemoryCache = new Map();
 const customFieldWarmPromises = new Map();
 const candidateEmailMemoryCache = new Map();
@@ -200,6 +215,47 @@ function debugContentRuntime(eventName, details = {}) {
   } catch (_error) {
     // Ignore console failures.
   }
+}
+
+function hasSharedActionOverlayOnPage() {
+  return SHARED_ACTION_OVERLAY_IDS.some((id) => Boolean(document.getElementById(id)));
+}
+
+function tryAcquireActionLock(actionId, runId = "") {
+  const root = document.documentElement;
+  if (!root) {
+    return true;
+  }
+  const activeActionId = String(root.getAttribute(ACTION_LOCK_ATTR) || "").trim();
+  const lockedAtMs = Number(root.getAttribute(ACTION_LOCK_AT_ATTR)) || 0;
+  const lockIsFresh = lockedAtMs > 0 && Date.now() - lockedAtMs < ACTION_LOCK_TIMEOUT_MS;
+  if ((activeActionId && lockIsFresh) || hasSharedActionOverlayOnPage()) {
+    return false;
+  }
+  root.setAttribute(ACTION_LOCK_ATTR, String(actionId || "").trim());
+  root.setAttribute(ACTION_LOCK_OWNER_ATTR, CONTENT_RUNTIME_INSTANCE_ID);
+  root.setAttribute(ACTION_LOCK_AT_ATTR, String(Date.now()));
+  if (runId) {
+    root.setAttribute("data-gls-action-lock-run-id", String(runId || "").trim());
+  } else {
+    root.removeAttribute("data-gls-action-lock-run-id");
+  }
+  return true;
+}
+
+function releaseActionLock() {
+  const root = document.documentElement;
+  if (!root) {
+    return;
+  }
+  const owner = String(root.getAttribute(ACTION_LOCK_OWNER_ATTR) || "").trim();
+  if (owner && owner !== CONTENT_RUNTIME_INSTANCE_ID) {
+    return;
+  }
+  root.removeAttribute(ACTION_LOCK_ATTR);
+  root.removeAttribute(ACTION_LOCK_OWNER_ATTR);
+  root.removeAttribute(ACTION_LOCK_AT_ATTR);
+  root.removeAttribute("data-gls-action-lock-run-id");
 }
 
 function isContextInvalidatedError(message) {
@@ -10026,6 +10082,15 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
   const initialContext = getProfileContext();
   const initialLink = getContextLink(initialContext);
   const contextSignalSummary = describeContextSignals(initialContext);
+  if (!tryAcquireActionLock(actionId, effectiveRunId)) {
+    return {
+      ok: false,
+      suppressed: true,
+      message: "Another Gem action is already open in this tab.",
+      runId: effectiveRunId,
+      debugSummary: contextSignalSummary
+    };
+  }
   try {
     const settings = cachedSettings || (await refreshSettings());
     if (!settings.enabled) {
@@ -10291,6 +10356,8 @@ async function handleAction(actionId, source = "keyboard", runId = "") {
       runId: effectiveRunId,
       debugSummary: contextSignalSummary
     };
+  } finally {
+    releaseActionLock();
   }
 }
 
